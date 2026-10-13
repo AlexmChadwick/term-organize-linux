@@ -1,0 +1,2901 @@
+//! GNOME window: sidebar of areas, a term picker, and resizable panes.
+
+use crate::{load_index, open_target};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
+use termorganize_core::banner::BannerClient;
+use termorganize_core::degree_audit::{AuditStatus, DegreeAudit, DegreeCourseAttributes};
+use termorganize_core::degree_format;
+use termorganize_core::index::CatalogIndex;
+use termorganize_core::legal;
+use termorganize_core::links::AppLink;
+use termorganize_core::model::*;
+use termorganize_core::nl;
+use termorganize_core::planlogic::{self, PrereqStatus};
+use termorganize_core::professors;
+use termorganize_core::program_parser;
+use termorganize_core::rooms;
+use termorganize_core::schedule::{self, GeneratedSchedule, ScheduleCourseInput};
+use termorganize_core::search::{self, SearchFilters, SearchQuery, SearchSort};
+use termorganize_core::store;
+use termorganize_core::watchlist;
+use termorganize_core::CourseEquivalences;
+use uuid::Uuid;
+
+use adw::prelude::*;
+use gtk::{gio, glib};
+
+const AREAS: &[(&str, &str)] = &[
+    ("system-search-symbolic", "Search"),
+    ("view-list-symbolic", "Subjects"),
+    ("starred-symbolic", "Saved"),
+    ("avatar-default-symbolic", "Professors"),
+    ("preferences-desktop-screensaver-symbolic", "Free Rooms"),
+    ("x-office-calendar-symbolic", "Schedules"),
+    ("document-edit-symbolic", "Degree Plans"),
+    ("appointment-soon-symbolic", "Watchlist"),
+];
+
+struct State {
+    index: CatalogIndex,
+    data: UserData,
+    area: i32,
+    query: String,
+    filters: SearchFilters,
+    sort: SearchSort,
+    course: Option<CourseKey>,
+    professor: Option<String>,
+    subject: Option<String>,
+    plan: Option<Uuid>,
+    degree: Option<Uuid>,
+    generated: Vec<GeneratedSchedule>,
+    picked: usize,
+    nl: String,
+    room_day: i32,
+    room_query: String,
+    room_date: String,
+    requirements: HashMap<Uuid, ProgramRequirements>,
+    catalog_path: String,
+    live_seats: HashMap<String, (i32, i32, i32)>,
+}
+
+struct Shell {
+    state: Rc<RefCell<State>>,
+    content: gtk::Box,
+    toast: adw::ToastOverlay,
+    window: adw::ApplicationWindow,
+    split: adw::NavigationSplitView,
+    title: adw::WindowTitle,
+    sidebar: gtk::ListBox,
+    guard: Cell<bool>,
+}
+
+pub fn run(open: Option<String>, smoke: bool) {
+    let app = adw::Application::builder().application_id("org.termorganize.TermOrganize").build();
+    let open = Rc::new(open);
+    app.connect_startup(install_actions);
+    app.connect_activate(move |app| {
+        if !app.windows().is_empty() {
+            app.windows()[0].present();
+            return;
+        }
+        present(app, (*open).clone(), smoke);
+    });
+    // GTK would otherwise treat --smoke and other flags as its own options.
+    app.run_with_args(&["termorganize"]);
+}
+
+fn install_actions(app: &adw::Application) {
+    let shortcuts = [
+        ("new-schedule", &["<primary>n"][..]),
+        ("new-degree", &["<primary><shift>n"]),
+        ("import-degree", &["<primary>o"]),
+        ("export", &["<primary>e"]),
+        ("reload", &["<primary>r"]),
+        ("focus-search", &["<primary>f"]),
+        ("settings", &["<primary>comma"]),
+        ("toggle-sidebar", &["<primary><alt>0", "F9"]),
+        ("area0", &["<primary>1"]),
+        ("area1", &["<primary>2"]),
+        ("area2", &["<primary>3"]),
+        ("area3", &["<primary>4"]),
+        ("area4", &["<primary>5"]),
+        ("area5", &["<primary>6"]),
+        ("area6", &["<primary>7"]),
+        ("area7", &["<primary>8"]),
+        ("copy", &["<primary>c"]),
+        ("print", &["<primary>p"]),
+        ("quit", &["<primary>q"]),
+    ];
+    for (name, accels) in shortcuts {
+        app.set_accels_for_action(&format!("win.{name}"), accels);
+    }
+    let menu = gio::Menu::new();
+    let file = gio::Menu::new();
+    file.append(Some("New Schedule"), Some("win.new-schedule"));
+    file.append(Some("New Degree Plan"), Some("win.new-degree"));
+    file.append(Some("Import Degree Plan…"), Some("win.import-degree"));
+    file.append(Some("Export…"), Some("win.export"));
+    file.append(Some("Reload"), Some("win.reload"));
+    file.append(Some("Print…"), Some("win.print"));
+    file.append(Some("Quit"), Some("win.quit"));
+    menu.append_submenu(Some("_File"), &file);
+    let view = gio::Menu::new();
+    for (i, (_, name)) in AREAS.iter().enumerate() {
+        view.append(Some(name), Some(&format!("win.area{i}")));
+    }
+    view.append(Some("Show or Hide Sidebar"), Some("win.toggle-sidebar"));
+    menu.append_submenu(Some("_View"), &view);
+    let schedule = gio::Menu::new();
+    schedule.append(Some("Generate"), Some("win.generate"));
+    schedule.append(Some("Copy CRNs"), Some("win.copy"));
+    schedule.append(Some("Export Calendar"), Some("win.export-ics"));
+    schedule.append(Some("Export Week Image"), Some("win.export-png"));
+    menu.append_submenu(Some("_Schedule"), &schedule);
+    let degree = gio::Menu::new();
+    degree.append(Some("Add Semester"), Some("win.add-semester"));
+    degree.append(Some("Autofill from Catalog"), Some("win.autofill"));
+    degree.append(Some("Export PDF"), Some("win.export-pdf"));
+    menu.append_submenu(Some("_Degree Plan"), &degree);
+    let app_menu = gio::Menu::new();
+    app_menu.append(Some("Settings"), Some("win.settings"));
+    app_menu.append(Some("About Term Organize"), Some("win.about"));
+    menu.append_submenu(Some("_Help"), &app_menu);
+    app.set_menubar(Some(&menu));
+}
+
+fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
+    let Some(index) = load_index() else {
+        let window = adw::ApplicationWindow::builder().application(app).title("Term Organize").default_width(520).default_height(240).build();
+        let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-202710.catalog, or run Term Organize from the repository."));
+        label.set_wrap(true);
+        label.set_margin_top(24);
+        label.set_margin_bottom(24);
+        label.set_margin_start(24);
+        label.set_margin_end(24);
+        window.set_content(Some(&label));
+        window.present();
+        return;
+    };
+    let mut data = store::load();
+    if data.preferences.selected_term_code.is_none() {
+        data.preferences.selected_term_code = Some(index.catalog.term.code.clone());
+    }
+    pull_folder(&mut data);
+    apply_scheme(&data.preferences);
+    let term_name = index.catalog.term.name();
+    let state = Rc::new(RefCell::new(State {
+        index,
+        data,
+        area: 0,
+        query: String::new(),
+        filters: SearchFilters::default(),
+        sort: SearchSort::Relevance,
+        course: None,
+        professor: None,
+        subject: None,
+        plan: None,
+        degree: None,
+        generated: vec![],
+        picked: 0,
+        nl: String::new(),
+        room_day: 3,
+        room_query: String::new(),
+        room_date: "2026-09-16".into(),
+        requirements: HashMap::new(),
+        catalog_path: "undergraduate/computer-information-science/computer-science/computer-science-bs/".into(),
+        live_seats: HashMap::new(),
+    }));
+    load_saved_requirements(&state);
+
+    let sidebar = gtk::ListBox::new();
+    sidebar.add_css_class("navigation-sidebar");
+    sidebar.set_selection_mode(gtk::SelectionMode::Single);
+    for (icon, name) in AREAS {
+        sidebar.append(&sidebar_row(icon, name));
+    }
+    let sidebar_scroll = gtk::ScrolledWindow::builder().child(&sidebar).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let side_page = adw::NavigationPage::builder().title("Term Organize").child(&sidebar_scroll).build();
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.set_hexpand(true);
+    content.set_vexpand(true);
+    let content_page = adw::NavigationPage::builder().title("Search").child(&content).build();
+
+    let split = adw::NavigationSplitView::new();
+    split.set_sidebar(Some(&side_page));
+    split.set_content(Some(&content_page));
+    split.set_min_sidebar_width(220.0);
+    split.set_max_sidebar_width(320.0);
+
+    let title = adw::WindowTitle::new("Search", "Unofficial · not affiliated with Northeastern or Sandbox");
+    let header = adw::HeaderBar::new();
+    header.set_title_widget(Some(&title));
+    let term = gtk::DropDown::from_strings(&[term_name.as_str()]);
+    term.set_tooltip_text(Some("Term"));
+    header.pack_end(&term);
+    let menu_button = gtk::MenuButton::builder().icon_name("open-menu-symbolic").build();
+    menu_button.set_menu_model(Some(&menu_model()));
+    header.pack_end(&menu_button);
+
+    let toast = adw::ToastOverlay::new();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&header);
+    column.append(&split);
+    toast.set_child(Some(&column));
+
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("Term Organize")
+        .default_width(1180)
+        .default_height(760)
+        .content(&toast)
+        .show_menubar(true)
+        .build();
+    window.add_css_class("termorganize");
+
+    let shell = Rc::new(RefCell::new(Shell {
+        state,
+        content,
+        toast: toast.clone(),
+        window: window.clone(),
+        split: split.clone(),
+        title,
+        sidebar: sidebar.clone(),
+        guard: Cell::new(false),
+    }));
+
+    sidebar.connect_row_selected({
+        let shell = shell.clone();
+        move |_, row| {
+            let Some(row) = row else { return };
+            if shell.borrow().guard.get() {
+                return;
+            }
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            {
+                let shell = shell.borrow();
+                let mut state = shell.state.borrow_mut();
+                state.area = index;
+                state.course = None;
+                state.professor = None;
+            }
+            refresh(&shell);
+        }
+    });
+
+    let split_for_size = split.clone();
+    window.connect_notify_local(Some("default-width"), move |window, _| {
+        let width = window.default_width();
+        split_for_size.set_collapsed(width < 860);
+    });
+
+    wire_actions(&shell);
+    if let Some(row) = sidebar.row_at_index(0) {
+        sidebar.select_row(Some(&row));
+    }
+    if let Some(raw) = open.as_deref() {
+        if let Some(link) = open_target(raw) {
+            apply_link(&shell, link);
+        }
+    }
+    if !shell.borrow().state.borrow().data.preferences.has_completed_onboarding {
+        greet(&shell);
+    }
+    install_drop(&shell);
+    arm_seat_timer(&shell);
+    if !smoke && shell.borrow().state.borrow().data.preferences.background_refresh_enabled {
+        request_background();
+    }
+    window.present();
+    if smoke {
+        let app = app.clone();
+        glib::timeout_add_local(Duration::from_millis(900), move || {
+            app.quit();
+            glib::ControlFlow::Break
+        });
+    }
+}
+
+fn menu_model() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Settings"), Some("win.settings"));
+    menu.append(Some("About"), Some("win.about"));
+    menu
+}
+
+fn wire_actions(shell: &Rc<RefCell<Shell>>) {
+    let window = shell.borrow().window.clone();
+    let add = |name: &str, shell: &Rc<RefCell<Shell>>, f: fn(&Rc<RefCell<Shell>>)| {
+        let action = gio::SimpleAction::new(name, None);
+        let shell = shell.clone();
+        action.connect_activate(move |_, _| f(&shell));
+        window.add_action(&action);
+    };
+    add("new-schedule", shell, new_schedule);
+    add("new-degree", shell, new_degree);
+    add("import-degree", shell, import_degree);
+    add("export", shell, export_user);
+    add("reload", shell, refresh);
+    add("focus-search", shell, |s| {
+        select_area(s, 0);
+    });
+    add("settings", shell, open_settings);
+    add("about", shell, open_about);
+    add("toggle-sidebar", shell, |s| {
+        let split = s.borrow().split.clone();
+        split.set_show_content(!split.shows_content());
+        split.set_collapsed(!split.is_collapsed());
+    });
+    add("generate", shell, generate);
+    add("copy", shell, copy_crns);
+    add("export-ics", shell, export_ics);
+    add("export-png", shell, export_png);
+    add("export-pdf", shell, export_pdf);
+    add("print", shell, print_view);
+    add("add-semester", shell, add_semester);
+    add("autofill", shell, autofill_degree);
+    add("quit", shell, |s| s.borrow().window.close());
+    for i in 0..8 {
+        let action = gio::SimpleAction::new(&format!("area{i}"), None);
+        let shell = shell.clone();
+        action.connect_activate(move |_, _| select_area(&shell, i));
+        window.add_action(&action);
+    }
+}
+
+fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
+    let list = shell.borrow().sidebar.clone();
+    if let Some(row) = list.row_at_index(index) {
+        list.select_row(Some(&row));
+    }
+}
+
+fn refresh(shell: &Rc<RefCell<Shell>>) {
+    let page = build_page(shell);
+    let shell_ref = shell.borrow();
+    while let Some(child) = shell_ref.content.first_child() {
+        shell_ref.content.remove(&child);
+    }
+    shell_ref.content.append(&page);
+    let state = shell_ref.state.borrow();
+    let (heading, sub) = if let Some(key) = &state.course {
+        (key.to_string(), state.index.course(key).map(|c| c.title.clone()).unwrap_or_default())
+    } else if let Some(name) = &state.professor {
+        ("Professors".into(), name.clone())
+    } else {
+        let name = AREAS.get(state.area as usize).map(|(_, n)| *n).unwrap_or("Term Organize");
+        let next = up_next_summary(&state);
+        let sub = if next.is_empty() {
+            format!("{} · unofficial", state.index.catalog.term.name())
+        } else {
+            format!("{} · {next}", state.index.catalog.term.name())
+        };
+        (name.into(), sub)
+    };
+    shell_ref.title.set_title(&heading);
+    shell_ref.title.set_subtitle(&sub);
+    adapt(&shell_ref.window, &shell_ref.split);
+}
+
+fn adapt(window: &adw::ApplicationWindow, split: &adw::NavigationSplitView) {
+    if window.default_width() > 0 {
+        split.set_collapsed(window.default_width() < 860);
+    }
+}
+
+fn build_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let area = shell.borrow().state.borrow().area;
+    let course = shell.borrow().state.borrow().course.clone();
+    let professor = shell.borrow().state.borrow().professor.clone();
+    if let Some(key) = course {
+        return course_page(shell, &key);
+    }
+    if professor.is_some() && area == 3 {
+        return professor_page(shell);
+    }
+    match area {
+        0 => search_page(shell),
+        1 => subjects_page(shell),
+        2 => saved_page(shell),
+        3 => professors_page(shell),
+        4 => rooms_page(shell),
+        5 => schedules_page(shell),
+        6 => degrees_page(shell),
+        7 => watch_page(shell),
+        _ => search_page(shell),
+    }
+}
+
+fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let (query, filters, sort, hits) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let response = search::search(&SearchQuery { text: state.query.clone(), filters: state.filters.clone(), sort: state.sort }, &state.index);
+        let total = response.results.len();
+        let rows: Vec<(CourseKey, String, String, String)> = response
+            .results
+            .iter()
+            .take(250)
+            .map(|hit| {
+                let open = state.index.stats_for(&hit.course.key());
+                (hit.course.key(), hit.course.title.clone(), hit.course.credits_label(), format!("{} open", open.open_section_count))
+            })
+            .collect();
+        (state.query.clone(), state.filters.clone(), state.sort, (rows, total, response.crn_match.map(|s| s.crn)))
+    };
+    let (rows, total, crn) = hits;
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+    let entry = gtk::SearchEntry::builder().placeholder_text("Course, professor, CRN, or shorthand like orgo").text(&query).build();
+    entry.connect_search_changed({
+        let shell = shell.clone();
+        move |entry| {
+            shell.borrow().state.borrow_mut().query = entry.text().to_string();
+            refresh(&shell);
+        }
+    });
+    root.append(&entry);
+    let filters_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let open_only = gtk::CheckButton::with_label("Open seats");
+    open_only.set_active(filters.open_seats_only);
+    open_only.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.open_seats_only = b.is_active();
+            refresh(&shell);
+        }
+    });
+    let honors = gtk::CheckButton::with_label("Honors");
+    honors.set_active(filters.honors_only);
+    honors.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.honors_only = b.is_active();
+            refresh(&shell);
+        }
+    });
+    let subject = gtk::Entry::builder().placeholder_text("Subject").text(filters.subjects.iter().next().cloned().unwrap_or_default()).width_chars(8).build();
+    subject.connect_changed({
+        let shell = shell.clone();
+        move |entry| {
+            let text = entry.text().trim().to_ascii_uppercase();
+            let mut filters = {
+                let shell_ref = shell.borrow();
+                let state = shell_ref.state.borrow();
+                state.filters.clone()
+            };
+            filters.subjects.clear();
+            if !text.is_empty() {
+                filters.subjects.insert(text);
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let sort_box = gtk::DropDown::from_strings(&["Relevance", "Course number", "Title", "Open seats"]);
+    sort_box.set_selected(match sort {
+        SearchSort::Relevance => 0,
+        SearchSort::CourseNumber => 1,
+        SearchSort::Title => 2,
+        SearchSort::OpenSeats => 3,
+    });
+    sort_box.connect_selected_notify({
+        let shell = shell.clone();
+        move |dd| {
+            let sort = match dd.selected() {
+                1 => SearchSort::CourseNumber,
+                2 => SearchSort::Title,
+                3 => SearchSort::OpenSeats,
+                _ => SearchSort::Relevance,
+            };
+            shell.borrow().state.borrow_mut().sort = sort;
+            refresh(&shell);
+        }
+    });
+    filters_box.append(&open_only);
+    filters_box.append(&honors);
+    filters_box.append(&subject);
+    filters_box.append(&sort_box);
+    root.append(&filters_box);
+    root.append(&search_filter_row(shell, &filters));
+    let mut note = format!("Showing {} of {total}", rows.len());
+    if let Some(crn) = crn {
+        note = format!("CRN {crn}. {note}");
+    }
+    if filters.active_count() > 0 {
+        note = format!("{note} · {} filters", filters.active_count());
+    }
+    root.append(&dim_label(&note));
+    root.append(&course_list(shell, &rows));
+    root.upcast()
+}
+
+fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, String)]) -> gtk::Widget {
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    for (key, title, credits, seats) in rows {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let code = gtk::Label::new(Some(&key.to_string()));
+        code.add_css_class("heading");
+        code.set_width_chars(12);
+        code.set_xalign(0.0);
+        let name = gtk::Label::new(Some(title));
+        name.set_hexpand(true);
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.append(&code);
+        row.append(&name);
+        row.append(&dim_label(credits));
+        row.append(&dim_label(seats));
+        let item = gtk::ListBoxRow::new();
+        item.set_child(Some(&row));
+        let shell = shell.clone();
+        let key = key.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, n, _, _| {
+            if n == 1 {
+                shell.borrow().state.borrow_mut().course = Some(key.clone());
+                remember_recent(&shell, &key);
+                refresh(&shell);
+            }
+        });
+        item.add_controller(click);
+        list.append(&item);
+    }
+    if rows.is_empty() {
+        list.append(&gtk::Label::builder().label("Nothing matches. Try a course code, a shorter word, or clear a filter.").margin_top(24).margin_bottom(24).build());
+    }
+    gtk::ScrolledWindow::builder().child(&list).vexpand(true).build().upcast()
+}
+
+fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
+    let (course, sections) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        (state.index.course(key).cloned(), state.index.sections_for(key))
+    };
+    let Some(course) = course else {
+        return gtk::Label::new(Some("That course isn’t in this term.")).upcast();
+    };
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_margin_top(12);
+    root.set_margin_start(16);
+    root.set_margin_end(16);
+    root.set_margin_bottom(12);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let back = gtk::Button::with_label("Back");
+    back.connect_clicked({
+        let shell = shell.clone();
+        move |_| {
+            shell.borrow().state.borrow_mut().course = None;
+            refresh(&shell);
+        }
+    });
+    bar.append(&back);
+    let save = gtk::Button::with_label("Save");
+    save.connect_clicked({
+        let shell = shell.clone();
+        let key = key.clone();
+        move |_| save_course(&shell, &key)
+    });
+    let watch = gtk::Button::with_label("Watch a section");
+    watch.set_sensitive(false);
+    let refresh_seats = gtk::Button::with_label("Refresh seats");
+    refresh_seats.connect_clicked({
+        let shell = shell.clone();
+        let key = key.clone();
+        move |_| refresh_live_seats(&shell, &key)
+    });
+    let add = gtk::Button::with_label("Add to schedule");
+    add.connect_clicked({
+        let shell = shell.clone();
+        let key = key.clone();
+        move |_| add_course_to_plan(&shell, &key)
+    });
+    bar.append(&save);
+    bar.append(&add);
+    bar.append(&refresh_seats);
+    bar.append(&watch);
+    root.append(&bar);
+    let heading = gtk::Label::new(Some(&format!("{}  {}", course.code(), course.title)));
+    heading.add_css_class("title-1");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    root.append(&heading);
+    root.append(&dim_label(&format!("{} · {}", course.credits_label(), course.nupaths().iter().map(|p| p.short()).collect::<Vec<_>>().join(" "))));
+    if !course.description.is_empty() {
+        let body = gtk::Label::new(Some(&course.description));
+        body.set_wrap(true);
+        body.set_xalign(0.0);
+        body.set_selectable(true);
+        root.append(&body);
+    }
+    if let Some(prereq) = &course.prereqs {
+        root.append(&heading_label("Prerequisites"));
+        root.append(&selectable(&prereq.summary()));
+    }
+    if let Some(coreq) = &course.coreqs {
+        root.append(&heading_label("Corequisites"));
+        root.append(&selectable(&coreq.summary()));
+    }
+    if !course.postreqs.is_empty() {
+        root.append(&heading_label("Leads to"));
+        root.append(&selectable(&course.postreqs.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")));
+    }
+    root.append(&heading_label(&format!("{} sections", sections.len())));
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    for section in &sections {
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        top.append(&gtk::Label::new(Some(&format!("CRN {} · {}", section.crn, section.section_number))));
+        let (seats_n, wait_n) = shell
+            .borrow()
+            .state
+            .borrow()
+            .live_seats
+            .get(&section.crn)
+            .copied()
+            .map(|(s, w, _)| (s, w))
+            .unwrap_or((section.seats_remaining, section.waitlist_remaining));
+        let seats = gtk::Label::new(Some(&format!("{seats_n} seats · waitlist {wait_n}")));
+        seats.set_hexpand(true);
+        seats.set_xalign(1.0);
+        top.append(&seats);
+        row.append(&top);
+        row.append(&dim_label(&format!("{} · {} · {}", section.schedule_summary(), section.instructor_label(), section.campus)));
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let copy = gtk::Button::with_label("Copy CRN");
+        let crn = section.crn.clone();
+        let shell_copy = shell.clone();
+        copy.connect_clicked(move |_| {
+            shell_copy.borrow().window.clipboard().set_text(&crn);
+            toast(&shell_copy, "CRN copied");
+        });
+        let watch_button = gtk::Button::with_label("Watch");
+        let shell_watch = shell.clone();
+        let section_watch = section.clone();
+        let course_title = course.title.clone();
+        watch_button.connect_clicked(move |_| watch_section(&shell_watch, &section_watch, &course_title));
+        buttons.append(&copy);
+        buttons.append(&watch_button);
+        row.append(&buttons);
+        list.append(&row);
+    }
+    let scroll = gtk::ScrolledWindow::builder().child(&list).vexpand(true).build();
+    root.append(&scroll);
+    root.upcast()
+}
+
+fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let (subjects, selected, courses) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let subjects: Vec<(String, String)> = state.index.active_subjects.iter().map(|s| (s.code.clone(), s.name.clone())).collect();
+        let selected = state.subject.clone().or_else(|| subjects.first().map(|(c, _)| c.clone()));
+        let courses = if let Some(code) = &selected {
+            state.index.courses.iter().filter(|c| &c.subject == code).map(|c| (c.key(), c.title.clone(), c.credits_label(), String::new())).take(400).collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        (subjects, selected, courses)
+    };
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_position(280);
+    let list = gtk::ListBox::new();
+    list.add_css_class("navigation-sidebar");
+    for (code, name) in &subjects {
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        row.set_margin_top(6);
+        row.set_margin_bottom(6);
+        row.set_margin_start(10);
+        let code_label = gtk::Label::new(Some(code));
+        code_label.set_xalign(0.0);
+        code_label.add_css_class("heading");
+        let name_label = dim_label(name);
+        name_label.set_xalign(0.0);
+        row.append(&code_label);
+        row.append(&name_label);
+        let item = gtk::ListBoxRow::new();
+        item.set_child(Some(&row));
+        list.append(&item);
+    }
+    if let Some(selected) = &selected {
+        if let Some(i) = subjects.iter().position(|(c, _)| c == selected) {
+            if let Some(row) = list.row_at_index(i as i32) {
+                list.select_row(Some(&row));
+            }
+        }
+    }
+    list.connect_row_selected({
+        let shell = shell.clone();
+        let subjects = subjects.clone();
+        move |_, row| {
+            let Some(row) = row else { return };
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            if let Some((code, _)) = subjects.get(index as usize) {
+                let current = shell.borrow().state.borrow().subject.clone();
+                if current.as_deref() == Some(code.as_str()) {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().subject = Some(code.clone());
+                refresh(&shell);
+            }
+        }
+    });
+    paned.set_start_child(Some(&gtk::ScrolledWindow::builder().child(&list).build()));
+    paned.set_end_child(Some(&course_list(shell, &courses)));
+    paned.upcast()
+}
+
+fn saved_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let rows = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let term = state.index.catalog.term.code.clone();
+        state
+            .data
+            .saved
+            .iter()
+            .filter(|s| s.term_code == term)
+            .filter_map(|s| state.index.course(&s.key).map(|c| (c.key(), c.title.clone(), c.credits_label(), "Saved".into())))
+            .collect::<Vec<_>>()
+    };
+    let root = page_column("Saved courses", "Courses you starred in this term. Delete removes the selection from the list below.");
+    if rows.is_empty() {
+        root.append(&dim_label("Nothing saved yet. Open a course and choose Save."));
+    }
+    root.append(&course_list(shell, &rows));
+    root.upcast()
+}
+
+fn professors_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let (query, people) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let q = state.query.to_ascii_lowercase();
+        let people: Vec<(String, String, usize)> = state
+            .index
+            .instructors
+            .iter()
+            .filter(|i| q.is_empty() || i.display_name.to_ascii_lowercase().contains(&q) || i.name.to_ascii_lowercase().contains(&q))
+            .take(200)
+            .map(|i| (i.name.clone(), i.display_name.clone(), i.course_keys.len()))
+            .collect();
+        (state.query.clone(), people)
+    };
+    let root = page_column("Professors", "Everyone teaching a section this term.");
+    let entry = gtk::SearchEntry::builder().placeholder_text("Name").text(&query).build();
+    entry.connect_search_changed({
+        let shell = shell.clone();
+        move |entry| {
+            shell.borrow().state.borrow_mut().query = entry.text().to_string();
+            refresh(&shell);
+        }
+    });
+    root.append(&entry);
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    for (name, display, count) in people {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let label = gtk::Label::new(Some(&display));
+        label.set_hexpand(true);
+        label.set_xalign(0.0);
+        row.append(&label);
+        row.append(&dim_label(&format!("{count} courses")));
+        let item = gtk::ListBoxRow::new();
+        item.set_child(Some(&row));
+        let shell_activate = shell.clone();
+        let shell_click = shell.clone();
+        let name_activate = name.clone();
+        let name_click = name;
+        item.connect_activate(move |_| {
+            shell_activate.borrow().state.borrow_mut().professor = Some(name_activate.clone());
+            refresh(&shell_activate);
+        });
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            shell_click.borrow().state.borrow_mut().professor = Some(name_click.clone());
+            refresh(&shell_click);
+        });
+        item.add_controller(click);
+        list.append(&item);
+    }
+    root.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    root.upcast()
+}
+
+fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let name = shell.borrow().state.borrow().professor.clone().unwrap_or_default();
+    let page = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        professors::page(&state.index, &name)
+    };
+    let root = page_column("Professor", &name);
+    let back = gtk::Button::with_label("All professors");
+    back.connect_clicked({
+        let shell = shell.clone();
+        move |_| {
+            shell.borrow().state.borrow_mut().professor = None;
+            refresh(&shell);
+        }
+    });
+    root.append(&back);
+    let Some(page) = page else {
+        root.append(&dim_label("No sections under that name."));
+        return root.upcast();
+    };
+    root.append(&heading_label(&page.instructor.display_name));
+    for course in &page.courses {
+        root.append(&heading_label(&format!("{} · {}", course.key, course.title)));
+        for section in &course.sections {
+            root.append(&selectable(&format!("CRN {} · {} · {}", section.crn, section.schedule_summary(), section.seats_label())));
+        }
+    }
+    gtk::ScrolledWindow::builder().child(&root).build().upcast()
+}
+
+fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let (day, query, date, lines) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let rooms = rooms::search_rooms(&state.index.buildings, &state.room_query);
+        let mut lines = Vec::new();
+        for room in rooms.into_iter().take(80) {
+            let free = rooms::stretches(&room.bookings, state.room_day, &state.room_date, 8 * 60, 21 * 60);
+            if free.is_empty() {
+                continue;
+            }
+            let spans = free.iter().map(|s| range_label(s.start, s.end)).collect::<Vec<_>>().join(", ");
+            lines.push(format!("{}  {spans}", room.label()));
+        }
+        (state.room_day, state.room_query.clone(), state.room_date.clone(), lines)
+    };
+    let root = page_column("Free rooms", "Gaps between classes in the bundled term. Pick a day and part of a building code.");
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let days = gtk::DropDown::from_strings(&["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
+    days.set_selected(day as u32);
+    days.connect_selected_notify({
+        let shell = shell.clone();
+        move |dd| {
+            shell.borrow().state.borrow_mut().room_day = dd.selected() as i32;
+            refresh(&shell);
+        }
+    });
+    let date_entry = gtk::Entry::builder().text(&date).width_chars(12).tooltip_text("Date, YYYY-MM-DD").build();
+    date_entry.connect_changed({
+        let shell = shell.clone();
+        move |entry| {
+            shell.borrow().state.borrow_mut().room_date = entry.text().to_string();
+            refresh(&shell);
+        }
+    });
+    let search = gtk::SearchEntry::builder().placeholder_text("Building, like WVH").text(&query).build();
+    search.connect_search_changed({
+        let shell = shell.clone();
+        move |entry| {
+            shell.borrow().state.borrow_mut().room_query = entry.text().to_string();
+            refresh(&shell);
+        }
+    });
+    controls.append(&days);
+    controls.append(&date_entry);
+    controls.append(&search);
+    root.append(&controls);
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    if lines.is_empty() {
+        list.append(&gtk::Label::builder().label("No open stretches for that day. Try another building or a date inside the term.").margin_top(18).margin_bottom(18).build());
+    }
+    for line in lines {
+        let label = gtk::Label::new(Some(&line));
+        label.set_xalign(0.0);
+        label.set_margin_top(6);
+        label.set_margin_bottom(6);
+        label.set_margin_start(12);
+        list.append(&label);
+    }
+    root.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    root.upcast()
+}
+
+fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let snapshot = schedule_snapshot(shell);
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_position(260);
+    let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    side.set_margin_top(8);
+    side.set_margin_start(8);
+    side.set_margin_end(8);
+    let new_button = gtk::Button::with_label("New schedule");
+    new_button.connect_clicked({
+        let shell = shell.clone();
+        move |_| new_schedule(&shell)
+    });
+    side.append(&new_button);
+    let plans = gtk::ListBox::new();
+    plans.add_css_class("navigation-sidebar");
+    for (i, (id, name, count, primary)) in snapshot.plans.iter().enumerate() {
+        let label = gtk::Label::new(Some(&format!("{}{}", name, if *primary { " · primary" } else { "" })));
+        label.set_xalign(0.0);
+        label.set_margin_top(8);
+        label.set_margin_bottom(8);
+        label.set_margin_start(8);
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&label));
+        plans.append(&row);
+        if snapshot.plan.as_ref().map(|p| p.id) == Some(*id) {
+            plans.select_row(Some(&row));
+        }
+        let _ = (i, count);
+    }
+    plans.connect_row_selected({
+        let shell = shell.clone();
+        let ids: Vec<Uuid> = snapshot.plans.iter().map(|(id, _, _, _)| *id).collect();
+        move |_, row| {
+            let Some(row) = row else { return };
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            if let Some(id) = ids.get(index as usize) {
+                let current = shell.borrow().state.borrow().plan;
+                if current == Some(*id) {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().plan = Some(*id);
+                shell.borrow().state.borrow_mut().generated.clear();
+                refresh(&shell);
+            }
+        }
+    });
+    side.append(&gtk::ScrolledWindow::builder().child(&plans).vexpand(true).build());
+    paned.set_start_child(Some(&side));
+
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    main.set_margin_top(8);
+    main.set_margin_end(12);
+    main.set_margin_bottom(8);
+    if snapshot.plan.is_none() {
+        main.append(&dim_label("Make a schedule for this term, then add courses from search or a degree plan."));
+        paned.set_end_child(Some(&main));
+        return paned.upcast();
+    }
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for (label, action) in [("Generate", 0), ("Copy CRNs", 1), ("Export .ics", 2), ("Export image", 3), ("Autofill", 4)] {
+        let button = gtk::Button::with_label(label);
+        let shell = shell.clone();
+        button.connect_clicked(move |_| match action {
+            0 => generate(&shell),
+            1 => copy_crns(&shell),
+            2 => export_ics(&shell),
+            3 => export_png(&shell),
+            _ => autofill_schedule(&shell),
+        });
+        toolbar.append(&button);
+    }
+    main.append(&toolbar);
+    main.append(&heading_label("Courses"));
+    for (key, required) in &snapshot.courses {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some(&format!("{}{}", key, if *required { "" } else { " · optional" }))));
+        let remove = gtk::Button::with_label("Remove");
+        let shell = shell.clone();
+        let key = key.clone();
+        remove.connect_clicked(move |_| remove_plan_course(&shell, &key));
+        row.append(&remove);
+        main.append(&row);
+    }
+    let add = gtk::Entry::builder().placeholder_text("Add a code, like CS 3000").build();
+    add.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            if let Some(key) = CourseKey::parse(&entry.text()) {
+                add_course_to_plan(&shell, &key);
+                entry.set_text("");
+            }
+        }
+    });
+    main.append(&add);
+    main.append(&heading_label("Preferences"));
+    main.append(&dim_label("The survey and the description both feed the same generator. Required wishes drop sections. Preferred wishes rank what’s left."));
+    let nl = gtk::Entry::builder().placeholder_text("No classes before 10, Fridays off, and lunch").text(&snapshot.nl).hexpand(true).build();
+    nl.connect_activate({
+        let shell = shell.clone();
+        move |entry| apply_nl(&shell, &entry.text())
+    });
+    let apply = gtk::Button::with_label("Apply description");
+    apply.connect_clicked({
+        let shell = shell.clone();
+        let nl = nl.clone();
+        move |_| apply_nl(&shell, &nl.text())
+    });
+    let nl_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    nl_row.append(&nl);
+    nl_row.append(&apply);
+    main.append(&nl_row);
+    main.append(&preference_survey(shell));
+    if !snapshot.pref_summary.is_empty() {
+        main.append(&selectable(&snapshot.pref_summary));
+    }
+    if snapshot.generated.is_empty() {
+        main.append(&dim_label("Generate builds conflict-free combinations and ranks them."));
+    } else {
+        main.append(&heading_label(&format!("{} schedules", snapshot.total_label)));
+        let list = gtk::ListBox::new();
+        list.add_css_class("boxed-list");
+        for (i, item) in snapshot.generated.iter().enumerate() {
+            let text = format!("{}. {}  ·  {}", i + 1, item.crns, item.reasons);
+            let label = gtk::Label::new(Some(&text));
+            label.set_xalign(0.0);
+            label.set_wrap(true);
+            label.set_margin_top(6);
+            label.set_margin_bottom(6);
+            label.set_margin_start(8);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&label));
+            list.append(&row);
+            if i == snapshot.picked {
+                list.select_row(Some(&row));
+            }
+        }
+        list.connect_row_selected({
+            let shell = shell.clone();
+            move |_, row| {
+                let Some(row) = row else { return };
+                let index = row.index();
+                if index < 0 {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().picked = index as usize;
+                refresh(&shell);
+            }
+        });
+        main.append(&gtk::ScrolledWindow::builder().child(&list).min_content_height(140).build());
+    }
+    if !snapshot.suggestions.is_empty() {
+        main.append(&heading_label("Nothing fit. Try loosening one rule."));
+        for text in &snapshot.suggestions {
+            main.append(&dim_label(text));
+        }
+    }
+    let drawing = gtk::DrawingArea::new();
+    drawing.set_content_height(360);
+    drawing.set_hexpand(true);
+    let blocks = snapshot.blocks.clone();
+    let dark = adw::StyleManager::default().is_dark();
+    drawing.set_draw_func(move |_, cr, width, height| draw_week(cr, width, height, &blocks, dark));
+    main.append(&drawing);
+    let scroll = gtk::ScrolledWindow::builder().child(&main).build();
+    paned.set_end_child(Some(&scroll));
+    paned.upcast()
+}
+
+struct ScheduleSnap {
+    plans: Vec<(Uuid, String, usize, bool)>,
+    plan: Option<SchedulePlan>,
+    courses: Vec<(String, bool)>,
+    nl: String,
+    pref_summary: String,
+    generated: Vec<SchedLine>,
+    picked: usize,
+    total_label: String,
+    suggestions: Vec<String>,
+    blocks: Vec<WeekBlock>,
+}
+
+struct SchedLine {
+    crns: String,
+    reasons: String,
+}
+
+#[derive(Clone)]
+struct WeekBlock {
+    day: i32,
+    start: i32,
+    end: i32,
+    label: String,
+    color: usize,
+}
+
+fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
+    let shell_ref = shell.borrow();
+    let state = shell_ref.state.borrow();
+    let term = state.index.catalog.term.code.clone();
+    let plans = state.data.plans.iter().filter(|p| p.term_code == term).map(|p| (p.id, p.name.clone(), p.courses.len(), p.is_primary)).collect::<Vec<_>>();
+    let plan = state.plan.and_then(|id| state.data.plans.iter().find(|p| p.id == id).cloned()).or_else(|| state.data.plans.iter().find(|p| p.term_code == term).cloned());
+    let courses = plan.as_ref().map(|p| p.courses.iter().map(|c| (c.key.to_string(), c.is_required)).collect()).unwrap_or_default();
+    let prefs = plan.as_ref().and_then(|p| p.preferences.clone()).unwrap_or_default();
+    let generated = state
+        .generated
+        .iter()
+        .take(12)
+        .map(|g| SchedLine {
+            crns: g.crns.join(", "),
+            reasons: g.reasons.iter().map(|r| r.text.clone()).collect::<Vec<_>>().join(" · "),
+        })
+        .collect();
+    let picked = state.picked.min(state.generated.len().saturating_sub(1));
+    let sections = state.generated.get(picked).map(|g| g.sections.clone()).unwrap_or_default();
+    let mut blocks = Vec::new();
+    for (i, section) in sections.iter().enumerate() {
+        for meeting in section.weekly_meetings() {
+            let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
+            for day in meeting.days.indices() {
+                blocks.push(WeekBlock { day, start, end, label: format!("{} {}", section.course_key(), section.crn), color: i % 8 });
+            }
+        }
+    }
+    let suggestions = if state.generated.is_empty() && plan.as_ref().is_some_and(|p| !p.courses.is_empty()) {
+        let inputs = plan_inputs(&state);
+        let filters = plan.as_ref().map(|p| p.filters.clone()).unwrap_or_default();
+        schedule::suggest_relaxations(&inputs, &filters, &prefs, true).into_iter().take(4).map(|s| s.relaxation.title()).collect()
+    } else {
+        vec![]
+    };
+    ScheduleSnap {
+        plans,
+        plan,
+        courses,
+        nl: state.nl.clone(),
+        pref_summary: prefs.summary_parts().join(" · "),
+        generated,
+        picked,
+        total_label: state.generated.len().to_string(),
+        suggestions,
+        blocks,
+    }
+}
+
+fn plan_inputs(state: &State) -> Vec<ScheduleCourseInput> {
+    let Some(id) = current_plan_id(state) else { return vec![] };
+    let Some(plan) = state.data.plans.iter().find(|p| p.id == id) else { return vec![] };
+    plan.courses
+        .iter()
+        .map(|c| {
+            let mut input = ScheduleCourseInput::new(c.key.clone(), c.is_required, state.index.sections_for(&c.key));
+            input.excluded_crns = c.excluded_crns.clone();
+            input
+        })
+        .collect()
+}
+
+fn current_plan_id(state: &State) -> Option<Uuid> {
+    let term = &state.index.catalog.term.code;
+    state.plan.filter(|id| state.data.plans.iter().any(|p| p.id == *id)).or_else(|| state.data.plans.iter().find(|p| &p.term_code == term).map(|p| p.id))
+}
+
+fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let snap = degree_snapshot(shell);
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_position(240);
+    let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    side.set_margin_top(8);
+    side.set_margin_start(8);
+    let new_button = gtk::Button::with_label("New degree plan");
+    new_button.connect_clicked({
+        let shell = shell.clone();
+        move |_| new_degree(&shell)
+    });
+    let import = gtk::Button::with_label("Import PDF");
+    import.connect_clicked({
+        let shell = shell.clone();
+        move |_| import_degree(&shell)
+    });
+    side.append(&new_button);
+    side.append(&import);
+    let list = gtk::ListBox::new();
+    list.add_css_class("navigation-sidebar");
+    for (id, name) in &snap.plans {
+        let label = gtk::Label::new(Some(name));
+        label.set_xalign(0.0);
+        label.set_margin_top(8);
+        label.set_margin_bottom(8);
+        label.set_margin_start(8);
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&label));
+        list.append(&row);
+        if snap.id == Some(*id) {
+            list.select_row(Some(&row));
+        }
+    }
+    let ids: Vec<Uuid> = snap.plans.iter().map(|(id, _)| *id).collect();
+    list.connect_row_selected({
+        let shell = shell.clone();
+        move |_, row| {
+            let Some(row) = row else { return };
+            if row.index() < 0 {
+                return;
+            }
+            if let Some(id) = ids.get(row.index() as usize) {
+                if shell.borrow().state.borrow().degree == Some(*id) {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().degree = Some(*id);
+                refresh(&shell);
+            }
+        }
+    });
+    side.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    paned.set_start_child(Some(&side));
+
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    main.set_margin_top(8);
+    main.set_margin_end(12);
+    if snap.id.is_none() {
+        main.append(&dim_label("Import a degree audit “View Plan” PDF, or start an empty plan and add semesters."));
+        paned.set_end_child(Some(&main));
+        return paned.upcast();
+    }
+    let tools = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for (label, which) in [("Add semester", 0), ("Export PDF", 1), ("Autofill", 2), ("Load requirements", 3)] {
+        let button = gtk::Button::with_label(label);
+        let shell = shell.clone();
+        button.connect_clicked(move |_| match which {
+            0 => add_semester(&shell),
+            1 => export_pdf(&shell),
+            2 => autofill_degree(&shell),
+            _ => load_requirements(&shell),
+        });
+        tools.append(&button);
+    }
+    main.append(&tools);
+    main.append(&heading_label(&snap.title));
+    main.append(&dim_label(&snap.totals));
+    if !snap.checks.is_empty() {
+        main.append(&heading_label("Checks"));
+        for line in &snap.checks {
+            main.append(&selectable(line));
+        }
+    }
+    let path = gtk::Entry::builder().placeholder_text("Catalog path").text(&snap.catalog_path).hexpand(true).build();
+    path.connect_changed({
+        let shell = shell.clone();
+        move |entry| shell.borrow().state.borrow_mut().catalog_path = entry.text().to_string()
+    });
+    main.append(&path);
+    if !snap.audit.is_empty() {
+        main.append(&heading_label("Requirements"));
+        for line in &snap.audit {
+            main.append(&selectable(line));
+        }
+    }
+    main.append(&heading_label("Semesters"));
+    for line in &snap.lines {
+        main.append(&selectable(line));
+    }
+    let add = gtk::Entry::builder().placeholder_text("Add CS 3000 to the last semester").build();
+    add.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            add_degree_course(&shell, &entry.text());
+            entry.set_text("");
+        }
+    });
+    main.append(&add);
+    paned.set_end_child(Some(&gtk::ScrolledWindow::builder().child(&main).build()));
+    paned.upcast()
+}
+
+struct DegreeSnap {
+    plans: Vec<(Uuid, String)>,
+    id: Option<Uuid>,
+    title: String,
+    totals: String,
+    checks: Vec<String>,
+    audit: Vec<String>,
+    lines: Vec<String>,
+    catalog_path: String,
+}
+
+fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
+    let shell_ref = shell.borrow();
+    let state = shell_ref.state.borrow();
+    let plans = state.data.degree_plans.iter().map(|p| (p.id, p.name.clone())).collect::<Vec<_>>();
+    let id = state.degree.filter(|id| state.data.degree_plans.iter().any(|p| p.id == *id)).or_else(|| state.data.degree_plans.first().map(|p| p.id));
+    let Some(plan) = id.and_then(|id| state.data.degree_plans.iter().find(|p| p.id == id)) else {
+        return DegreeSnap { plans, id: None, title: String::new(), totals: String::new(), checks: vec![], audit: vec![], lines: vec![], catalog_path: state.catalog_path.clone() };
+    };
+    let mut checks = Vec::new();
+    let dupes = planlogic::duplicate_keys(plan);
+    if !dupes.is_empty() {
+        checks.push(format!("Listed more than once: {}", dupes.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")));
+    }
+    for (index, term) in plan.terms.iter().enumerate() {
+        for course in &term.courses {
+            let Some(key) = &course.key else { continue };
+            let status = planlogic::prerequisite_status(key, index, plan, Some(&state.index), None, &CourseEquivalences::none());
+            if let PrereqStatus::Missing(text) = status {
+                checks.push(format!("{} in {} is missing {text}", key, term.short_name()));
+            }
+        }
+    }
+    let mut audit_lines = Vec::new();
+    if let Some(requirements) = state.requirements.get(&plan.id) {
+        let audit = DegreeAudit::run(plan, requirements, &CourseEquivalences::none(), &DegreeCourseAttributes::none());
+        audit_lines.push(format!("{}/{} requirements met · {:.0} completed hours, {:.0} planned", audit.satisfied_count(), audit.total_count(), audit.completed_hours, audit.planned_hours));
+        if let Some(hours) = audit.required_hours {
+            audit_lines.push(format!("Catalog asks for {hours:.0} total semester hours"));
+        }
+        for rule in audit.rule_results().into_iter().filter(|r| r.status == AuditStatus::Missing || r.status == AuditStatus::Partial).take(8) {
+            audit_lines.push(format!("{:?} · {}", rule.status, rule.rule.label));
+        }
+        for note in audit.note_checks.iter().take(4) {
+            audit_lines.push(format!("{:?} · {}", note.status, note.note));
+        }
+        for sub in audit.unmatched_substitutions.iter().take(4) {
+            audit_lines.push(format!("Petition not matched: {}", if sub.rule_title.is_empty() { &sub.rule_id } else { &sub.rule_title }));
+        }
+    }
+    let mut lines = vec![format!("Completed · {:.1} credits", plan.completed_credits())];
+    for course in &plan.completed {
+        lines.push(format!("  {} {}", course.label, course.title));
+    }
+    for term in &plan.terms {
+        lines.push(format!("{} · {:.1} credits", term.name(), term.credits()));
+        for course in &term.courses {
+            lines.push(format!("  {} {}", course.label, course.title));
+        }
+    }
+    DegreeSnap {
+        plans,
+        id: Some(plan.id),
+        title: plan.name.clone(),
+        totals: format!("{:.1} completed · {:.1} planned", plan.completed_credits(), plan.planned_credits()),
+        checks,
+        audit: audit_lines,
+        lines,
+        catalog_path: state.catalog_path.clone(),
+    }
+}
+
+fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let rows = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state
+            .data
+            .watchlist
+            .iter()
+            .map(|w| {
+                let live = state.index.section_crn(&w.crn);
+                let seats = live.map(|s| s.seats_label()).unwrap_or_else(|| format!("{} seats last time", w.last_seats_remaining));
+                (w.crn.clone(), format!("{} · {}", w.course_key, w.course_title), seats, w.notify_on_waitlist)
+            })
+            .collect::<Vec<_>>()
+    };
+    let root = page_column("Watchlist", "Seat alerts run while Term Organize is open, and termorganize --seat-watch can run from a timer.");
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    if rows.is_empty() {
+        list.append(&gtk::Label::builder().label("No sections watched. Open a course and choose Watch on a section.").margin_top(18).margin_bottom(18).build());
+    }
+    for (crn, title, seats, wait) in rows {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_hexpand(true);
+        text.append(&gtk::Label::builder().label(format!("CRN {crn} · {title}")).xalign(0.0).build());
+        text.append(&dim_label(&seats));
+        row.append(&text);
+        let toggle = gtk::CheckButton::with_label("Waitlist");
+        toggle.set_active(wait);
+        let shell_t = shell.clone();
+        let crn_t = crn.clone();
+        toggle.connect_toggled(move |b| set_waitlist(&shell_t, &crn_t, b.is_active()));
+        let remove = gtk::Button::with_label("Remove");
+        let shell_r = shell.clone();
+        let crn_r = crn.clone();
+        remove.connect_clicked(move |_| remove_watch(&shell_r, &crn_r));
+        row.append(&toggle);
+        row.append(&remove);
+        list.append(&row);
+    }
+    root.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    root.upcast()
+}
+
+fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBlock], dark: bool) {
+    let width = width as f64;
+    let height = height as f64;
+    if dark {
+        cr.set_source_rgb(0.12, 0.12, 0.14);
+    } else {
+        cr.set_source_rgb(0.97, 0.97, 0.96);
+    }
+    let _ = cr.paint();
+    let start = 8 * 60;
+    let end = 21 * 60;
+    let header = 28.0;
+    let left = 48.0;
+    let days = 5.0;
+    let col = (width - left - 8.0) / days;
+    let span = (end - start) as f64;
+    if dark {
+        cr.set_source_rgb(0.75, 0.75, 0.78);
+    } else {
+        cr.set_source_rgb(0.25, 0.25, 0.28);
+    }
+    for hour in 8..=21 {
+        let y = header + (hour * 60 - start) as f64 / span * (height - header - 8.0);
+        cr.move_to(8.0, y);
+        let _ = cr.show_text(&hour_axis_label(hour));
+        cr.move_to(left, y);
+        cr.line_to(width - 8.0, y);
+    }
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+    for day in 1..=5 {
+        let x = left + (day - 1) as f64 * col;
+        cr.move_to(x + 6.0, 18.0);
+        let _ = cr.show_text(DaySet::SHORT[day]);
+    }
+    let palette = [(0.20, 0.45, 0.75), (0.15, 0.55, 0.40), (0.75, 0.40, 0.20), (0.55, 0.30, 0.65), (0.70, 0.25, 0.35), (0.20, 0.55, 0.60), (0.55, 0.50, 0.15), (0.35, 0.35, 0.40)];
+    for block in blocks {
+        if !(1..=5).contains(&block.day) {
+            continue;
+        }
+        let x = left + (block.day - 1) as f64 * col + 3.0;
+        let y = header + (block.start - start).max(0) as f64 / span * (height - header - 8.0);
+        let h = ((block.end - block.start).max(20) as f64 / span * (height - header - 8.0)).max(16.0);
+        let (r, g, b) = palette[block.color % palette.len()];
+        cr.set_source_rgba(r, g, b, 0.9);
+        cr.rectangle(x, y, col - 6.0, h);
+        let _ = cr.fill();
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.move_to(x + 4.0, y + 14.0);
+        let _ = cr.show_text(&block.label);
+    }
+}
+
+fn new_schedule(shell: &Rc<RefCell<Shell>>) {
+    let id = {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let term = state.index.catalog.term.code.clone();
+        let plan = SchedulePlan {
+            id: Uuid::new_v4(),
+            name: format!("Schedule {}", state.data.plans.iter().filter(|p| p.term_code == term).count() + 1),
+            term_code: term,
+            courses: vec![],
+            selected_crns: vec![],
+            filters: ScheduleFilters::default(),
+            preferences: None,
+            favorite_combinations: vec![],
+            is_primary: false,
+            created_at: now_secs(),
+            updated_at: now_secs(),
+        };
+        let id = state.data.add_schedule(plan);
+        state.plan = Some(id);
+        state.area = 5;
+        state.generated.clear();
+        persist(&state.data);
+        id
+    };
+    let _ = id;
+    select_area(shell, 5);
+    toast(shell, "New schedule");
+}
+
+fn new_degree(shell: &Rc<RefCell<Shell>>) {
+    let name = {
+        let shell = shell.borrow();
+        let state = shell.state.borrow();
+        format!("Degree plan {}", state.data.degree_plans.len() + 1)
+    };
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let id = state.data.add_degree_plan(DegreePlan { name, ..DegreePlan::default() });
+        state.degree = Some(id);
+        state.area = 6;
+        persist(&state.data);
+    }
+    select_area(shell, 6);
+}
+
+fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let known = shell.borrow().state.borrow().index.course(key).is_some();
+    if !known {
+        toast(shell, "That course isn’t in this term");
+        return;
+    }
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let term = state.index.catalog.term.code.clone();
+        if current_plan_id(&state).is_none() {
+            let plan = SchedulePlan {
+                id: Uuid::new_v4(),
+                name: "My schedule".into(),
+                term_code: term,
+                courses: vec![],
+                selected_crns: vec![],
+                filters: ScheduleFilters::default(),
+                preferences: None,
+                favorite_combinations: vec![],
+                is_primary: true,
+                created_at: now_secs(),
+                updated_at: now_secs(),
+            };
+            let id = state.data.add_schedule(plan);
+            state.plan = Some(id);
+        }
+        let id = current_plan_id(&state).unwrap();
+        if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
+            if !plan.contains(key) {
+                let color = plan.next_color_index();
+                plan.courses.push(PlanCourse { key: key.clone(), is_required: true, excluded_crns: HashSet::new(), color_index: color });
+                plan.updated_at = now_secs();
+            }
+        }
+        state.generated.clear();
+        persist(&state.data);
+    }
+    toast(shell, &format!("Added {key}"));
+}
+
+fn remove_plan_course(shell: &Rc<RefCell<Shell>>, key: &str) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let Some(id) = current_plan_id(&state) else { return };
+        if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
+            plan.courses.retain(|c| c.key.to_string() != key);
+            plan.updated_at = now_secs();
+        }
+        state.generated.clear();
+        persist(&state.data);
+    }
+    refresh(shell);
+}
+
+fn generate(shell: &Rc<RefCell<Shell>>) {
+    let outcome = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let inputs = plan_inputs(&state);
+        let id = current_plan_id(&state);
+        let plan = id.and_then(|id| state.data.plans.iter().find(|p| p.id == id));
+        let filters = plan.map(|p| p.filters.clone()).unwrap_or_default();
+        let prefs = plan.and_then(|p| p.preferences.clone()).unwrap_or_default();
+        if inputs.is_empty() {
+            None
+        } else {
+            let result = schedule::generate(&inputs, &filters, &prefs, schedule::ScheduleSort::Best, &schedule::Limits::default());
+            Some((result.schedules, result.total_found, result.diagnostics))
+        }
+    };
+    let Some((schedules, total, diagnostics)) = outcome else {
+        toast(shell, "Add a course first");
+        return;
+    };
+    if schedules.is_empty() {
+        let title = schedule::no_results_title(&diagnostics);
+        toast(shell, &title);
+    } else {
+        toast(shell, &format!("{total} conflict-free schedules"));
+    }
+    shell.borrow().state.borrow_mut().generated = schedules;
+    shell.borrow().state.borrow_mut().picked = 0;
+    shell.borrow().state.borrow_mut().area = 5;
+    select_area(shell, 5);
+}
+
+fn apply_nl(shell: &Rc<RefCell<Shell>>, text: &str) {
+    let message = match nl::interpret(text) {
+        Ok(draft) => {
+            let mut note = String::new();
+            {
+                let shell = shell.borrow();
+                let mut state = shell.state.borrow_mut();
+                if let Some(id) = current_plan_id(&state) {
+                    if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
+                        let base = plan.preferences.clone().unwrap_or_default();
+                        let prefs = draft.applied(&base);
+                        note = prefs.summary_parts().join(" · ");
+                        plan.preferences = Some(prefs);
+                        plan.updated_at = now_secs();
+                        persist(&state.data);
+                    }
+                } else {
+                    note = "Make a schedule first".into();
+                }
+                state.nl = text.to_string();
+                state.generated.clear();
+            }
+            if note.is_empty() { "Preferences updated".into() } else { note }
+        }
+        Err(error) => error.message().to_string(),
+    };
+    toast(shell, &message);
+    refresh(shell);
+}
+
+fn copy_crns(shell: &Rc<RefCell<Shell>>) {
+    let text = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state.generated.get(state.picked).map(|g| schedule::copy_crns(&g.sections)).unwrap_or_default()
+    };
+    if text.is_empty() {
+        toast(shell, "Generate a schedule first");
+        return;
+    }
+    shell.borrow().window.clipboard().set_text(&text);
+    toast(shell, "CRNs copied");
+}
+
+fn export_ics(shell: &Rc<RefCell<Shell>>) {
+    let (body, name) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let Some(schedule) = state.generated.get(state.picked) else {
+            return;
+        };
+        let id = current_plan_id(&state).map(|id| id.to_string()).unwrap_or_else(|| "plan".into());
+        let name = current_plan_id(&state).and_then(|id| state.data.plans.iter().find(|p| p.id == id).map(|p| p.name.clone())).unwrap_or_else(|| "Schedule".into());
+        (schedule::ics(&id, &name, &schedule.sections), name)
+    };
+    save_text(shell, &format!("{name}.ics"), &body, "Calendar saved");
+}
+
+fn export_png(shell: &Rc<RefCell<Shell>>) {
+    let bytes = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state.generated.get(state.picked).map(|schedule| schedule::week_png(&schedule.sections))
+    };
+    let Some(bytes) = bytes else {
+        toast(shell, "Generate a schedule first");
+        return;
+    };
+    save_bytes(shell, "week.png", &bytes, "Week image saved");
+}
+
+fn export_pdf(shell: &Rc<RefCell<Shell>>) {
+    let (bytes, name) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let Some(id) = state.degree.or_else(|| state.data.degree_plans.first().map(|p| p.id)) else { return };
+        let Some(plan) = state.data.degree_plans.iter().find(|p| p.id == id) else { return };
+        let include = state.data.preferences.include_student_in_export;
+        (degree_format::pdf(plan, degree_format::now_unix(), include), format!("{}.pdf", plan.name))
+    };
+    save_bytes(shell, &name, &bytes, "Degree plan PDF saved");
+}
+
+fn export_user(shell: &Rc<RefCell<Shell>>) {
+    let text = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        store::export_json(&state.data, state.data.preferences.include_student_in_export)
+    };
+    save_text(shell, "term-organize.json", &text, "Data exported");
+}
+
+fn add_semester(shell: &Rc<RefCell<Shell>>) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let Some(id) = state.degree.or_else(|| state.data.degree_plans.first().map(|p| p.id)) else { return };
+        if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
+            if let Some(next) = planlogic::next_semesters(plan, 1, 2026, 10).into_iter().next() {
+                plan.terms.push(next);
+                plan.sort_terms();
+            }
+        }
+        persist(&state.data);
+    }
+    refresh(shell);
+}
+
+fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
+    let Some(key) = CourseKey::parse(text) else {
+        toast(shell, "Use a course code like CS 3000");
+        return;
+    };
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let title = state.index.course(&key).map(|c| c.title.clone()).unwrap_or_else(|| key.to_string());
+        let credits = state.index.course(&key).map(|c| c.max_credits).unwrap_or(4.0);
+        let Some(id) = state.degree else { return };
+        if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
+            if plan.terms.is_empty() {
+                plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
+            }
+            let last = plan.terms.len() - 1;
+            plan.terms[last].courses.push(DegreePlanCourse::catalog(key, title, credits));
+        }
+        persist(&state.data);
+    }
+    refresh(shell);
+}
+
+fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
+    let added = {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let Some(id) = state.degree else { return };
+        let requirements = state.requirements.get(&id).cloned();
+        let index_courses: HashSet<CourseKey> = state.index.courses.iter().map(|c| c.key()).collect();
+        let year = state.index.catalog.term.calendar_year();
+        let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) else { return };
+        let mut have: HashSet<CourseKey> = plan.completed_keys().into_iter().collect();
+        for term in &plan.terms {
+            have.extend(term.courses.iter().filter_map(|c| c.key.clone()));
+        }
+        let mut missing = Vec::new();
+        if let Some(requirements) = requirements {
+            let audit = DegreeAudit::run(plan, &requirements, &CourseEquivalences::none(), &DegreeCourseAttributes::none());
+            for rule in audit.rule_results() {
+                if rule.status.is_satisfied() {
+                    continue;
+                }
+                for key in rule.rule.listed_courses() {
+                    if !have.contains(&key) && index_courses.contains(&key) {
+                        missing.push(key);
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        if plan.terms.is_empty() {
+            plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, year));
+        }
+        let n = missing.len();
+        let last = plan.terms.len() - 1;
+        for key in missing {
+            let title = key.to_string();
+            plan.terms[last].courses.push(DegreePlanCourse::catalog(key, title, 4.0));
+        }
+        persist(&state.data);
+        n
+    };
+    toast(shell, &format!("Added {added} courses the audit still needs"));
+    refresh(shell);
+}
+
+fn autofill_schedule(shell: &Rc<RefCell<Shell>>) {
+    let keys = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let term = state.index.catalog.term.clone();
+        planlogic::schedule_suggestions(&term, &state.data.degree_plans, &state.data.plans, current_plan_id(&state), &HashSet::new(), Some(&state.index))
+            .into_iter()
+            .next()
+            .map(|s| s.courses)
+            .unwrap_or_default()
+    };
+    if keys.is_empty() {
+        toast(shell, "No degree-plan courses to add for this term");
+        return;
+    }
+    for key in &keys {
+        add_course_to_plan(shell, key);
+    }
+    refresh(shell);
+}
+
+fn load_requirements(shell: &Rc<RefCell<Shell>>) {
+    let (path, id) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        (state.catalog_path.clone(), state.degree)
+    };
+    let Some(id) = id else {
+        toast(shell, "Open a degree plan first");
+        return;
+    };
+    toast(shell, "Loading the catalog page…");
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let client = BannerClient { base: "https://catalog.northeastern.edu".into() };
+        let _ = tx.send(client.get(&path));
+    });
+    let shell = shell.clone();
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        match rx.try_recv() {
+            Ok(Ok(html)) => {
+                let year = CatalogYear::containing(2026, 10);
+                let program = CatalogProgram { title: "Imported program".into(), path: shell.borrow().state.borrow().catalog_path.clone() };
+                match program_parser::requirements_from_html(&html, year, program) {
+                    Some(requirements) => {
+                        shell.borrow().state.borrow_mut().requirements.insert(id, requirements.clone());
+                        let _ = save_requirements(id, &requirements);
+                        toast(&shell, &format!("{} sections of requirements", requirements.sections.len()));
+                        refresh(&shell);
+                    }
+                    None => toast(&shell, "That page didn’t contain a requirements table"),
+                }
+                glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                toast(&shell, &format!("Catalog unreachable ({error}). Open a saved HTML file instead."));
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        }
+    });
+}
+
+fn import_degree(shell: &Rc<RefCell<Shell>>) {
+    let dialog = gtk::FileDialog::builder().title("Import a degree audit PDF").accept_label("Import").build();
+    let filter = gtk::FileFilter::new();
+    filter.add_mime_type("application/pdf");
+    filter.add_pattern("*.pdf");
+    filter.set_name(Some("Degree audit PDF"));
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    dialog.set_filters(Some(&filters));
+    let shell = shell.clone();
+    let window = shell.borrow().window.clone();
+    dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else { return };
+        let Some(path) = file.path() else { return };
+        match import_pdf(&path) {
+            Ok(plan) => {
+                let shell_ref = shell.borrow();
+                let mut state = shell_ref.state.borrow_mut();
+                let id = state.data.add_degree_plan(plan);
+                state.degree = Some(id);
+                state.area = 6;
+                persist(&state.data);
+                drop(state);
+                drop(shell_ref);
+                select_area(&shell, 6);
+                toast(&shell, "Degree plan imported");
+            }
+            Err(error) => toast(&shell, &error),
+        }
+    });
+}
+
+fn import_pdf(path: &std::path::Path) -> Result<DegreePlan, String> {
+    let output = std::process::Command::new("pdftotext").args(["-layout", "-nopgbrk", path.to_str().unwrap_or(""), "-"]).output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let name = path.file_name().and_then(|s| s.to_str());
+    degree_format::parse(&text, name).map(|r| r.plan).map_err(|e| e.to_string())
+}
+
+fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let term = state.index.catalog.term.code.clone();
+        if !state.data.saved.iter().any(|s| s.term_code == term && s.key == *key) {
+            state.data.saved.push(SavedCourse { term_code: term, key: key.clone(), saved_at: now_secs() });
+            persist(&state.data);
+        }
+    }
+    toast(shell, "Saved");
+}
+
+fn remember_recent(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let shell = shell.borrow();
+    let mut state = shell.state.borrow_mut();
+    let term = state.index.catalog.term.code.clone();
+    state.data.recents.retain(|r| !(r.term_code == term && r.key == *key));
+    state.data.recents.insert(0, RecentCourse { term_code: term, key: key.clone(), viewed_at: now_secs() });
+    state.data.recents.truncate(40);
+    persist(&state.data);
+}
+
+fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &str) {
+    let already = {
+        let shell = shell.borrow();
+        let state = shell.state.borrow();
+        let term = &state.index.catalog.term.code;
+        state.data.watchlist.iter().any(|w| &w.term_code == term && w.crn == section.crn)
+    };
+    if already {
+        toast(shell, "Already watched");
+        return;
+    }
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let term = state.index.catalog.term.code.clone();
+        state.data.watchlist.push(WatchItem {
+            term_code: term,
+            crn: section.crn.clone(),
+            course_key: section.course_key(),
+            course_title: title.into(),
+            section_label: section.section_number.clone(),
+            added_at: now_secs(),
+            last_seats_remaining: section.seats_remaining,
+            last_waitlist_remaining: section.waitlist_remaining,
+            seat_capacity: section.seat_capacity,
+            last_checked_at: None,
+            notify_on_waitlist: false,
+            last_notified_at: None,
+        });
+        persist(&state.data);
+    }
+    toast(shell, "Watching that section");
+}
+
+fn set_waitlist(shell: &Rc<RefCell<Shell>>, crn: &str, on: bool) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        if let Some(item) = state.data.watchlist.iter_mut().find(|w| w.crn == crn) {
+            item.notify_on_waitlist = on;
+        }
+        persist(&state.data);
+    }
+}
+
+fn remove_watch(shell: &Rc<RefCell<Shell>>, crn: &str) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        state.data.watchlist.retain(|w| w.crn != crn);
+        persist(&state.data);
+    }
+    refresh(shell);
+}
+
+fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
+    match link {
+        AppLink::Course { subject, number, .. } => {
+            let key = CourseKey { subject, number };
+            shell.borrow().state.borrow_mut().course = Some(key);
+            shell.borrow().state.borrow_mut().area = 0;
+        }
+        AppLink::Section { crn, .. } => {
+            let key = shell.borrow().state.borrow().index.section_crn(&crn).map(|s| s.course_key());
+            if let Some(key) = key {
+                shell.borrow().state.borrow_mut().course = Some(key);
+            }
+            shell.borrow().state.borrow_mut().area = 0;
+        }
+        AppLink::Search { query } => {
+            shell.borrow().state.borrow_mut().query = query;
+            shell.borrow().state.borrow_mut().area = 0;
+        }
+        AppLink::Watchlist => shell.borrow().state.borrow_mut().area = 7,
+        AppLink::Schedule { id } => {
+            if let Some(id) = id.and_then(|s| Uuid::parse_str(&s).ok()) {
+                shell.borrow().state.borrow_mut().plan = Some(id);
+            }
+            shell.borrow().state.borrow_mut().area = 5;
+        }
+        AppLink::Plan { id } => {
+            if let Ok(id) = Uuid::parse_str(&id) {
+                shell.borrow().state.borrow_mut().degree = Some(id);
+            }
+            shell.borrow().state.borrow_mut().area = 6;
+        }
+        AppLink::DegreePlans => shell.borrow().state.borrow_mut().area = 6,
+        AppLink::File { path } => {
+            if path.to_ascii_lowercase().ends_with(".pdf") {
+                if let Ok(plan) = import_pdf(std::path::Path::new(&path)) {
+                    let shell_ref = shell.borrow();
+                    let mut state = shell_ref.state.borrow_mut();
+                    let id = state.data.add_degree_plan(plan);
+                    state.degree = Some(id);
+                    state.area = 6;
+                    persist(&state.data);
+                }
+            } else if let Ok(html) = std::fs::read_to_string(&path) {
+                if let Some(id) = shell.borrow().state.borrow().degree {
+                    if let Some(requirements) = program_parser::requirements_from_html(&html, CatalogYear::containing(2026, 10), CatalogProgram { title: "File".into(), path }) {
+                        shell.borrow().state.borrow_mut().requirements.insert(id, requirements);
+                    }
+                }
+            }
+        }
+    }
+    let area = shell.borrow().state.borrow().area;
+    select_area(shell, area);
+}
+
+fn open_settings(shell: &Rc<RefCell<Shell>>) {
+    let window = adw::PreferencesWindow::new();
+    window.set_transient_for(Some(&shell.borrow().window));
+    window.set_modal(true);
+    let page = adw::PreferencesPage::new();
+    page.set_title("General");
+    page.set_icon_name(Some("preferences-system-symbolic"));
+    let appearance = adw::PreferencesGroup::new();
+    appearance.set_title("Appearance");
+    let scheme = adw::ComboRow::new();
+    scheme.set_title("Color scheme");
+    scheme.set_model(Some(&gtk::StringList::new(&["Follow system", "Light", "Dark"])));
+    let current = shell.borrow().state.borrow().data.preferences.color_scheme.clone().unwrap_or_else(|| "default".into());
+    scheme.set_selected(match current.as_str() {
+        "light" => 1,
+        "dark" => 2,
+        _ => 0,
+    });
+    scheme.connect_selected_notify({
+        let shell = shell.clone();
+        move |row| {
+            let value = match row.selected() {
+                1 => Some("light".into()),
+                2 => Some("dark".into()),
+                _ => None,
+            };
+            {
+                let shell = shell.borrow();
+                let mut state = shell.state.borrow_mut();
+                state.data.preferences.color_scheme = value;
+                apply_scheme(&state.data.preferences);
+                persist(&state.data);
+            }
+        }
+    });
+    appearance.add(&scheme);
+    let weekends = adw::SwitchRow::new();
+    weekends.set_title("Show weekends on the week view");
+    weekends.set_active(shell.borrow().state.borrow().data.preferences.show_weekends);
+    weekends.connect_active_notify({
+        let shell = shell.clone();
+        move |row| {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.show_weekends = row.is_active();
+            persist(&state.data);
+        }
+    });
+    appearance.add(&weekends);
+    page.add(&appearance);
+
+    let alerts = adw::PreferencesGroup::new();
+    alerts.set_title("Notifications");
+    alerts.set_description(Some("Seat checks use the sections in the bundled snapshot unless a later refresh replaces them."));
+    let minutes = adw::SpinRow::with_range(5.0, 120.0, 5.0);
+    minutes.set_title("Minutes between seat checks");
+    minutes.set_value(shell.borrow().state.borrow().data.preferences.seat_check_minutes as f64);
+    minutes.connect_changed({
+        let shell = shell.clone();
+        move |row| {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.seat_check_minutes = row.value() as i32;
+            persist(&state.data);
+        }
+    });
+    alerts.add(&minutes);
+    page.add(&alerts);
+
+    let data_group = adw::PreferencesGroup::new();
+    data_group.set_title("Data");
+    data_group.set_description(Some("Exports leave out the student name and ID unless you include them. Folder sync is the stand-in for iCloud: a folder you choose, last file wins."));
+    let include = adw::SwitchRow::new();
+    include.set_title("Include student name and ID in exports");
+    include.set_subtitle("They still stay off the sync folder");
+    include.set_active(shell.borrow().state.borrow().data.preferences.include_student_in_export);
+    include.connect_active_notify({
+        let shell = shell.clone();
+        move |row| {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.include_student_in_export = row.is_active();
+            persist(&state.data);
+        }
+    });
+    data_group.add(&include);
+    let sync_on = adw::SwitchRow::new();
+    sync_on.set_title("Sync with a folder");
+    sync_on.set_active(shell.borrow().state.borrow().data.preferences.folder_sync_enabled);
+    sync_on.connect_active_notify({
+        let shell = shell.clone();
+        move |row| {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.folder_sync_enabled = row.is_active();
+            persist(&state.data);
+        }
+    });
+    data_group.add(&sync_on);
+    let path_row = adw::EntryRow::new();
+    path_row.set_title("Folder");
+    path_row.set_text(&shell.borrow().state.borrow().data.preferences.folder_sync_path.clone().unwrap_or_default());
+    path_row.connect_changed({
+        let shell = shell.clone();
+        move |row| {
+            let text = row.text().trim().to_string();
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.folder_sync_path = if text.is_empty() { None } else { Some(text) };
+            persist(&state.data);
+        }
+    });
+    data_group.add(&path_row);
+    let export = adw::ActionRow::new();
+    export.set_title("Export data");
+    export.set_activatable(true);
+    export.connect_activated({
+        let shell = shell.clone();
+        move |_| export_user(&shell)
+    });
+    data_group.add(&export);
+    let import = adw::ActionRow::new();
+    import.set_title("Import data");
+    import.set_activatable(true);
+    import.connect_activated({
+        let shell = shell.clone();
+        move |_| import_user(&shell)
+    });
+    data_group.add(&import);
+    page.add(&data_group);
+
+    let about = adw::PreferencesGroup::new();
+    about.set_title("About");
+    about.set_description(Some(legal::UNOFFICIAL_NOTICE));
+    let license = adw::ActionRow::new();
+    license.set_title(legal::LICENSE_NAME);
+    license.set_subtitle(legal::SOURCE_CODE_URL);
+    about.add(&license);
+    let privacy = adw::ActionRow::new();
+    privacy.set_title("Privacy");
+    privacy.set_subtitle(legal::PRIVACY_NOTICE);
+    about.add(&privacy);
+    page.add(&about);
+    window.add(&page);
+    window.present();
+}
+
+fn open_about(shell: &Rc<RefCell<Shell>>) {
+    let dialog = adw::AboutWindow::builder()
+        .transient_for(&shell.borrow().window)
+        .application_name(legal::APP_NAME)
+        .application_icon("x-office-calendar")
+        .version(env!("CARGO_PKG_VERSION"))
+        .copyright(legal::APP_COPYRIGHT)
+        .license_type(gtk::License::Agpl30)
+        .website(legal::SOURCE_CODE_URL)
+        .developers(vec!["Term Organize contributors"])
+        .comments(format!("{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::SEARCHNEU_SUMMARY))
+        .build();
+    dialog.present();
+}
+
+fn greet(shell: &Rc<RefCell<Shell>>) {
+    let window = shell.borrow().window.clone();
+    let dialog = adw::AlertDialog::new(Some("Unofficial"), Some(legal::UNOFFICIAL_NOTICE));
+    dialog.set_body(&format!("{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::DATA_NOTICE));
+    dialog.add_response("ok", "Continue");
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+    let shell = shell.clone();
+    dialog.connect_response(None, move |_, _| {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        state.data.preferences.has_completed_onboarding = true;
+        persist(&state.data);
+    });
+    dialog.present(Some(&window));
+}
+
+fn import_user(shell: &Rc<RefCell<Shell>>) {
+    let dialog = gtk::FileDialog::builder().title("Import Term Organize data").build();
+    let shell = shell.clone();
+    let window = shell.borrow().window.clone();
+    dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else { return };
+        let Some(path) = file.path() else { return };
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let imported = store::import_json(&text);
+        {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data = imported;
+            persist(&state.data);
+        }
+        refresh(&shell);
+        toast(&shell, "Data imported");
+    });
+}
+
+fn arm_seat_timer(shell: &Rc<RefCell<Shell>>) {
+    let shell = shell.clone();
+    glib::timeout_add_local(Duration::from_secs(60), move || {
+        let minutes = shell.borrow().state.borrow().data.preferences.seat_check_minutes.max(1) as u64;
+        let due = {
+            let shell_ref = shell.borrow();
+            let state = shell_ref.state.borrow();
+            if !state.data.preferences.auto_refresh_seats {
+                return glib::ControlFlow::Continue;
+            }
+            state.data.watchlist.iter().any(|w| w.last_checked_at.unwrap_or(0.0) + minutes as f64 * 60.0 < now_secs())
+                || state.data.watchlist.iter().any(|w| w.last_checked_at.is_none())
+        };
+        if due {
+            check_seats(&shell);
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+fn check_seats(shell: &Rc<RefCell<Shell>>) {
+    let alerts = {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let term = state.index.catalog.term.code.clone();
+        let mut live = HashMap::new();
+        live.insert(term, state.index.catalog.sections.clone());
+        let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
+        state.data.watchlist = report.items;
+        persist(&state.data);
+        report.alerts
+    };
+    for alert in alerts {
+        let _ = std::process::Command::new("notify-send").args(["--app-name=Term Organize", &alert.title(), &alert.body()]).status();
+        toast(shell, &alert.title());
+    }
+}
+
+fn save_text(shell: &Rc<RefCell<Shell>>, name: &str, body: &str, message: &str) {
+    let bytes = body.as_bytes().to_vec();
+    save_bytes(shell, name, &bytes, message);
+}
+
+fn save_bytes(shell: &Rc<RefCell<Shell>>, name: &str, bytes: &[u8], message: &str) {
+    let dialog = gtk::FileDialog::builder().title("Save").initial_name(name).build();
+    let shell = shell.clone();
+    let window = shell.borrow().window.clone();
+    let bytes = bytes.to_vec();
+    let message = message.to_string();
+    dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else { return };
+        let Some(path) = file.path() else { return };
+        if std::fs::write(path, bytes).is_ok() {
+            toast(&shell, &message);
+        }
+    });
+}
+
+fn persist(data: &UserData) {
+    let _ = store::save(data);
+    if data.preferences.folder_sync_enabled {
+        if let Some(dir) = &data.preferences.folder_sync_path {
+            let dir = PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let text = store::export_json(data, false);
+            let _ = std::fs::write(dir.join("user.json"), text);
+        }
+    }
+}
+
+fn pull_folder(data: &mut UserData) {
+    if !data.preferences.folder_sync_enabled {
+        return;
+    }
+    let Some(dir) = data.preferences.folder_sync_path.clone() else { return };
+    let remote = PathBuf::from(&dir).join("user.json");
+    let local = store::user_path();
+    let remote_time = std::fs::metadata(&remote).and_then(|m| m.modified()).ok();
+    let local_time = std::fs::metadata(&local).and_then(|m| m.modified()).ok();
+    if remote_time > local_time {
+        if let Ok(text) = std::fs::read_to_string(remote) {
+            let imported = store::import_json(&text);
+            let scheme = data.preferences.color_scheme.clone();
+            let minutes = data.preferences.seat_check_minutes;
+            *data = imported;
+            data.preferences.color_scheme = scheme;
+            data.preferences.seat_check_minutes = minutes;
+            data.preferences.folder_sync_enabled = true;
+            data.preferences.folder_sync_path = Some(dir);
+        }
+    }
+}
+
+fn apply_scheme(prefs: &AppPreferences) {
+    let manager = adw::StyleManager::default();
+    manager.set_color_scheme(match prefs.color_scheme.as_deref() {
+        Some("dark") => adw::ColorScheme::ForceDark,
+        Some("light") => adw::ColorScheme::ForceLight,
+        _ => adw::ColorScheme::Default,
+    });
+}
+
+fn requirements_dir() -> PathBuf {
+    store::data_dir().join("requirements")
+}
+
+fn save_requirements(id: Uuid, requirements: &ProgramRequirements) -> Result<(), String> {
+    let dir = requirements_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string(requirements).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{id}.json")), text).map_err(|e| e.to_string())
+}
+
+fn load_saved_requirements(state: &Rc<RefCell<State>>) {
+    let dir = requirements_dir();
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut state = state.borrow_mut();
+    for entry in entries.flatten() {
+        let Ok(id) = Uuid::parse_str(entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or("")) else { continue };
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        if let Ok(requirements) = serde_json::from_str::<ProgramRequirements>(&text) {
+            state.requirements.insert(id, requirements);
+        }
+    }
+}
+
+fn sidebar_row(icon: &str, title: &str) -> gtk::ListBoxRow {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.set_margin_top(8);
+    row.set_margin_bottom(8);
+    row.set_margin_start(10);
+    row.set_margin_end(10);
+    row.append(&gtk::Image::from_icon_name(icon));
+    let label = gtk::Label::new(Some(title));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
+    let item = gtk::ListBoxRow::new();
+    item.set_child(Some(&row));
+    item
+}
+
+fn page_column(title: &str, subtitle: &str) -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+    root.append(&heading_label(title));
+    root.append(&dim_label(subtitle));
+    root
+}
+
+fn heading_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("heading");
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label
+}
+
+fn dim_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("dim-label");
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label
+}
+
+fn selectable(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_selectable(true);
+    label
+}
+
+fn toast(shell: &Rc<RefCell<Shell>>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let toast = adw::Toast::new(text);
+    shell.borrow().toast.add_toast(toast);
+}
+
+fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_hexpand(true);
+    let campuses = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let mut names = vec!["Any campus".to_string()];
+        names.extend(state.index.campus_names.iter().take(12).cloned());
+        names
+    };
+    let campus_refs: Vec<&str> = campuses.iter().map(|s| s.as_str()).collect();
+    let campus = gtk::DropDown::from_strings(&campus_refs);
+    let selected_campus = filters.campuses.iter().next().cloned();
+    campus.set_selected(selected_campus.as_ref().and_then(|name| campuses.iter().position(|c| c == name)).unwrap_or(0) as u32);
+    campus.connect_selected_notify({
+        let shell = shell.clone();
+        let campuses = campuses.clone();
+        move |dd| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.campuses.clear();
+            let index = dd.selected() as usize;
+            if index > 0 {
+                if let Some(name) = campuses.get(index) {
+                    filters.campuses.insert(name.clone());
+                }
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let instruction = gtk::DropDown::from_strings(&["Any format", "In person", "Online"]);
+    instruction.set_selected(match filters.instruction {
+        search::InstructionFilter::Any => 0,
+        search::InstructionFilter::InPerson => 1,
+        search::InstructionFilter::Online => 2,
+    });
+    instruction.connect_selected_notify({
+        let shell = shell.clone();
+        move |dd| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.instruction = match dd.selected() {
+                1 => search::InstructionFilter::InPerson,
+                2 => search::InstructionFilter::Online,
+                _ => search::InstructionFilter::Any,
+            };
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let nupath = gtk::Entry::builder()
+        .placeholder_text("NUpath, like WI")
+        .text(filters.nupaths.iter().map(|p| p.short()).collect::<Vec<_>>().join(", "))
+        .width_chars(12)
+        .build();
+    nupath.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.nupaths.clear();
+            for part in entry.text().split(|c: char| c == ',' || c.is_whitespace()) {
+                if let Some(path) = NuPath::from_short(part) {
+                    filters.nupaths.insert(path);
+                }
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let level = gtk::Entry::builder()
+        .placeholder_text("Level")
+        .text(filters.levels.iter().next().map(|n| n.to_string()).unwrap_or_default())
+        .width_chars(6)
+        .build();
+    level.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.levels.clear();
+            if let Ok(n) = entry.text().trim().parse::<i32>() {
+                filters.levels.insert(n);
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let credits = gtk::Entry::builder()
+        .placeholder_text("Credits")
+        .text(&match (filters.min_credits, filters.max_credits) {
+            (Some(min), Some(max)) if min == max => format!("{min}"),
+            (Some(min), None) => format!("{min}+"),
+            _ => String::new(),
+        })
+        .width_chars(8)
+        .build();
+    credits.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            let text = entry.text().trim().to_string();
+            filters.min_credits = None;
+            filters.max_credits = None;
+            if let Some(min) = text.strip_suffix('+').and_then(|s| s.parse().ok()) {
+                filters.min_credits = Some(min);
+            } else if let Ok(n) = text.parse::<f64>() {
+                filters.min_credits = Some(n);
+                filters.max_credits = Some(n);
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let after = gtk::Entry::builder().placeholder_text("After 10:00").width_chars(10).text(filters.starts_after.map(clock_label).unwrap_or_default()).build();
+    after.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.starts_after = parse_clock(&entry.text());
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    let before = gtk::Entry::builder().placeholder_text("Before 17:00").width_chars(10).text(filters.ends_before.map(clock_label).unwrap_or_default()).build();
+    before.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.ends_before = parse_clock(&entry.text());
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
+    for (day, bit) in [("M", DaySet::MONDAY), ("T", DaySet::TUESDAY), ("W", DaySet::WEDNESDAY), ("R", DaySet::THURSDAY), ("F", DaySet::FRIDAY)] {
+        let button = gtk::CheckButton::with_label(day);
+        button.set_active(filters.allowed_days.is_some_and(|set| set.contains(bit)));
+        button.connect_toggled({
+            let shell = shell.clone();
+            move |button| {
+                let mut filters = shell.borrow().state.borrow().filters.clone();
+                let mut set = filters.allowed_days.unwrap_or_default();
+                if button.is_active() {
+                    set.insert(bit);
+                } else {
+                    set.remove(bit);
+                }
+                filters.allowed_days = if set.is_empty() { None } else { Some(set) };
+                shell.borrow().state.borrow_mut().filters = filters;
+                refresh(&shell);
+            }
+        });
+        row.append(&button);
+    }
+    row.append(&campus);
+    row.append(&instruction);
+    row.append(&nupath);
+    row.append(&level);
+    row.append(&credits);
+    row.append(&after);
+    row.append(&before);
+    row.upcast()
+}
+
+fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let prefs = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        current_plan_id(&state)
+            .and_then(|id| state.data.plans.iter().find(|p| p.id == id))
+            .and_then(|p| p.preferences.clone())
+            .unwrap_or_default()
+    };
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    box_.append(&dim_label("Survey. Checked days are days off. Required drops sections; otherwise they only change the ranking."));
+    let days = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for (label, bit) in [("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY)] {
+        let button = gtk::CheckButton::with_label(label);
+        button.set_active(prefs.days_off.contains(bit));
+        button.connect_toggled({
+            let shell = shell.clone();
+            move |button| {
+                update_prefs(&shell, |prefs| {
+                    if button.is_active() {
+                        prefs.days_off.insert(bit);
+                    } else {
+                        prefs.days_off.remove(bit);
+                    }
+                });
+            }
+        });
+        days.append(&button);
+    }
+    let required = gtk::CheckButton::with_label("Days off are required");
+    required.set_active(prefs.days_off_strength == PreferenceStrength::Required);
+    required.connect_toggled({
+        let shell = shell.clone();
+        move |button| {
+            update_prefs(&shell, |prefs| {
+                prefs.days_off_strength = if button.is_active() { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            });
+        }
+    });
+    days.append(&required);
+    box_.append(&days);
+    let format = gtk::DropDown::from_strings(&["No format preference", "In person", "Hybrid", "Online"]);
+    format.set_selected(match prefs.format {
+        FormatPreference::NoPreference => 0,
+        FormatPreference::InPerson => 1,
+        FormatPreference::Hybrid => 2,
+        FormatPreference::Online => 3,
+    });
+    format.connect_selected_notify({
+        let shell = shell.clone();
+        move |dd| {
+            update_prefs(&shell, |prefs| {
+                prefs.format = match dd.selected() {
+                    1 => FormatPreference::InPerson,
+                    2 => FormatPreference::Hybrid,
+                    3 => FormatPreference::Online,
+                    _ => FormatPreference::NoPreference,
+                };
+            });
+        }
+    });
+    let seats = gtk::DropDown::from_strings(&["Any seats", "Waitlist is fine", "Open seats only"]);
+    seats.set_selected(match prefs.seats {
+        SeatPolicy::Any => 0,
+        SeatPolicy::WaitlistOk => 1,
+        SeatPolicy::OpenOnly => 2,
+    });
+    seats.connect_selected_notify({
+        let shell = shell.clone();
+        move |dd| {
+            update_prefs(&shell, |prefs| {
+                prefs.seats = match dd.selected() {
+                    1 => SeatPolicy::WaitlistOk,
+                    2 => SeatPolicy::OpenOnly,
+                    _ => SeatPolicy::Any,
+                };
+            });
+        }
+    });
+    let earliest = gtk::Entry::builder()
+        .placeholder_text("Nothing before 10:00")
+        .text(prefs.earliest_start.as_ref().map(|l| clock_label(l.minutes)).unwrap_or_default())
+        .build();
+    earliest.connect_activate({
+        let shell = shell.clone();
+        move |entry| {
+            let minutes = parse_clock(&entry.text());
+            update_prefs(&shell, |prefs| {
+                prefs.earliest_start = minutes.map(|minutes| TimeLimit { minutes, strength: PreferenceStrength::Required });
+            });
+        }
+    });
+    let lunch = gtk::CheckButton::with_label("Keep a lunch break");
+    lunch.set_active(prefs.lunch.is_some());
+    lunch.connect_toggled({
+        let shell = shell.clone();
+        move |button| {
+            update_prefs(&shell, |prefs| {
+                prefs.lunch = if button.is_active() { Some(LunchBreak::default()) } else { None };
+            });
+        }
+    });
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.append(&format);
+    row.append(&seats);
+    row.append(&earliest);
+    row.append(&lunch);
+    box_.append(&row);
+    box_.upcast()
+}
+
+fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePreferences)) {
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let Some(id) = current_plan_id(&state) else { return };
+        if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
+            let mut prefs = plan.preferences.clone().unwrap_or_default();
+            change(&mut prefs);
+            plan.preferences = Some(prefs.normalized());
+            plan.updated_at = now_secs();
+            persist(&state.data);
+        }
+        state.generated.clear();
+    }
+    refresh(shell);
+}
+
+fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let term = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state.index.catalog.term.code.clone()
+    };
+    toast(shell, "Asking Banner for current seats…");
+    let subject = key.subject.clone();
+    let number = key.number.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(BannerClient::default().live_seats(&term, &subject, &number));
+    });
+    let shell = shell.clone();
+    glib::timeout_add_local(Duration::from_millis(200), move || match rx.try_recv() {
+        Ok(Ok(seats)) => {
+            let n = seats.len();
+            {
+                let shell = shell.borrow();
+                let mut state = shell.state.borrow_mut();
+                for seat in seats {
+                    state.live_seats.insert(seat.crn, (seat.seats_remaining, seat.waitlist_remaining, seat.seat_capacity));
+                }
+            }
+            toast(&shell, &format!("Updated {n} sections from Banner"));
+            refresh(&shell);
+            glib::ControlFlow::Break
+        }
+        Ok(Err(error)) => {
+            toast(&shell, &format!("Banner unreachable ({error}). Showing the snapshot."));
+            glib::ControlFlow::Break
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+    });
+}
+
+fn up_next_summary(state: &State) -> String {
+    let Ok(now) = glib::DateTime::now_local() else { return String::new() };
+    let glib_dow = now.day_of_week();
+    let weekday = if glib_dow == 7 { 0 } else { glib_dow };
+    let minutes = now.hour() * 60 + now.minute();
+    let iso = format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day_of_month());
+    let sections = if let Some(schedule) = state.generated.get(state.picked) {
+        schedule.sections.clone()
+    } else {
+        let term = &state.index.catalog.term.code;
+        let plan = state
+            .plan
+            .and_then(|id| state.data.plans.iter().find(|p| p.id == id))
+            .or_else(|| state.data.plans.iter().find(|p| &p.term_code == term));
+        let Some(plan) = plan else { return String::new() };
+        plan.selected_crns.iter().filter_map(|crn| state.index.section_crn(crn).cloned()).collect()
+    };
+    if sections.is_empty() {
+        return String::new();
+    }
+    let items = termorganize_core::upnext::occurrences(&sections, weekday, minutes, &iso);
+    let summary = termorganize_core::upnext::summary(&items);
+    if summary == "No more classes today" { String::new() } else { format!("Up next: {summary}") }
+}
+
+fn install_drop(shell: &Rc<RefCell<Shell>>) {
+    let target = gtk::DropTarget::new(gio::File::static_type(), gtk::gdk::DragAction::COPY);
+    let dropped = shell.clone();
+    target.connect_drop(move |_, value, _, _| {
+        let Ok(file) = value.get::<gio::File>() else { return false };
+        let Some(path) = file.path() else { return false };
+        match import_pdf(&path) {
+            Ok(plan) => {
+                let shell_ref = dropped.borrow();
+                let mut state = shell_ref.state.borrow_mut();
+                let id = state.data.add_degree_plan(plan);
+                state.degree = Some(id);
+                state.area = 6;
+                persist(&state.data);
+                std::mem::drop(state);
+                std::mem::drop(shell_ref);
+                select_area(&dropped, 6);
+                toast(&dropped, "Degree plan imported");
+                true
+            }
+            Err(error) => {
+                toast(&dropped, &error);
+                false
+            }
+        }
+    });
+    shell.borrow().window.add_controller(target);
+}
+
+fn print_view(shell: &Rc<RefCell<Shell>>) {
+    let text = view_text(shell);
+    let lines = Rc::new(text.lines().map(|s| s.to_string()).collect::<Vec<_>>());
+    let op = gtk::PrintOperation::new();
+    op.set_job_name("Term Organize");
+    op.set_unit(gtk::Unit::Points);
+    let begin = lines.clone();
+    op.connect_begin_print(move |op, ctx| {
+        let per = ((ctx.height() - 72.0) / 14.0).floor().max(1.0) as i32;
+        let per = per.max(1);
+        let pages = ((begin.len() as i32) + per - 1) / per;
+        op.set_n_pages(pages);
+    });
+    op.connect_draw_page(move |_, ctx, page| {
+        let cr = ctx.cairo_context();
+        let per = ((ctx.height() - 72.0) / 14.0).floor().max(1.0) as usize;
+        let start = page as usize * per;
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.set_font_size(11.0);
+        for (i, line) in lines.iter().skip(start).take(per).enumerate() {
+            cr.move_to(36.0, 48.0 + i as f64 * 14.0);
+            let _ = cr.show_text(line);
+        }
+    });
+    let window = shell.borrow().window.clone();
+    if let Err(error) = op.run(gtk::PrintOperationAction::PrintDialog, Some(&window)) {
+        toast(shell, &error.to_string());
+    }
+}
+
+fn view_text(shell: &Rc<RefCell<Shell>>) -> String {
+    let shell_ref = shell.borrow();
+    let state = shell_ref.state.borrow();
+    let mut lines = vec![format!("Term Organize — {}", state.index.catalog.term.name()), legal::UNOFFICIAL_NOTICE.to_string()];
+    if let Some(key) = &state.course {
+        if let Some(course) = state.index.course(key) {
+            lines.push(format!("{} {}", course.code(), course.title));
+            lines.push(course.description.clone());
+        }
+    }
+    match state.area {
+        5 => {
+            if let Some(schedule) = state.generated.get(state.picked) {
+                lines.push(schedule::copy_crns(&schedule.sections));
+                for reason in &schedule.reasons {
+                    lines.push(reason.text.clone());
+                }
+            }
+        }
+        6 => {
+            if let Some(plan) = state.degree.and_then(|id| state.data.degree_plans.iter().find(|p| p.id == id)) {
+                lines.push(degree_format::text(plan, degree_format::now_unix(), state.data.preferences.include_student_in_export));
+            }
+        }
+        _ => {
+            lines.push(state.query.clone());
+        }
+    }
+    lines.join("\n")
+}
+
+fn request_background() {
+    let Ok(proxy) = gio::DBusProxy::for_bus_sync(
+        gio::BusType::Session,
+        gio::DBusProxyFlags::NONE,
+        None,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Background",
+        gio::Cancellable::NONE,
+    ) else {
+        return;
+    };
+    let exe = std::env::current_exe().ok();
+    let Some(exe) = exe else { return };
+    let command = [exe.to_string_lossy().to_string(), "--seat-watch".into()];
+    let commandline = glib::Variant::array_from_iter::<glib::Variant>(command.iter().map(|s| s.to_variant()));
+    let options = glib::VariantDict::new(None);
+    options.insert("handle_token", "termorganize");
+    options.insert("reason", "Check watched sections for open seats");
+    options.insert("autostart", true);
+    options.insert("commandline", &commandline);
+    let params = glib::Variant::tuple_from_iter(["".to_variant(), options.end()]);
+    let _ = proxy.call_sync("RequestBackground", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE);
+}
+
+fn parse_clock(text: &str) -> Option<i32> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((h, m)) = text.split_once(':') {
+        let hour: i32 = h.parse().ok()?;
+        let minute: i32 = m.parse().ok()?;
+        return Some(hour * 60 + minute);
+    }
+    let n: i32 = text.parse().ok()?;
+    if n <= 24 { Some(n * 60) } else { Some(minutes_from_hhmm(n)) }
+}
+
+fn clock_label(minutes: i32) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}

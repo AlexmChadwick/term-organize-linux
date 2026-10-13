@@ -1,0 +1,18 @@
+[package]
+name = "termorganize-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-device catalog, search, schedules, and degree audit for Term Organize"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+flate2 = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+
+[build-dependencies]
+cc = "1"

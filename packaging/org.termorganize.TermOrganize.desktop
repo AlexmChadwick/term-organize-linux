@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Term Organize
+GenericName=Northeastern term planner
+Comment=Search courses, build schedules, and check a degree plan. Unofficial — not affiliated with Northeastern or Sandbox.
+Exec=termorganize %u
+Icon=org.termorganize.TermOrganize
+Terminal=false
+Type=Application
+Categories=Education;Office;
+StartupNotify=true
+Keywords=Northeastern;courses;schedule;degree;CRN;Banner;NUpath;
+MimeType=application/pdf;x-scheme-handler/termorganize;x-scheme-handler/neuclasssearch;

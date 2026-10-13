@@ -1,0 +1,7 @@
+[Unit]
+Description=Term Organize seat alerts
+Documentation=https://github.com/AlexmChadwick/Northeastern-Term-Organize
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/termorganize --seat-watch

@@ -1,0 +1,41 @@
+# Flatpak manifest. Build from a clean tree (no target/):
+#   flatpak-builder --user --install --force-clean build-dir packaging/org.termorganize.TermOrganize.yml
+id: org.termorganize.TermOrganize
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: termorganize
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.Background
+modules:
+  - name: termorganize
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/termorganize/cargo
+    build-commands:
+      - cargo build --release --locked --manifest-path Cargo.toml
+      - install -Dm755 target/release/termorganize /app/bin/termorganize
+      - install -Dm644 data/catalog/term-202710.catalog /app/share/termorganize/catalog/term-202710.catalog
+      - install -Dm644 data/legal/LICENSE.txt /app/share/termorganize/LICENSE.txt
+      - install -Dm644 packaging/org.termorganize.TermOrganize.desktop /app/share/applications/org.termorganize.TermOrganize.desktop
+      - install -Dm644 packaging/org.termorganize.TermOrganize.metainfo.xml /app/share/metainfo/org.termorganize.TermOrganize.metainfo.xml
+      - install -Dm644 packaging/org.termorganize.TermOrganize.svg /app/share/icons/hicolor/scalable/apps/org.termorganize.TermOrganize.svg
+      - install -Dm644 packaging/org.termorganize.TermOrganize.search-provider.ini /app/share/gnome-shell/search-providers/org.termorganize.TermOrganize.search-provider.ini
+      - install -Dm644 packaging/org.termorganize.TermOrganize.SearchProvider.service /app/share/dbus-1/services/org.termorganize.TermOrganize.SearchProvider.service
+      - install -Dm644 packaging/termorganize-seat-watch.service /app/lib/systemd/user/termorganize-seat-watch.service
+      - install -Dm644 packaging/termorganize-seat-watch.timer /app/lib/systemd/user/termorganize-seat-watch.timer
+      - sed -i "s|/usr/bin/termorganize|/app/bin/termorganize|g" /app/share/dbus-1/services/org.termorganize.TermOrganize.SearchProvider.service /app/lib/systemd/user/termorganize-seat-watch.service
+    sources:
+      - type: dir
+        path: ..

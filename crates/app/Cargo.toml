@@ -1,0 +1,18 @@
+[package]
+name = "termorganize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Term Organize for GNOME"
+publish = false
+
+[[bin]]
+name = "termorganize"
+path = "src/main.rs"
+
+[dependencies]
+termorganize-core = { path = "../core" }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde_json = "1"

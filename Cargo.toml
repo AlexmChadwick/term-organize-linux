@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["Term Organize contributors"]
+repository = "https://github.com/AlexmChadwick/Northeastern-Term-Organize"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

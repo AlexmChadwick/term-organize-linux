@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Term Organize watchlist seats
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
