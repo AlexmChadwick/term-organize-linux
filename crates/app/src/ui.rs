@@ -216,18 +216,22 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         sidebar.append(&sidebar_row(icon, name));
     }
     let sidebar_scroll = gtk::ScrolledWindow::builder().child(&sidebar).hscrollbar_policy(gtk::PolicyType::Never).build();
+    fill(&sidebar_scroll);
     let side_page = adw::NavigationPage::builder().title("Term Organize").child(&sidebar_scroll).build();
+    fill(&side_page);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.set_hexpand(true);
-    content.set_vexpand(true);
+    fill(&content);
     let content_page = adw::NavigationPage::builder().title("Search").child(&content).build();
+    fill(&content_page);
 
     let split = adw::NavigationSplitView::new();
     split.set_sidebar(Some(&side_page));
     split.set_content(Some(&content_page));
     split.set_min_sidebar_width(220.0);
     split.set_max_sidebar_width(320.0);
+    // Without this the split keeps its natural height and the page is a short strip.
+    fill(&split);
 
     let title = adw::WindowTitle::new("Search", "Unofficial · not affiliated with Northeastern or Sandbox");
     let header = adw::HeaderBar::new();
@@ -240,7 +244,9 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
     header.pack_end(&menu_button);
 
     let toast = adw::ToastOverlay::new();
+    fill(&toast);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    fill(&column);
     column.append(&header);
     column.append(&split);
     toast.set_child(Some(&column));
@@ -250,6 +256,8 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         .title("Term Organize")
         .default_width(1180)
         .default_height(760)
+        .width_request(360)
+        .height_request(480)
         .content(&toast)
         .show_menubar(true)
         .build();
@@ -298,6 +306,19 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         split_for_size.set_collapsed(width < 860);
     });
 
+    let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        860.0,
+        adw::LengthUnit::Px,
+    ));
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    window.add_breakpoint(breakpoint);
+    split.connect_collapsed_notify(|split| {
+        if split.is_collapsed() {
+            split.set_show_content(true);
+        }
+    });
+
     wire_actions(&shell);
     if let Some(row) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&row));
@@ -315,14 +336,56 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
     if !smoke && shell.borrow().state.borrow().data.preferences.background_refresh_enabled {
         request_background();
     }
+    if smoke {
+        window.set_default_size(1440, 900);
+    }
     window.present();
     if smoke {
         let app = app.clone();
-        glib::timeout_add_local(Duration::from_millis(900), move || {
-            app.quit();
-            glib::ControlFlow::Break
+        let window = window.clone();
+        let content = shell.borrow().content.clone();
+        let tries = Rc::new(Cell::new(0));
+        glib::timeout_add_local(Duration::from_millis(200), move || {
+            tries.set(tries.get() + 1);
+            match page_fills_window(&window, &content) {
+                Ok(message) => {
+                    eprintln!("{message}");
+                    app.quit();
+                    glib::ControlFlow::Break
+                }
+                Err(_) if tries.get() < 15 => glib::ControlFlow::Continue,
+                Err(message) => {
+                    eprintln!("smoke: {message}");
+                    std::process::exit(1);
+                }
+            }
         });
     }
+}
+
+fn fill(widget: &impl IsA<gtk::Widget>) {
+    widget.set_hexpand(true);
+    widget.set_vexpand(true);
+}
+
+/// The main page should occupy the window below the menu and header, not a short strip.
+fn page_fills_window(window: &adw::ApplicationWindow, content: &gtk::Box) -> Result<String, String> {
+    let win_h = window.height();
+    let content_h = content.height();
+    let page = content.first_child();
+    let page_h = page.as_ref().map(|child| child.height()).unwrap_or(0);
+    // Widget height excludes CSS margins, which sit inside the content box.
+    let margin = page.as_ref().map(|child| child.margin_top() + child.margin_bottom()).unwrap_or(0);
+    if win_h < 700 {
+        return Err(format!("window height {win_h} is below 700"));
+    }
+    if content_h + 160 < win_h {
+        return Err(format!("content height {content_h} does not fill window height {win_h}"));
+    }
+    if page_h + margin + 4 < content_h {
+        return Err(format!("page height {page_h} plus margin {margin} does not fill content height {content_h}"));
+    }
+    Ok(format!("smoke: page fills window (window={win_h} content={content_h} page={page_h} margin={margin})"))
 }
 
 fn menu_model() -> gio::Menu {
@@ -381,6 +444,7 @@ fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
 
 fn refresh(shell: &Rc<RefCell<Shell>>) {
     let page = build_page(shell);
+    fill(&page);
     let shell_ref = shell.borrow();
     while let Some(child) = shell_ref.content.first_child() {
         shell_ref.content.remove(&child);
@@ -450,10 +514,10 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     };
     let (rows, total, crn) = hits;
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    root.set_margin_top(12);
-    root.set_margin_bottom(12);
-    root.set_margin_start(12);
-    root.set_margin_end(12);
+    root.set_margin_top(18);
+    root.set_margin_bottom(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
     let entry = gtk::SearchEntry::builder().placeholder_text("Course, professor, CRN, or shorthand like orgo").text(&query).build();
     entry.connect_search_changed({
         let shell = shell.clone();
@@ -463,7 +527,7 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     root.append(&entry);
-    let filters_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let filters_box = wrapping_box();
     let open_only = gtk::CheckButton::with_label("Open seats");
     open_only.set_active(filters.open_seats_only);
     open_only.connect_toggled({
@@ -558,11 +622,15 @@ fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, S
         let name = gtk::Label::new(Some(title));
         name.set_hexpand(true);
         name.set_xalign(0.0);
+        name.set_wrap(true);
+        name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        name.set_lines(2);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        name.set_max_width_chars(48);
         row.append(&code);
         row.append(&name);
-        row.append(&dim_label(credits));
-        row.append(&dim_label(seats));
+        row.append(&meta_label(credits));
+        row.append(&meta_label(seats));
         let item = gtk::ListBoxRow::new();
         item.set_child(Some(&row));
         gap::attach_course_drag(&item, key);
@@ -620,7 +688,14 @@ fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, S
             }
         }));
     }
-    gtk::ScrolledWindow::builder().child(&list).vexpand(true).build().upcast()
+    gtk::ScrolledWindow::builder()
+        .child(&list)
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_width(false)
+        .build()
+        .upcast()
 }
 
 fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
@@ -632,20 +707,18 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     let Some(course) = course else {
         return gtk::Label::new(Some("That course isn’t in this term.")).upcast();
     };
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    root.set_margin_top(12);
-    root.set_margin_start(16);
-    root.set_margin_end(16);
-    root.set_margin_bottom(12);
-    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.set_margin_top(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+    root.set_margin_bottom(18);
+    let bar = wrapping_box();
     let save = gtk::Button::with_label("Save");
     save.connect_clicked({
         let shell = shell.clone();
         let key = key.clone();
         move |_| save_course(&shell, &key)
     });
-    let watch = gtk::Button::with_label("Watch a section");
-    watch.set_sensitive(false);
     let refresh_seats = gtk::Button::with_label("Refresh seats");
     refresh_seats.connect_clicked({
         let shell = shell.clone();
@@ -661,7 +734,6 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     bar.append(&save);
     bar.append(&add);
     bar.append(&refresh_seats);
-    bar.append(&watch);
     root.append(&bar);
     let heading = gtk::Label::new(Some(&format!("{}  {}", course.code(), course.title)));
     heading.add_css_class("title-1");
@@ -678,11 +750,11 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     }
     if let Some(prereq) = &course.prereqs {
         root.append(&heading_label("Prerequisites"));
-        root.append(&gap::requisite_block(shell, prereq));
+        root.append(&gap::requisite_block(shell, prereq, "Prerequisites"));
     }
     if let Some(coreq) = &course.coreqs {
         root.append(&heading_label("Corequisites"));
-        root.append(&gap::requisite_block(shell, coreq));
+        root.append(&gap::requisite_block(shell, coreq, "Corequisites"));
     }
     if !course.postreqs.is_empty() {
         root.append(&heading_label("Leads to"));
@@ -716,7 +788,10 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         seats.set_xalign(1.0);
         top.append(&seats);
         row.append(&top);
-        row.append(&dim_label(&format!("{} · {} · {}", section.schedule_summary(), section.instructor_label(), section.campus)));
+        let detail = dim_label(&format!("{} · {} · {}", section.schedule_summary(), section.instructor_label(), section.campus));
+        detail.set_wrap(true);
+        detail.set_max_width_chars(42);
+        row.append(&detail);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let copy = gtk::Button::with_label("Copy CRN");
         let crn = section.crn.clone();
@@ -764,8 +839,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
             }
         }
     });
-    let scroll = gtk::ScrolledWindow::builder().child(&list).vexpand(true).build();
-    root.append(&scroll);
+    root.append(&list);
     root.upcast()
 }
 
@@ -788,19 +862,25 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         (subjects, selected, courses)
     };
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.28);
+    install_proportional_pane(&paned, 0.32);
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     for (code, name) in &subjects {
         let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        row.set_hexpand(true);
         row.set_margin_top(6);
         row.set_margin_bottom(6);
-        row.set_margin_start(10);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
         let code_label = gtk::Label::new(Some(code));
         code_label.set_xalign(0.0);
         code_label.add_css_class("heading");
-        let name_label = dim_label(name);
+        let name_label = dim_label(&soft_wrap(name, 32));
         name_label.set_xalign(0.0);
+        name_label.set_hexpand(true);
+        name_label.set_wrap(true);
+        name_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        name_label.set_tooltip_text(Some(name));
         row.append(&code_label);
         row.append(&name_label);
         let item = gtk::ListBoxRow::new();
@@ -833,8 +913,19 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             }
         }
     });
-    paned.set_start_child(Some(&gtk::ScrolledWindow::builder().child(&list).build()));
+    let subject_scroll = gtk::ScrolledWindow::builder()
+        .child(&list)
+        .hexpand(true)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_width(false)
+        .build();
+    paned.set_start_child(Some(&subject_scroll));
     let subject_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    subject_column.set_margin_top(12);
+    subject_column.set_margin_bottom(12);
+    subject_column.set_margin_start(12);
+    subject_column.set_margin_end(12);
     subject_column.append(&column_headers(shell));
     subject_column.append(&course_list(shell, &courses, false));
     paned.set_end_child(Some(&subject_column));
@@ -854,9 +945,15 @@ fn saved_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             .filter_map(|s| state.index.course(&s.key).map(|c| (c.key(), c.title.clone(), c.credits_label(), "Saved".into())))
             .collect::<Vec<_>>()
     };
-    let root = page_column("Saved courses", "Courses you starred in this term. Delete removes the selection from the list below.");
+    let root = page_column("Saved courses", "Courses you starred in this term. Delete removes one from the list.");
     if rows.is_empty() {
-        root.append(&dim_label("Nothing saved yet. Open a course and choose Save."));
+        let status = adw::StatusPage::new();
+        status.set_icon_name(Some("starred-symbolic"));
+        status.set_title("Nothing saved yet");
+        status.set_description(Some("Open a course and choose Save."));
+        status.set_vexpand(true);
+        root.append(&status);
+        return root.upcast();
     }
     root.append(&course_list(shell, &rows, true));
     root.upcast()
@@ -944,6 +1041,7 @@ fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     };
     let root = page_column("Professor", &name);
     let back = gtk::Button::with_label("All professors");
+    back.set_halign(gtk::Align::Start);
     back.connect_clicked({
         let shell = shell.clone();
         move |_| {
@@ -954,16 +1052,30 @@ fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     root.append(&back);
     let Some(page) = page else {
         root.append(&dim_label("No sections under that name."));
-        return root.upcast();
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(720);
+        clamp.set_tightening_threshold(480);
+        clamp.set_child(Some(&root));
+        return gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build().upcast();
     };
     root.append(&heading_label(&page.instructor.display_name));
     for course in &page.courses {
-        root.append(&heading_label(&format!("{} · {}", course.key, course.title)));
+        let group = adw::PreferencesGroup::new();
+        group.set_title(&format!("{} · {}", course.key, course.title));
         for section in &course.sections {
-            root.append(&selectable(&format!("CRN {} · {} · {}", section.crn, section.schedule_summary(), section.seats_label())));
+            let row = adw::ActionRow::new();
+            row.set_title(&format!("CRN {}", section.crn));
+            row.set_subtitle(&format!("{} · {}", section.schedule_summary(), section.seats_label()));
+            row.set_subtitle_lines(2);
+            group.add(&row);
         }
+        root.append(&group);
     }
-    gtk::ScrolledWindow::builder().child(&root).build().upcast()
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(720);
+    clamp.set_tightening_threshold(480);
+    clamp.set_child(Some(&root));
+    gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build().upcast()
 }
 
 struct RoomBar {
@@ -1036,7 +1148,7 @@ fn split_free(stretches: &[std::ops::Range<i32>], marker: Option<i32>) -> Vec<(i
 fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let (day, query, date, bars, marker) = room_bars(shell);
     let root = page_column("Free rooms", "Each bar is one room from 7:00 AM to 10:00 PM. Green is free. Gray is a class. A blue line marks the current time when the date is today.");
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let controls = wrapping_box();
     let days = gtk::DropDown::from_strings(&["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
     days.set_selected(day as u32);
     days.connect_selected_notify({
@@ -1152,16 +1264,17 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     side.append(&gtk::ScrolledWindow::builder().child(&plans).vexpand(true).build());
     paned.set_start_child(Some(&side));
 
-    let main = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    main.set_margin_top(8);
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    main.set_margin_top(12);
+    main.set_margin_bottom(18);
+    main.set_margin_start(12);
     main.set_margin_end(12);
-    main.set_margin_bottom(8);
     if snapshot.plan.is_none() {
         main.append(&dim_label("Make a schedule for this term, then add courses from search or a degree plan."));
         paned.set_end_child(Some(&main));
         return paned.upcast();
     }
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let toolbar = wrapping_box();
     for (label, action) in [("Generate", 0), ("Copy CRNs", 1), ("Export .ics", 2), ("Export image", 3), ("Autofill", 4)] {
         let button = gtk::Button::with_label(label);
         let shell = shell.clone();
@@ -1257,23 +1370,6 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     main.append(&add);
-    main.append(&heading_label("Preferences"));
-    main.append(&dim_label("The survey and the description both feed the same generator. Required wishes drop sections. Preferred wishes rank what’s left."));
-    let nl = gtk::Entry::builder().placeholder_text("No classes before 10, Fridays off, and lunch").text(&snapshot.nl).hexpand(true).build();
-    nl.connect_activate({
-        let shell = shell.clone();
-        move |entry| apply_nl(&shell, &entry.text())
-    });
-    let apply = gtk::Button::with_label("Apply description");
-    apply.connect_clicked({
-        let shell = shell.clone();
-        let nl = nl.clone();
-        move |_| apply_nl(&shell, &nl.text())
-    });
-    let nl_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    nl_row.append(&nl);
-    nl_row.append(&apply);
-    main.append(&nl_row);
     main.append(&gap::preference_survey(shell));
     if !snapshot.pref_summary.is_empty() {
         main.append(&selectable(&snapshot.pref_summary));
@@ -1339,7 +1435,6 @@ struct ScheduleSnap {
     plans: Vec<(Uuid, String, usize, bool)>,
     plan: Option<SchedulePlan>,
     courses: Vec<(String, bool)>,
-    nl: String,
     pref_summary: String,
     generated: Vec<SchedLine>,
     picked: usize,
@@ -1404,7 +1499,6 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
         plans,
         plan,
         courses,
-        nl: state.nl.clone(),
         pref_summary: prefs.summary_parts().join(" · "),
         generated,
         picked,
@@ -1506,15 +1600,17 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     side.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
     paned.set_start_child(Some(&side));
 
-    let main = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    main.set_margin_top(8);
-    main.set_margin_end(12);
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    main.set_margin_top(12);
+    main.set_margin_bottom(18);
+    main.set_margin_start(18);
+    main.set_margin_end(18);
     if snap.id.is_none() {
         main.append(&dim_label("Import a degree audit “View Plan” PDF, or start an empty plan and add semesters."));
         paned.set_end_child(Some(&main));
         return paned.upcast();
     }
-    let tools = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tools = wrapping_box();
     for (label, which) in [("Add semester", 0), ("Export PDF", 1), ("Autofill", 2), ("Load requirements", 3)] {
         let button = gtk::Button::with_label(label);
         let shell = shell.clone();
@@ -1527,7 +1623,11 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         tools.append(&button);
     }
     main.append(&tools);
-    main.append(&heading_label(&snap.title));
+    let plan_title = gtk::Label::new(Some(&snap.title));
+    plan_title.add_css_class("title-1");
+    plan_title.set_xalign(0.0);
+    plan_title.set_wrap(true);
+    main.append(&plan_title);
     main.append(&dim_label(&snap.totals));
     if !snap.checks.is_empty() {
         main.append(&heading_label("Checks"));
@@ -1535,17 +1635,28 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             main.append(&selectable(line));
         }
     }
-    let path = gtk::Entry::builder().placeholder_text("Catalog path").text(&snap.catalog_path).hexpand(true).build();
+    let catalog = adw::PreferencesGroup::new();
+    catalog.set_title("Catalog");
+    catalog.set_description(Some("A path from the university catalog, used when you load requirements."));
+    let path = adw::EntryRow::new();
+    path.set_title("Path");
+    path.set_text(&snap.catalog_path);
     path.connect_changed({
         let shell = shell.clone();
-        move |entry| shell.borrow().state.borrow_mut().catalog_path = entry.text().to_string()
+        move |row| shell.borrow().state.borrow_mut().catalog_path = row.text().to_string()
     });
-    main.append(&path);
+    catalog.add(&path);
+    main.append(&catalog);
     if !snap.audit.is_empty() {
-        main.append(&heading_label("Requirements"));
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Requirements");
         for line in &snap.audit {
-            main.append(&selectable(line));
+            let row = adw::ActionRow::new();
+            row.set_title(line);
+            row.set_title_lines(3);
+            group.add(&row);
         }
+        main.append(&group);
     }
     main.append(&gap::equivalence_section(shell));
     main.append(&gap::petition_section(shell));
@@ -1560,7 +1671,11 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     main.append(&add);
-    paned.set_end_child(Some(&gtk::ScrolledWindow::builder().child(&main).build()));
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(880);
+    clamp.set_tightening_threshold(520);
+    clamp.set_child(Some(&main));
+    paned.set_end_child(Some(&gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build()));
     paned.upcast()
 }
 
@@ -1642,18 +1757,19 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             .collect::<Vec<_>>()
     };
     let root = page_column("Watchlist", "Seat alerts run while Term Organize is open, and termorganize --seat-watch can run from a timer.");
+    if rows.is_empty() {
+        let status = adw::StatusPage::new();
+        status.set_icon_name(Some("alarm-symbolic"));
+        status.set_title("No sections watched");
+        status.set_description(Some("Open a course and choose Watch on a section."));
+        status.set_vexpand(true);
+        root.append(&status);
+        return root.upcast();
+    }
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     list.set_activate_on_single_click(false);
-    if rows.is_empty() {
-        let label = gtk::Label::builder().label("No sections watched. Open a course and choose Watch on a section.").margin_top(18).margin_bottom(18).build();
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&label));
-        item.set_activatable(false);
-        item.set_selectable(false);
-        list.append(&item);
-    }
     let watched: Rc<Vec<(String, CourseKey)>> = Rc::new(rows.iter().map(|(crn, key, _, _, _)| (crn.clone(), key.clone())).collect());
     for (crn, key, title, seats, wait) in rows {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -1799,9 +1915,14 @@ fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBl
         cr.set_source_rgba(r, g, b, 0.9);
         cr.rectangle(x, y, col - 6.0, h);
         let _ = cr.fill();
+        let _ = cr.save();
+        cr.rectangle(x, y, (col - 6.0).max(1.0), h);
+        cr.clip();
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.move_to(x + 4.0, y + 14.0);
-        let _ = cr.show_text(&block.label);
+        let chars = ((col - 16.0) / 7.2).floor().max(1.0) as usize;
+        let _ = cr.show_text(&short_text(&block.label, chars));
+        let _ = cr.restore();
     }
 }
 
@@ -1815,7 +1936,7 @@ fn draw_rooms(cr: &gtk::cairo::Context, width: i32, height: i32, view: &RoomCanv
     }
     let _ = cr.paint();
     let inset = 14.0;
-    let label_w = 172.0;
+    let label_w = 228.0;
     let track_x = inset + label_w + 12.0;
     let track_w = (width - track_x - inset).max(48.0);
     let start = rooms::Moment::FIRST_CLASS;
@@ -1861,7 +1982,7 @@ fn draw_rooms(cr: &gtk::cairo::Context, width: i32, height: i32, view: &RoomCanv
             cr.set_source_rgb(0.40, 0.40, 0.44);
         }
         cr.move_to(inset, y + 28.0);
-        let _ = cr.show_text(&short_text(&row.status, 24));
+        let _ = cr.show_text(&short_text(&row.status, 36));
         cr.set_source_rgba(0.5, 0.5, 0.5, 0.16);
         cr.rectangle(track_x, bar_y, track_w, 18.0);
         let _ = cr.fill();
@@ -3081,13 +3202,29 @@ fn sidebar_row(icon: &str, title: &str) -> gtk::ListBoxRow {
 
 fn page_column(title: &str, subtitle: &str) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    root.set_margin_top(12);
-    root.set_margin_bottom(12);
-    root.set_margin_start(12);
-    root.set_margin_end(12);
-    root.append(&heading_label(title));
+    root.set_margin_top(18);
+    root.set_margin_bottom(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("title-2");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    root.append(&heading);
     root.append(&dim_label(subtitle));
     root
+}
+
+fn wrapping_box() -> gtk::FlowBox {
+    let flow = gtk::FlowBox::new();
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_column_spacing(8);
+    flow.set_row_spacing(8);
+    flow.set_min_children_per_line(1);
+    flow.set_max_children_per_line(8);
+    flow.set_homogeneous(false);
+    flow.set_hexpand(true);
+    flow
 }
 
 fn heading_label(text: &str) -> gtk::Label {
@@ -3104,6 +3241,37 @@ fn dim_label(text: &str) -> gtk::Label {
     label.set_xalign(0.0);
     label.set_wrap(true);
     label
+}
+
+fn meta_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("dim-label");
+    label.set_xalign(1.0);
+    label.set_wrap(false);
+    label
+}
+
+/// Break a long sidebar subtitle into lines so the pane cannot clip it mid-word.
+fn soft_wrap(text: &str, width: usize) -> String {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let next = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        if current.is_empty() || next <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines.join("\n")
 }
 
 fn selectable(text: &str) -> gtk::Label {
@@ -3123,8 +3291,8 @@ fn toast(shell: &Rc<RefCell<Shell>>, text: &str) {
 }
 
 fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.set_hexpand(true);
+    let row = wrapping_box();
+    row.set_max_children_per_line(5);
     let campuses = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -3253,8 +3421,11 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
             refresh(&shell);
         }
     });
+    let days = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    days.add_css_class("linked");
     for (day, bit) in [("M", DaySet::MONDAY), ("T", DaySet::TUESDAY), ("W", DaySet::WEDNESDAY), ("R", DaySet::THURSDAY), ("F", DaySet::FRIDAY)] {
-        let button = gtk::CheckButton::with_label(day);
+        let button = gtk::ToggleButton::with_label(day);
+        button.add_css_class("day-toggle");
         button.set_active(filters.allowed_days.is_some_and(|set| set.contains(bit)));
         button.connect_toggled({
             let shell = shell.clone();
@@ -3271,8 +3442,16 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
                 refresh(&shell);
             }
         });
-        row.append(&button);
+        days.append(&button);
     }
+    row.append(&days);
+    campus.set_hexpand(true);
+    instruction.set_hexpand(true);
+    nupath.set_hexpand(true);
+    level.set_hexpand(true);
+    credits.set_hexpand(true);
+    after.set_hexpand(true);
+    before.set_hexpand(true);
     let class_types = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -3285,6 +3464,7 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     let selected_type = filters.class_types.iter().next().cloned();
     class_type.set_selected(selected_type.as_ref().and_then(|name| class_types.iter().position(|item| item == name)).unwrap_or(0) as u32);
     class_type.set_tooltip_text(Some("Class type"));
+    class_type.set_hexpand(true);
     class_type.connect_selected_notify({
         let shell = shell.clone();
         let class_types = class_types.clone();

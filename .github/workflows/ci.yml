@@ -13,10 +13,15 @@ jobs:
         with:
           components: clippy
       - name: System libraries
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config xvfb
       - name: Tests
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Release build
         run: cargo build --release
+      - name: Layout smoke
+        run: |
+          mkdir -p /tmp/termorganize-smoke
+          TERMORGANIZE_DATA=/tmp/termorganize-smoke GDK_BACKEND=x11 GSK_RENDERER=cairo \
+            xvfb-run -a -s "-screen 0 1440x900x24" ./target/release/termorganize --smoke

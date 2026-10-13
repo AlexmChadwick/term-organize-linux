@@ -32,7 +32,8 @@ pub fn install_css() {
         ".req-chip { padding: 2px 4px; }
          .req-grey { opacity: 0.5; }
          .req-branch { margin-left: 12px; padding: 4px; }
-         .semester-card { padding: 8px; }",
+         .semester-card { padding: 12px; }
+         .day-toggle { min-width: 2.75em; padding: 6px 8px; }",
     );
     gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
@@ -229,7 +230,11 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
 pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     remember_recent(shell, key);
     let page = course_page(shell, key);
-    let scroll = gtk::ScrolledWindow::builder().child(&page).build();
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(760);
+    clamp.set_tightening_threshold(480);
+    clamp.set_child(Some(&page));
+    let scroll = gtk::ScrolledWindow::builder().child(&clamp).build();
     let title = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -263,7 +268,7 @@ pub fn attach_course_drag(widget: &impl IsA<gtk::Widget>, key: &CourseKey) {
     widget.add_controller(source);
 }
 
-pub fn requisite_block(shell: &Rc<RefCell<Shell>>, requisite: &Requisite) -> gtk::Widget {
+pub fn requisite_block(shell: &Rc<RefCell<Shell>>, requisite: &Requisite, title: &str) -> gtk::Widget {
     let (offered, completed, equivalences) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -293,7 +298,7 @@ pub fn requisite_block(shell: &Rc<RefCell<Shell>>, requisite: &Requisite) -> gtk
     };
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 6);
     box_.append(&draw_layout(shell, &layout));
-    box_.append(&dim_label(&layout.spoken_description("Prerequisites")));
+    box_.append(&dim_label(&layout.spoken_description(title)));
     box_.upcast()
 }
 
@@ -399,7 +404,7 @@ fn chip(shell: &Rc<RefCell<Shell>>, item: &RequisiteItem) -> gtk::Widget {
 pub fn semester_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snap = semester_snapshot(shell);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let tools = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tools = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let older = gtk::Button::with_label("Check older terms");
     older.connect_clicked({
         let shell = shell.clone();
@@ -878,362 +883,229 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         let state = shell_ref.state.borrow();
         current_plan_id(&state).and_then(|id| state.data.plans.iter().find(|plan| plan.id == id)).and_then(|plan| plan.preferences.clone()).unwrap_or_default()
     };
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    box_.append(&dim_label("Checked days are days off. Required drops sections. Preferred only changes the ranking. Press Enter in a text field to apply it."));
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 18);
 
-    box_.append(&heading_label("Time of day"));
+    let words = adw::PreferencesGroup::new();
+    words.set_title("In your own words");
+    words.set_description(Some("The description and the rows below feed the same generator. Required wishes drop sections. Preferred wishes only change the ranking."));
+    let nl_text = shell.borrow().state.borrow().nl.clone();
+    let nl = entry_row("Description", &nl_text);
+    nl.connect_apply({
+        let shell = shell.clone();
+        move |row| apply_nl(&shell, &row.text())
+    });
+    let apply_row = adw::ActionRow::new();
+    apply_row.set_title("Apply description");
+    apply_row.set_subtitle("Or press Enter in the description");
+    let apply = gtk::Button::with_label("Apply");
+    apply.add_css_class("suggested-action");
+    apply.set_valign(gtk::Align::Center);
+    apply_row.add_suffix(&apply);
+    apply.connect_clicked({
+        let shell = shell.clone();
+        let nl = nl.clone();
+        move |_| apply_nl(&shell, &nl.text())
+    });
+    words.add(&nl);
+    words.add(&apply_row);
+    page.append(&words);
+
+    let time = adw::PreferencesGroup::new();
+    time.set_title("Time of day");
+    time.set_description(Some("Required wishes drop sections. Preferred wishes only change the ranking. Press Enter in a text field to apply it."));
     for band in TimeBand::ALL {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let label = gtk::Label::new(Some(&format!("{} · {}", band.title(), band.detail())));
-        label.set_xalign(0.0);
-        label.set_hexpand(true);
-        let menu = gtk::DropDown::from_strings(&["Avoid", "Okay", "Prefer"]);
-        menu.set_selected(match prefs.band(band) {
-            TimePreference::Avoid => 0,
-            TimePreference::Okay => 1,
-            TimePreference::Prefer => 2,
-        });
-        menu.connect_selected_notify({
-            let shell = shell.clone();
-            move |menu| {
-                let pref = match menu.selected() {
-                    0 => TimePreference::Avoid,
-                    2 => TimePreference::Prefer,
-                    _ => TimePreference::Okay,
-                };
-                update_prefs(&shell, |prefs| prefs.set_band(band, pref));
-            }
-        });
-        row.append(&label);
-        row.append(&menu);
-        box_.append(&row);
+        time.add(&band_row(shell, band, &prefs));
     }
+    page.append(&time);
 
-    let days = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    days.append(&dim_label("Days off"));
-    for (label, bit) in [("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY), ("Sat", DaySet::SATURDAY), ("Sun", DaySet::SUNDAY)] {
-        let button = gtk::CheckButton::with_label(label);
-        button.set_active(prefs.days_off.contains(bit));
-        button.connect_toggled({
-            let shell = shell.clone();
-            move |button| {
-                update_prefs(&shell, |prefs| {
-                    if button.is_active() {
-                        prefs.days_off.insert(bit);
-                    } else {
-                        prefs.days_off.remove(bit);
-                    }
-                });
-            }
-        });
-        days.append(&button);
-    }
-    box_.append(&days);
-    box_.append(&strength_check(shell, "Days off are required", prefs.days_off_strength, |prefs, strength| prefs.days_off_strength = strength));
-
-    let limits = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    limits.append(&clock_entry(shell, "Nothing before", prefs.earliest_start.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default(), true));
-    limits.append(&clock_entry(shell, "Nothing after", prefs.latest_end.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default(), false));
-    box_.append(&limits);
-    box_.append(&strength_check(shell, "Earliest start is required", prefs.earliest_start.as_ref().map(|limit| limit.strength).unwrap_or(PreferenceStrength::Required), |prefs, strength| {
-        if let Some(limit) = &mut prefs.earliest_start {
-            limit.strength = strength;
-        }
-    }));
-    box_.append(&strength_check(shell, "Latest end is required", prefs.latest_end.as_ref().map(|limit| limit.strength).unwrap_or(PreferenceStrength::Required), |prefs, strength| {
-        if let Some(limit) = &mut prefs.latest_end {
-            limit.strength = strength;
-        }
-    }));
-
-    box_.append(&enum_menu(shell, "Day layout", &["No preference", "Fewer days", "Spread out"], match prefs.day_layout {
-        DayLayout::NoPreference => 0,
-        DayLayout::FewerDays => 1,
-        DayLayout::SpreadOut => 2,
-    }, |prefs, index| {
-        prefs.day_layout = match index {
-            1 => DayLayout::FewerDays,
-            2 => DayLayout::SpreadOut,
-            _ => DayLayout::NoPreference,
-        };
-    }));
-    box_.append(&enum_menu(shell, "Gaps", &["Compact", "No preference", "Gaps are fine"], match prefs.gaps {
-        GapPreference::Compact => 0,
-        GapPreference::NoPreference => 1,
-        GapPreference::Fine => 2,
-    }, |prefs, index| {
-        prefs.gaps = match index {
-            0 => GapPreference::Compact,
-            2 => GapPreference::Fine,
-            _ => GapPreference::NoPreference,
-        };
-    }));
-    box_.append(&enum_menu(shell, "Breaks", &["Back-to-back is fine", "Avoid back-to-back", "At least a break"], match prefs.breaks {
-        BreakPreference::Fine => 0,
-        BreakPreference::AvoidBackToBack => 1,
-        BreakPreference::AtLeast => 2,
-    }, |prefs, index| {
-        prefs.breaks = match index {
-            1 => BreakPreference::AvoidBackToBack,
-            2 => BreakPreference::AtLeast,
-            _ => BreakPreference::Fine,
-        };
-    }));
-
-    let numbers = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    numbers.append(&number_entry(shell, "Max classes / day", prefs.max_classes_per_day.map(|n| n.to_string()).unwrap_or_default(), |prefs, value| {
-        prefs.max_classes_per_day = value;
-    }));
-    numbers.append(&number_entry(shell, "Max minutes / day", prefs.max_minutes_per_day.map(|n| n.to_string()).unwrap_or_default(), |prefs, value| {
-        prefs.max_minutes_per_day = value;
-    }));
-    numbers.append(&number_entry(shell, "Minimum break minutes", prefs.minimum_break_minutes.to_string(), |prefs, value| {
-        if let Some(value) = value {
-            prefs.minimum_break_minutes = value;
-        }
-    }));
-    box_.append(&numbers);
-    box_.append(&strength_check(shell, "Minimum break is required", prefs.minimum_break_strength, |prefs, strength| prefs.minimum_break_strength = strength));
-
-    let lunch = gtk::CheckButton::with_label("Keep a lunch break");
-    lunch.set_active(prefs.lunch.is_some());
-    lunch.connect_toggled({
+    let days = adw::PreferencesGroup::new();
+    days.set_title("Days off");
+    days.set_description(Some("Selected days have no classes."));
+    let (picker, _) = day_picker("Days", &[("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY), ("Sat", DaySet::SATURDAY), ("Sun", DaySet::SUNDAY)], |bit| prefs.days_off.contains(bit), {
         let shell = shell.clone();
-        move |button| {
-            update_prefs(&shell, |prefs| prefs.lunch = if button.is_active() { Some(LunchBreak::default()) } else { None });
-        }
-    });
-    box_.append(&lunch);
-
-    box_.append(&heading_label("Blocked times"));
-    for block in &prefs.blocked_times {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let enabled = gtk::CheckButton::with_label(&format!("{} · {}", block.label, block.list_detail()));
-        enabled.set_active(block.is_enabled);
-        let id = block.id;
-        enabled.connect_toggled({
-            let shell = shell.clone();
-            move |button| {
-                update_prefs(&shell, |prefs| {
-                    if let Some(block) = prefs.blocked_times.iter_mut().find(|block| block.id == id) {
-                        block.is_enabled = button.is_active();
-                    }
-                });
-            }
-        });
-        let strength = gtk::DropDown::from_strings(&["If possible", "Always"]);
-        strength.set_selected(if block.strength == PreferenceStrength::Required { 1 } else { 0 });
-        strength.connect_selected_notify({
-            let shell = shell.clone();
-            move |menu| {
-                let value = if menu.selected() == 1 { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-                update_prefs(&shell, |prefs| {
-                    if let Some(block) = prefs.blocked_times.iter_mut().find(|block| block.id == id) {
-                        block.strength = value;
-                    }
-                });
-            }
-        });
-        let remove = gtk::Button::with_label("Remove");
-        remove.connect_clicked({
-            let shell = shell.clone();
-            move |_| {
-                update_prefs(&shell, |prefs| prefs.blocked_times.retain(|block| block.id != id));
-            }
-        });
-        row.append(&enabled);
-        row.append(&strength);
-        row.append(&remove);
-        box_.append(&row);
-    }
-    box_.append(&blocked_form(shell));
-
-    box_.append(&heading_label("Format, campus, seats"));
-    box_.append(&enum_menu(shell, "Format", &["No format preference", "In person", "Hybrid", "Online"], match prefs.format {
-        FormatPreference::NoPreference => 0,
-        FormatPreference::InPerson => 1,
-        FormatPreference::Hybrid => 2,
-        FormatPreference::Online => 3,
-    }, |prefs, index| {
-        prefs.format = match index {
-            1 => FormatPreference::InPerson,
-            2 => FormatPreference::Hybrid,
-            3 => FormatPreference::Online,
-            _ => FormatPreference::NoPreference,
-        };
-    }));
-    box_.append(&strength_check(shell, "Format is required", prefs.format_strength, |prefs, strength| prefs.format_strength = strength));
-    let campus = gtk::Entry::builder().placeholder_text("Campus, like Boston").text(prefs.campus.clone().unwrap_or_default()).hexpand(true).build();
-    campus.connect_activate({
-        let shell = shell.clone();
-        move |entry| {
-            let text = entry.text().trim().to_string();
-            update_prefs(&shell, |prefs| prefs.campus = if text.is_empty() { None } else { Some(text) });
-        }
-    });
-    box_.append(&campus);
-    box_.append(&strength_check(shell, "Campus is required", prefs.campus_strength, |prefs, strength| prefs.campus_strength = strength));
-    box_.append(&enum_menu(shell, "Seats", &["Any seats", "Waitlist is fine", "Open seats only"], match prefs.seats {
-        SeatPolicy::Any => 0,
-        SeatPolicy::WaitlistOk => 1,
-        SeatPolicy::OpenOnly => 2,
-    }, |prefs, index| {
-        prefs.seats = match index {
-            1 => SeatPolicy::WaitlistOk,
-            2 => SeatPolicy::OpenOnly,
-            _ => SeatPolicy::Any,
-        };
-    }));
-
-    box_.append(&heading_label("Instructors and credits"));
-    let preferred = gtk::Entry::builder().placeholder_text("Preferred instructors, comma separated").text(prefs.preferred_instructors.join(", ")).build();
-    preferred.connect_activate({
-        let shell = shell.clone();
-        move |entry| {
-            let names = split_names(&entry.text());
-            update_prefs(&shell, |prefs| prefs.preferred_instructors = names);
-        }
-    });
-    let avoided = gtk::Entry::builder().placeholder_text("Avoided instructors, comma separated").text(prefs.avoided_instructors.join(", ")).build();
-    avoided.connect_activate({
-        let shell = shell.clone();
-        move |entry| {
-            let names = split_names(&entry.text());
-            update_prefs(&shell, |prefs| prefs.avoided_instructors = names);
-        }
-    });
-    box_.append(&preferred);
-    box_.append(&avoided);
-    let credits = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let lower = gtk::Entry::builder().placeholder_text("Min credits").text(prefs.credit_target.as_ref().map(|t| t.lower.to_string()).unwrap_or_default()).build();
-    let upper = gtk::Entry::builder().placeholder_text("Max credits").text(prefs.credit_target.as_ref().map(|t| t.upper.to_string()).unwrap_or_default()).build();
-    let apply_credits = Rc::new({
-        let shell = shell.clone();
-        let lower = lower.clone();
-        let upper = upper.clone();
-        move || {
-            let lo = lower.text().trim().parse::<i32>().ok();
-            let hi = upper.text().trim().parse::<i32>().ok();
+        move |bit, on| {
             update_prefs(&shell, |prefs| {
-                prefs.credit_target = match (lo, hi) {
-                    (Some(lo), Some(hi)) => Some(CreditTarget::new(lo, hi)),
-                    (Some(lo), None) => Some(CreditTarget::new(lo, lo)),
-                    (None, Some(hi)) => Some(CreditTarget::new(hi, hi)),
-                    (None, None) => None,
-                };
-            });
-        }
-    });
-    lower.connect_activate({
-        let apply_credits = apply_credits.clone();
-        move |_| apply_credits()
-    });
-    upper.connect_activate({
-        let apply_credits = apply_credits.clone();
-        move |_| apply_credits()
-    });
-    credits.append(&lower);
-    credits.append(&upper);
-    box_.append(&credits);
-    box_.upcast()
-}
-
-fn clock_entry(shell: &Rc<RefCell<Shell>>, placeholder: &str, text: String, earliest: bool) -> gtk::Widget {
-    let entry = gtk::Entry::builder().placeholder_text(placeholder).text(&text).build();
-    entry.connect_activate({
-        let shell = shell.clone();
-        move |entry| {
-            let minutes = parse_clock(&entry.text());
-            update_prefs(&shell, |prefs| {
-                let limit = minutes.map(|minutes| TimeLimit { minutes, strength: PreferenceStrength::Required });
-                if earliest {
-                    if let (Some(next), Some(prev)) = (&limit, &prefs.earliest_start) {
-                        let mut next = next.clone();
-                        next.strength = prev.strength;
-                        prefs.earliest_start = Some(next);
-                    } else {
-                        prefs.earliest_start = limit;
-                    }
-                } else if let (Some(next), Some(prev)) = (&limit, &prefs.latest_end) {
-                    let mut next = next.clone();
-                    next.strength = prev.strength;
-                    prefs.latest_end = Some(next);
+                if on {
+                    prefs.days_off.insert(bit);
                 } else {
-                    prefs.latest_end = limit;
+                    prefs.days_off.remove(bit);
                 }
             });
         }
     });
-    entry.upcast()
-}
-
-fn number_entry(shell: &Rc<RefCell<Shell>>, placeholder: &str, text: String, apply: impl Fn(&mut SchedulePreferences, Option<i32>) + 'static) -> gtk::Widget {
-    let entry = gtk::Entry::builder().placeholder_text(placeholder).text(&text).build();
-    entry.connect_activate({
+    days.add(&picker);
+    days.add(&switch_row("Required", Some("Drop sections that meet on a day off"), prefs.days_off_strength == PreferenceStrength::Required, {
         let shell = shell.clone();
-        move |entry| {
-            let value = entry.text().trim().parse::<i32>().ok();
-            update_prefs(&shell, |prefs| apply(prefs, value));
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| prefs.days_off_strength = strength);
+        }
+    }));
+    page.append(&days);
+
+    let limits = adw::PreferencesGroup::new();
+    limits.set_title("Start and end");
+    limits.set_description(Some("Leave a time blank to clear it."));
+    let earliest = entry_row("Nothing before", prefs.earliest_start.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default());
+    earliest.connect_apply({
+        let shell = shell.clone();
+        move |row| apply_clock(&shell, &row.text(), true)
+    });
+    limits.add(&earliest);
+    limits.add(&switch_row("Earliest start is required", None, prefs.earliest_start.as_ref().map(|limit| limit.strength) == Some(PreferenceStrength::Required), {
+        let shell = shell.clone();
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| {
+                if let Some(limit) = &mut prefs.earliest_start {
+                    limit.strength = strength;
+                }
+            });
+        }
+    }));
+    let latest = entry_row("Nothing after", prefs.latest_end.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default());
+    latest.connect_apply({
+        let shell = shell.clone();
+        move |row| apply_clock(&shell, &row.text(), false)
+    });
+    limits.add(&latest);
+    limits.add(&switch_row("Latest end is required", None, prefs.latest_end.as_ref().map(|limit| limit.strength) == Some(PreferenceStrength::Required), {
+        let shell = shell.clone();
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| {
+                if let Some(limit) = &mut prefs.latest_end {
+                    limit.strength = strength;
+                }
+            });
+        }
+    }));
+    page.append(&limits);
+
+    let shape = adw::PreferencesGroup::new();
+    shape.set_title("Shape of the week");
+    shape.add(&combo_row("Day layout", None, &["No preference", "Fewer days", "Spread out"], match prefs.day_layout {
+        DayLayout::NoPreference => 0,
+        DayLayout::FewerDays => 1,
+        DayLayout::SpreadOut => 2,
+    }, {
+        let shell = shell.clone();
+        move |index| {
+            update_prefs(&shell, |prefs| {
+                prefs.day_layout = match index {
+                    1 => DayLayout::FewerDays,
+                    2 => DayLayout::SpreadOut,
+                    _ => DayLayout::NoPreference,
+                };
+            });
+        }
+    }));
+    shape.add(&combo_row("Gaps", None, &["Compact", "No preference", "Gaps are fine"], match prefs.gaps {
+        GapPreference::Compact => 0,
+        GapPreference::NoPreference => 1,
+        GapPreference::Fine => 2,
+    }, {
+        let shell = shell.clone();
+        move |index| {
+            update_prefs(&shell, |prefs| {
+                prefs.gaps = match index {
+                    0 => GapPreference::Compact,
+                    2 => GapPreference::Fine,
+                    _ => GapPreference::NoPreference,
+                };
+            });
+        }
+    }));
+    shape.add(&combo_row("Breaks", None, &["Back-to-back is fine", "Avoid back-to-back", "At least a break"], match prefs.breaks {
+        BreakPreference::Fine => 0,
+        BreakPreference::AvoidBackToBack => 1,
+        BreakPreference::AtLeast => 2,
+    }, {
+        let shell = shell.clone();
+        move |index| {
+            update_prefs(&shell, |prefs| {
+                prefs.breaks = match index {
+                    1 => BreakPreference::AvoidBackToBack,
+                    2 => BreakPreference::AtLeast,
+                    _ => BreakPreference::Fine,
+                };
+            });
+        }
+    }));
+    let max_classes = entry_row("Max classes per day", prefs.max_classes_per_day.map(|n| n.to_string()).unwrap_or_default());
+    max_classes.connect_apply({
+        let shell = shell.clone();
+        move |row| {
+            let value = row.text().trim().parse::<i32>().ok();
+            update_prefs(&shell, |prefs| prefs.max_classes_per_day = value);
         }
     });
-    entry.upcast()
-}
-
-fn strength_check(shell: &Rc<RefCell<Shell>>, label: &str, strength: PreferenceStrength, apply: impl Fn(&mut SchedulePreferences, PreferenceStrength) + 'static) -> gtk::Widget {
-    let button = gtk::CheckButton::with_label(label);
-    button.set_active(strength == PreferenceStrength::Required);
-    button.connect_toggled({
+    shape.add(&max_classes);
+    let max_minutes = entry_row("Max minutes per day", prefs.max_minutes_per_day.map(|n| n.to_string()).unwrap_or_default());
+    max_minutes.connect_apply({
         let shell = shell.clone();
-        move |button| {
-            let strength = if button.is_active() { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| apply(prefs, strength));
+        move |row| {
+            let value = row.text().trim().parse::<i32>().ok();
+            update_prefs(&shell, |prefs| prefs.max_minutes_per_day = value);
         }
     });
-    button.upcast()
-}
-
-fn enum_menu(shell: &Rc<RefCell<Shell>>, _title: &str, labels: &[&str], selected: u32, apply: impl Fn(&mut SchedulePreferences, u32) + 'static) -> gtk::Widget {
-    let menu = gtk::DropDown::from_strings(labels);
-    menu.set_selected(selected);
-    menu.connect_selected_notify({
+    shape.add(&max_minutes);
+    let minimum_break = entry_row("Minimum break, minutes", prefs.minimum_break_minutes.to_string());
+    minimum_break.connect_apply({
         let shell = shell.clone();
-        move |menu| {
-            let index = menu.selected();
-            update_prefs(&shell, |prefs| apply(prefs, index));
+        move |row| {
+            if let Ok(value) = row.text().trim().parse::<i32>() {
+                update_prefs(&shell, |prefs| prefs.minimum_break_minutes = value);
+            }
         }
     });
-    menu.upcast()
-}
+    shape.add(&minimum_break);
+    shape.add(&switch_row("Minimum break is required", None, prefs.minimum_break_strength == PreferenceStrength::Required, {
+        let shell = shell.clone();
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| prefs.minimum_break_strength = strength);
+        }
+    }));
+    shape.add(&switch_row("Keep a lunch break", Some("Leave a gap around noon"), prefs.lunch.is_some(), {
+        let shell = shell.clone();
+        move |on| update_prefs(&shell, |prefs| prefs.lunch = if on { Some(LunchBreak::default()) } else { None })
+    }));
+    page.append(&shape);
 
-fn blocked_form(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let label = gtk::Entry::builder().placeholder_text("Blocked time, like Work").build();
-    let days = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    let mut checks = Vec::new();
-    for (name, bit) in [("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY)] {
-        let button = gtk::CheckButton::with_label(name);
-        days.append(&button);
-        checks.push((button, bit));
+    let blocked = adw::PreferencesGroup::new();
+    blocked.set_title("Blocked times");
+    blocked.set_description(Some("A required block drops sections that overlap it."));
+    for block in &prefs.blocked_times {
+        blocked.add(&blocked_row(shell, block));
     }
-    let start = gtk::Entry::builder().placeholder_text("Start 9:00").text("9:00").build();
-    let end = gtk::Entry::builder().placeholder_text("End 12:00").text("12:00").build();
-    let required = gtk::CheckButton::with_label("Required");
+    let label = entry_row("Label", "");
+    let (block_days, day_buttons) = day_picker("Days", &[("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY)], |_| false, |_, _| {});
+    let start = entry_row("Starts", "9:00");
+    let end = entry_row("Ends", "12:00");
+    let required = adw::SwitchRow::new();
+    required.set_title("Required");
+    required.set_subtitle("Drop overlapping sections");
     required.set_active(true);
-    let add = gtk::Button::with_label("Add blocked time");
-    let times = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    times.append(&start);
-    times.append(&end);
-    times.append(&required);
-    times.append(&add);
-    box_.append(&label);
-    box_.append(&days);
-    box_.append(&times);
+    let add_row = adw::ActionRow::new();
+    add_row.set_title("Add this block");
+    let add = gtk::Button::with_label("Add");
+    add.add_css_class("suggested-action");
+    add.set_valign(gtk::Align::Center);
+    add_row.add_suffix(&add);
+    blocked.add(&label);
+    blocked.add(&block_days);
+    blocked.add(&start);
+    blocked.add(&end);
+    blocked.add(&required);
+    blocked.add(&add_row);
     add.connect_clicked({
         let shell = shell.clone();
-        let checks = checks.clone();
+        let day_buttons = day_buttons.clone();
+        let required = required.clone();
         move |_| {
             let mut dayset = DaySet(0);
-            for (button, bit) in &checks {
+            for (button, bit) in day_buttons.iter() {
                 if button.is_active() {
                     dayset.insert(*bit);
                 }
@@ -1263,7 +1135,279 @@ fn blocked_form(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             update_prefs(&shell, |prefs| prefs.blocked_times.push(block));
         }
     });
-    box_.upcast()
+    page.append(&blocked);
+
+    let format = adw::PreferencesGroup::new();
+    format.set_title("Format, campus, and seats");
+    format.add(&combo_row("Format", None, &["No format preference", "In person", "Hybrid", "Online"], match prefs.format {
+        FormatPreference::NoPreference => 0,
+        FormatPreference::InPerson => 1,
+        FormatPreference::Hybrid => 2,
+        FormatPreference::Online => 3,
+    }, {
+        let shell = shell.clone();
+        move |index| {
+            update_prefs(&shell, |prefs| {
+                prefs.format = match index {
+                    1 => FormatPreference::InPerson,
+                    2 => FormatPreference::Hybrid,
+                    3 => FormatPreference::Online,
+                    _ => FormatPreference::NoPreference,
+                };
+            });
+        }
+    }));
+    format.add(&switch_row("Format is required", None, prefs.format_strength == PreferenceStrength::Required, {
+        let shell = shell.clone();
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| prefs.format_strength = strength);
+        }
+    }));
+    let campus = entry_row("Campus", prefs.campus.clone().unwrap_or_default());
+    campus.connect_apply({
+        let shell = shell.clone();
+        move |row| {
+            let text = row.text().trim().to_string();
+            update_prefs(&shell, |prefs| prefs.campus = if text.is_empty() { None } else { Some(text) });
+        }
+    });
+    format.add(&campus);
+    format.add(&switch_row("Campus is required", None, prefs.campus_strength == PreferenceStrength::Required, {
+        let shell = shell.clone();
+        move |on| {
+            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| prefs.campus_strength = strength);
+        }
+    }));
+    format.add(&combo_row("Seats", None, &["Any seats", "Waitlist is fine", "Open seats only"], match prefs.seats {
+        SeatPolicy::Any => 0,
+        SeatPolicy::WaitlistOk => 1,
+        SeatPolicy::OpenOnly => 2,
+    }, {
+        let shell = shell.clone();
+        move |index| {
+            update_prefs(&shell, |prefs| {
+                prefs.seats = match index {
+                    1 => SeatPolicy::WaitlistOk,
+                    2 => SeatPolicy::OpenOnly,
+                    _ => SeatPolicy::Any,
+                };
+            });
+        }
+    }));
+    page.append(&format);
+
+    let people = adw::PreferencesGroup::new();
+    people.set_title("Instructors and credits");
+    let preferred = entry_row("Preferred instructors", prefs.preferred_instructors.join(", "));
+    preferred.connect_apply({
+        let shell = shell.clone();
+        move |row| {
+            let names = split_names(&row.text());
+            update_prefs(&shell, |prefs| prefs.preferred_instructors = names);
+        }
+    });
+    let avoided = entry_row("Avoided instructors", prefs.avoided_instructors.join(", "));
+    avoided.connect_apply({
+        let shell = shell.clone();
+        move |row| {
+            let names = split_names(&row.text());
+            update_prefs(&shell, |prefs| prefs.avoided_instructors = names);
+        }
+    });
+    people.add(&preferred);
+    people.add(&avoided);
+    let lower = entry_row("Minimum credits", prefs.credit_target.as_ref().map(|t| t.lower.to_string()).unwrap_or_default());
+    let upper = entry_row("Maximum credits", prefs.credit_target.as_ref().map(|t| t.upper.to_string()).unwrap_or_default());
+    let apply_credits = Rc::new({
+        let shell = shell.clone();
+        let lower = lower.clone();
+        let upper = upper.clone();
+        move || {
+            let lo = lower.text().trim().parse::<i32>().ok();
+            let hi = upper.text().trim().parse::<i32>().ok();
+            update_prefs(&shell, |prefs| {
+                prefs.credit_target = match (lo, hi) {
+                    (Some(lo), Some(hi)) => Some(CreditTarget::new(lo, hi)),
+                    (Some(lo), None) => Some(CreditTarget::new(lo, lo)),
+                    (None, Some(hi)) => Some(CreditTarget::new(hi, hi)),
+                    (None, None) => None,
+                };
+            });
+        }
+    });
+    lower.connect_apply({
+        let apply_credits = apply_credits.clone();
+        move |_| apply_credits()
+    });
+    upper.connect_apply({
+        let apply_credits = apply_credits.clone();
+        move |_| apply_credits()
+    });
+    people.add(&lower);
+    people.add(&upper);
+    page.append(&people);
+
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(720);
+    clamp.set_tightening_threshold(480);
+    clamp.set_margin_top(6);
+    clamp.set_margin_bottom(12);
+    clamp.set_child(Some(&page));
+    clamp.upcast()
+}
+
+fn band_row(shell: &Rc<RefCell<Shell>>, band: TimeBand, prefs: &SchedulePreferences) -> adw::ComboRow {
+    let selected = match prefs.band(band) {
+        TimePreference::Avoid => 0,
+        TimePreference::Okay => 1,
+        TimePreference::Prefer => 2,
+    };
+    let shell = shell.clone();
+    combo_row(band.title(), Some(band.detail()), &["Avoid", "Okay", "Prefer"], selected, move |index| {
+        let pref = match index {
+            0 => TimePreference::Avoid,
+            2 => TimePreference::Prefer,
+            _ => TimePreference::Okay,
+        };
+        update_prefs(&shell, |prefs| prefs.set_band(band, pref));
+    })
+}
+
+fn combo_row(title: &str, subtitle: Option<&str>, labels: &[&str], selected: u32, apply: impl Fn(u32) + 'static) -> adw::ComboRow {
+    let row = adw::ComboRow::new();
+    row.set_title(title);
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
+    }
+    row.set_model(Some(&gtk::StringList::new(labels)));
+    row.set_selected(selected);
+    row.connect_selected_notify(move |row| apply(row.selected()));
+    row
+}
+
+fn switch_row(title: &str, subtitle: Option<&str>, active: bool, apply: impl Fn(bool) + 'static) -> adw::SwitchRow {
+    let row = adw::SwitchRow::new();
+    row.set_title(title);
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
+    }
+    row.set_active(active);
+    row.connect_active_notify(move |row| apply(row.is_active()));
+    row
+}
+
+fn entry_row(title: &str, text: impl AsRef<str>) -> adw::EntryRow {
+    let row = adw::EntryRow::new();
+    row.set_title(title);
+    row.set_text(text.as_ref());
+    row
+}
+
+fn apply_clock(shell: &Rc<RefCell<Shell>>, text: &str, earliest: bool) {
+    let minutes = parse_clock(text);
+    update_prefs(shell, |prefs| {
+        let limit = minutes.map(|minutes| TimeLimit { minutes, strength: PreferenceStrength::Required });
+        if earliest {
+            if let (Some(next), Some(prev)) = (&limit, &prefs.earliest_start) {
+                let mut next = next.clone();
+                next.strength = prev.strength;
+                prefs.earliest_start = Some(next);
+            } else {
+                prefs.earliest_start = limit;
+            }
+        } else if let (Some(next), Some(prev)) = (&limit, &prefs.latest_end) {
+            let mut next = next.clone();
+            next.strength = prev.strength;
+            prefs.latest_end = Some(next);
+        } else {
+            prefs.latest_end = limit;
+        }
+    });
+}
+
+fn day_picker(title: &str, days: &[(&str, DaySet)], is_on: impl Fn(DaySet) -> bool, toggle: impl Fn(DaySet, bool) + 'static) -> (adw::PreferencesRow, Rc<Vec<(gtk::ToggleButton, DaySet)>>) {
+    let toggle = Rc::new(toggle);
+    let row = adw::PreferencesRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+    let inner = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    inner.set_margin_top(12);
+    inner.set_margin_bottom(12);
+    inner.set_margin_start(12);
+    inner.set_margin_end(12);
+    let label = gtk::Label::new(Some(title));
+    label.add_css_class("heading");
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    inner.append(&label);
+    let flow = gtk::FlowBox::new();
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_homogeneous(true);
+    flow.set_column_spacing(6);
+    flow.set_row_spacing(6);
+    flow.set_min_children_per_line(2);
+    flow.set_max_children_per_line(7);
+    flow.set_hexpand(true);
+    let mut buttons: Vec<(gtk::ToggleButton, DaySet)> = Vec::new();
+    for (name, bit) in days {
+        let button = gtk::ToggleButton::with_label(name);
+        button.add_css_class("day-toggle");
+        button.set_active(is_on(*bit));
+        button.set_hexpand(true);
+        let bit = *bit;
+        let toggle = toggle.clone();
+        button.connect_toggled(move |button| toggle(bit, button.is_active()));
+        buttons.push((button.clone(), bit));
+        flow.append(&button);
+    }
+    inner.append(&flow);
+    row.set_child(Some(&inner));
+    (row, Rc::new(buttons))
+}
+
+fn blocked_row(shell: &Rc<RefCell<Shell>>, block: &BlockedTime) -> adw::SwitchRow {
+    let id = block.id;
+    let row = adw::SwitchRow::new();
+    row.set_title(&block.label);
+    row.set_subtitle(&block.list_detail());
+    row.set_active(block.is_enabled);
+    row.connect_active_notify({
+        let shell = shell.clone();
+        move |row| {
+            let on = row.is_active();
+            update_prefs(&shell, |prefs| {
+                if let Some(block) = prefs.blocked_times.iter_mut().find(|block| block.id == id) {
+                    block.is_enabled = on;
+                }
+            });
+        }
+    });
+    let strength = gtk::DropDown::from_strings(&["If possible", "Always"]);
+    strength.set_selected(if block.strength == PreferenceStrength::Required { 1 } else { 0 });
+    strength.set_valign(gtk::Align::Center);
+    strength.connect_selected_notify({
+        let shell = shell.clone();
+        move |menu| {
+            let value = if menu.selected() == 1 { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            update_prefs(&shell, |prefs| {
+                if let Some(block) = prefs.blocked_times.iter_mut().find(|block| block.id == id) {
+                    block.strength = value;
+                }
+            });
+        }
+    });
+    let remove = gtk::Button::with_label("Remove");
+    remove.add_css_class("flat");
+    remove.set_valign(gtk::Align::Center);
+    remove.connect_clicked({
+        let shell = shell.clone();
+        move |_| update_prefs(&shell, |prefs| prefs.blocked_times.retain(|block| block.id != id))
+    });
+    row.add_suffix(&strength);
+    row.add_suffix(&remove);
+    row
 }
 
 fn split_names(text: &str) -> Vec<String> {

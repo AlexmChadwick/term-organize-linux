@@ -32,7 +32,7 @@ termorganize 'termorganize://search?q=orgo'
 termorganize --search "fundies"
 termorganize --search-provider    GNOME Shell search provider
 termorganize --seat-watch         one seat-alert pass
-termorganize --smoke              open and quit (used by the headless check)
+termorganize --smoke              open at 1440×900, require the page to fill the window, then quit
 ```
 
 Keyboard shortcuts follow the Mac app with Ctrl in place of Command: Ctrl+N new schedule, Shift+Ctrl+N new degree plan, Ctrl+O import, Ctrl+E export, Ctrl+P print, Ctrl+R reload, Ctrl+1 through Ctrl+8 switch areas, Ctrl+, settings.

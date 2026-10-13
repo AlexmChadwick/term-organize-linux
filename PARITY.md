@@ -8,7 +8,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 
 | Mac | Linux | Status |
 | --- | --- | --- |
-| Sidebar of Search, Subjects, Saved, Professors, Free Rooms, schedules, degree plans, watchlist | `crates/app/src/ui.rs` areas, `adw::NavigationSplitView` | ported |
+| Sidebar of Search, Subjects, Saved, Professors, Free Rooms, schedules, degree plans, watchlist | `crates/app/src/ui.rs` areas, `adw::NavigationSplitView`. The split and each page expand so the page fills the window (`--smoke` checks the height) | ported |
 | Term menu in the toolbar | Header `DropDown`. Bundled and cached terms open immediately. The menu also lists Banner’s terms (`classSearch/getTerms`) and downloads a missing term with `CatalogBuilder` (`catalog.rs`), then caches `term-{code}.catalog` | ported |
 | Resizable panes; small window floats the sidebar | Subjects, Schedules, and Degree Plans use `gtk::Paned` with both children resizing, so the divider keeps a share of the width (0.28, 0.26, 0.24). Dragging it under 80px hides that pane. Double-click restores the share. The sidebar collapses under 860px | ported |
 | Course and professor windows side by side | Clicking a course or professor opens an `adw::Window`. Search stays put, so several courses can be open at once | ported |
@@ -47,7 +47,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Week calendar | Cairo week drawing. Saturday and Sunday appear when Settings → show weekends is on, or when a meeting falls on them. The hour range follows the calendar start and end hours and stretches to fit the meetings | ported |
 | Conflict detection, 5-minute masks, half-term date overlap | `schedule.rs` `ScheduleSlotMask`, `Meeting::overlaps` | ported |
 | Generator: DFS, forward checking, optional courses, sampling, best-N | `schedule::generate` | ported |
-| Preferences survey | Time-of-day bands, days off and strength, earliest and latest, day layout, gaps, breaks, minimum break, lunch, blocked times (add, enable, strength, remove), format and strength, campus and strength, seats, instructors, credit target, plus the natural-language line | ported |
+| Preferences survey | Time-of-day bands, days off and strength, earliest and latest, day layout, gaps, breaks, minimum break, lunch, blocked times (add, enable, strength, remove), format and strength, campus and strength, seats, instructors, credit target, plus the natural-language line. The window uses `AdwClamp`, `AdwPreferencesGroup`, `ComboRow`, `SwitchRow`, and `EntryRow`, with day toggles that wrap | ported |
 | Ranking with reasons | List shows CRNs and reason text | ported |
 | No-results suggestions | `suggest_relaxations` titles when Generate finds nothing | ported |
 | Export .ics | `schedule::ics`, same VTIMEZONE and UID shape | ported |
