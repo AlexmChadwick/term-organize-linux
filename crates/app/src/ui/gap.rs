@@ -406,7 +406,7 @@ pub fn semester_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         move |_| refresh_older_terms(&shell)
     });
     tools.append(&older);
-    tools.append(&dim_label("Drag a course onto another semester. Older-term checks fill offering history and catalog details Banner still has."));
+    tools.append(&dim_label("Drag a course onto another semester. Return opens it. Delete removes it. Older-term checks fill offering history and catalog details Banner still has."));
     root.append(&tools);
     if snap.is_empty() {
         root.append(&dim_label("Add a semester, then drop courses into it."));
@@ -607,10 +607,32 @@ fn semester_card(shell: &Rc<RefCell<Shell>>, semester: &SemesterSnap) -> gtk::Wi
     card.append(&heading_label(&semester.title));
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.set_activate_on_single_click(false);
     let count = semester.courses.len() as i32;
+    let ids: Vec<Uuid> = semester.courses.iter().map(|course| course.id).collect();
+    let keys: Vec<Option<CourseKey>> = semester.courses.iter().map(|course| course.key.clone()).collect();
     for (index, course) in semester.courses.iter().enumerate() {
         list.append(&course_drag_row(shell, semester.id, course, index as i32));
     }
+    list.connect_row_activated({
+        let shell = shell.clone();
+        let keys = keys.clone();
+        move |_, row| {
+            if let Some(Some(key)) = keys.get(row.index() as usize) {
+                open_course_window(&shell, key);
+            }
+        }
+    });
+    super::attach_delete_key(&list, {
+        let shell = shell.clone();
+        let ids = ids.clone();
+        std::rc::Rc::new(move |index| {
+            if let Some(id) = ids.get(index as usize) {
+                super::remove_degree_course(&shell, *id);
+            }
+        })
+    });
     attach_semester_drop(&list, shell, semester.id, count);
     card.append(&list);
     for suggestion in &semester.suggestions {
@@ -656,6 +678,19 @@ fn course_drag_row(shell: &Rc<RefCell<Shell>>, term_id: Uuid, course: &CourseRow
         box_.append(&open);
         attach_course_drag(&box_, key);
     }
+    let mut entries = Vec::new();
+    if let Some(key) = &course.key {
+        let shell_open = shell.clone();
+        let key_open = key.clone();
+        entries.push(super::menu_action("Open", move || open_course_window(&shell_open, &key_open)));
+        let shell_copy = shell.clone();
+        let code = key.to_string();
+        entries.push(super::menu_action("Copy code", move || super::copy_text(&shell_copy, &code, "Course code copied")));
+    }
+    let shell_remove = shell.clone();
+    let course_id = course.id;
+    entries.push(super::menu_action("Remove", move || super::remove_degree_course(&shell_remove, course_id)));
+    super::attach_context_menu(&row, entries);
     let source = gtk::DragSource::new();
     source.set_actions(gtk::gdk::DragAction::MOVE);
     let payload = format!("id:{}", course.id);

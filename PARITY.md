@@ -10,9 +10,9 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | --- | --- | --- |
 | Sidebar of Search, Subjects, Saved, Professors, Free Rooms, schedules, degree plans, watchlist | `crates/app/src/ui.rs` areas, `adw::NavigationSplitView` | ported |
 | Term menu in the toolbar | Header `DropDown`. Bundled and cached terms open immediately. The menu also lists Banner’s terms (`classSearch/getTerms`) and downloads a missing term with `CatalogBuilder` (`catalog.rs`), then caches `term-{code}.catalog` | ported |
-| Resizable panes; small window floats the sidebar | `gtk::Paned` inside Subjects, Schedules, and Degree Plans. Double-click the divider (`install_pane_reset`) puts the pixel position back. Sidebar collapses under 860px (View → Show or Hide Sidebar, Ctrl+Alt+0). The divider position is pixels, not a share of the window, and dragging it to the edge does not hide the pane | partial |
+| Resizable panes; small window floats the sidebar | Subjects, Schedules, and Degree Plans use `gtk::Paned` with both children resizing, so the divider keeps a share of the width (0.28, 0.26, 0.24). Dragging it under 80px hides that pane. Double-click restores the share. The sidebar collapses under 860px | ported |
 | Course and professor windows side by side | Clicking a course or professor opens an `adw::Window`. Search stays put, so several courses can be open at once | ported |
-| Tables, context menus, Return to open, Delete to remove | Search and Subjects have column buttons for code, title, and open seats. Click opens a course. Saved courses, schedule courses, and the watchlist use Remove. No context menu, and Delete does not remove a row | partial |
+| Tables, context menus, Return to open, Delete to remove | Right-click menus on courses, professors, sections, schedule courses, degree-plan courses, the watchlist, and plan lists. Return opens a course or professor (a section row copies its CRN). Delete removes a saved course, a schedule or degree-plan course, a watched section, or a plan. Column buttons sort by code, title, and open seats | ported |
 | Drag a degree-audit PDF onto the window | `gtk::DropTarget` on the window, plus File → Import and Ctrl+O | ported |
 | Drag courses between semesters, or a code onto a schedule | Semester rows drag by course id (`editing::move_course_at`). A search row or a degree-plan course can be dropped onto a semester or onto the schedule’s course list (`attach_schedule_drop`) | ported |
 | Menus and shortcuts (New Schedule, New Degree Plan, Import, Export, Print, Reload, areas 1–8) | Menubar and accelerators in `install_actions`. Print is Ctrl+P | ported |
@@ -36,7 +36,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Course page, credits, NUpath, description | Course page | ported |
 | Prerequisite and corequisite trees | `outline.rs` `RequisiteLayout`, drawn as chips (done, grey if the term does not list the course, click opens that course). Spoken description underneath | ported |
 | Live sections, seats, waitlists | Snapshot sections always. “Refresh seats” calls `BannerClient::live_seats` (`term/search` then `searchResults/searchResults`) and overlays CRN counts. Banner’s other detail endpoints (description HTML, faculty meetings, cross-lists) are parsed when HTML is in hand (`banner.rs`) but the window does not fetch each one | partial |
-| `BannerClient.swift` full session pool and term scrape | `BannerClient` opens one search session, pages sections, and merges them with `catalog::merge` (credits, attributes, borrowed descriptions, postreqs). Retries with jitter are not a separate pool. The app still ships `data/catalog/term-202710.catalog` | partial |
+| `BannerClient.swift` full session pool and term scrape | `fetch_all_sections` probes `totalCount`, then uses up to four search sessions. Each session fetches the pages `page % sessions`, one request at a time. `perform` retries HTTP 429, 5xx, and transport errors four times: delay starts at 1s, doubles, and stops at 20s, plus 0–0.5s of jitter. Sections merge through `catalog::merge`. The app still ships `data/catalog/term-202710.catalog` | ported |
 | Save, recents, watch a section, copy CRN | Those actions | ported |
 
 ## Schedules
@@ -77,7 +77,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | --- | --- | --- |
 | Seat alerts every 15 minutes while open | In-app timer (`seat_check_minutes`, default 15) and `notify-send`. Compares against the snapshot, plus any seats refreshed earlier in the session | ported |
 | Background refresh | Portal `org.freedesktop.portal.Background.RequestBackground` on startup, and `packaging/termorganize-seat-watch.timer` running `termorganize --seat-watch`. Not a direct BackgroundTasks clone | substituted |
-| Free rooms timeline | `rooms.rs` plus a day, date, and building search | ported |
+| Free rooms timeline | Cairo bars from 7:00 AM to 10:00 PM (`rooms::Moment::FIRST_CLASS` through `LAST_CLASS`). Green is free, dimmer before the current time when the date is today. Gray blocks are classes, labeled with the course. Day, date, and building search stay | ported |
 | Professors | `professors.rs` and a professor page | ported |
 | Menu-bar Up Next | Header subtitle via `upnext.rs` when a generated or selected schedule has meetings today | substituted |
 | Spotlight | `termorganize --search` and `search_provider.rs` (`org.gnome.Shell.SearchProvider2`) | substituted |
@@ -97,7 +97,5 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 
 - The iPhone and iPad apps, widgets, and App Intents.
 - CloudKit entitlements and code-signature checks.
-- Banner’s retry-with-jitter session pool. Term download and older-term lookups are one request at a time, then cached.
-- Context menus, Return on a table row, and the Delete key. Column buttons cover code, title, and open seats, not every Mac table column.
-- A pane divider that keeps a fraction of the window and hides the pane when dragged to the edge. Double-click resets the pixel position.
-- Free rooms as a drawn timeline. The page lists open stretches for one day.
+- A split pane that floats over the other view when the window is too narrow for both. The sidebar collapses under 860px instead.
+- Every Mac table column. Header buttons sort by code, title, and open seats.

@@ -271,6 +271,87 @@ pub fn catalog_lists(items: &[(String, String)], course: &CourseKey) -> bool {
     items.iter().any(|(code, _)| code.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase() == wanted)
 }
 
+/// Attempts in `BannerClient.perform` before a retryable failure is given up.
+pub const MAX_ATTEMPTS: u32 = 4;
+/// Independent search sessions used by `fetch_all_sections` (one request in flight per cookie).
+pub const SECTION_PARALLELISM: usize = 4;
+
+/// 429 and 5xx are retried. Other HTTP statuses are not.
+pub fn should_retry_status(code: u16) -> bool {
+    code == 429 || code >= 500
+}
+
+/// Sleep length and the next base delay. `attempt` is 1-based. `None` on the last try,
+/// so four attempts sleep after the first three only. Jitter is clamped to `0..=0.5`.
+pub fn backoff(attempt: u32, delay: f64, jitter: f64) -> Option<(f64, f64)> {
+    if attempt == 0 || attempt >= MAX_ATTEMPTS {
+        return None;
+    }
+    let jitter = jitter.clamp(0.0, 0.5);
+    Some((delay + jitter, (delay * 2.0).min(20.0)))
+}
+
+/// Pages for each search session. Page `n` is session `n % sessions`, so one cookie
+/// never has two requests in flight. Extra parallelism beyond the page count is unused.
+pub fn session_pages(page_count: usize, parallelism: usize) -> Vec<Vec<usize>> {
+    if page_count == 0 {
+        return Vec::new();
+    }
+    let sessions = parallelism.max(1).min(page_count);
+    let mut pages = vec![Vec::new(); sessions];
+    for page in 0..page_count {
+        pages[page % sessions].push(page);
+    }
+    pages
+}
+
+fn jitter_seconds() -> f64 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    f64::from(nanos % 501) / 1000.0
+}
+
+enum Attempt {
+    Ready(Box<ureq::Response>),
+    Retry(String),
+    Stop(String),
+}
+
+fn classify(result: Result<ureq::Response, ureq::Error>) -> Attempt {
+    match result {
+        Ok(response) => Attempt::Ready(Box::new(response)),
+        Err(ureq::Error::Status(code, _)) if !should_retry_status(code) => Attempt::Stop(format!("HTTP {code}")),
+        Err(error) => Attempt::Retry(error.to_string()),
+    }
+}
+
+/// Runs a request, retrying 429, 5xx, and transport errors. Other HTTP statuses return immediately.
+fn perform(build: impl Fn() -> Attempt) -> Result<ureq::Response, String> {
+    let mut delay = 1.0;
+    let mut last = String::from("Banner request failed");
+    for attempt in 1..=MAX_ATTEMPTS {
+        match build() {
+            Attempt::Ready(response) => return Ok(*response),
+            Attempt::Stop(message) => return Err(message),
+            Attempt::Retry(message) => last = message,
+        }
+        if let Some((sleep_for, next)) = backoff(attempt, delay, jitter_seconds()) {
+            std::thread::sleep(std::time::Duration::from_secs_f64(sleep_for));
+            delay = next;
+        }
+    }
+    Err(last)
+}
+
+fn sections_of(value: &serde_json::Value) -> Result<Vec<crate::catalog::BannerSection>, String> {
+    let rows = value.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+    let mut sections = Vec::new();
+    for mut row in rows {
+        coerce_section_ints(&mut row);
+        sections.push(serde_json::from_value(row).map_err(|e| e.to_string())?);
+    }
+    Ok(sections)
+}
+
 #[derive(Clone, Debug)]
 pub struct BannerClient {
     pub base: String,
@@ -285,45 +366,15 @@ impl Default for BannerClient {
 impl BannerClient {
     pub fn get(&self, path: &str) -> Result<String, String> {
         let url = if path.starts_with("http") { path.to_string() } else { format!("{}{}", self.base, path) };
-        ureq::get(&url)
-            .timeout(std::time::Duration::from_secs(20))
-            .call()
-            .map_err(|e| e.to_string())?
-            .into_string()
-            .map_err(|e| e.to_string())
+        perform(|| classify(ureq::get(&url).timeout(std::time::Duration::from_secs(20)).call()))?.into_string().map_err(|e| e.to_string())
     }
 
     /// Open a Banner search session and read current seats for one course.
     /// Falls back to the bundled snapshot when Banner is unreachable.
     pub fn live_seats(&self, term: &str, subject: &str, number: &str) -> Result<Vec<LiveSeat>, String> {
-        let base = "https://nubanner.neu.edu/StudentRegistrationSsb/ssb/";
-        let opened = ureq::post(&format!("{base}term/search?mode=search"))
-            .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            .timeout(std::time::Duration::from_secs(20))
-            .send_string(&format!("term={term}&studyPath=&studyPathText=&startDatepicker=&endDatepicker="))
-            .map_err(|e| e.to_string())?;
-        let cookie = opened
-            .all("set-cookie")
-            .into_iter()
-            .filter_map(|header| header.split(';').next().map(str::trim))
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("; ");
-        let _ = opened.into_string();
-        if cookie.is_empty() {
-            return Err("Banner did not start a search session".into());
-        }
-        let url = format!(
-            "{base}searchResults/searchResults?txt_term={term}&txt_subject={subject}&txt_courseNumber={number}&pageOffset=0&pageMaxSize=500&sortColumn=subjectDescription&sortDirection=asc"
-        );
-        let body = ureq::get(&url)
-            .set("Cookie", &cookie)
-            .timeout(std::time::Duration::from_secs(20))
-            .call()
-            .map_err(|e| e.to_string())?
-            .into_string()
-            .map_err(|e| e.to_string())?;
-        parse_live_seats(&body, subject, number)
+        let cookie = self.open_session(term)?;
+        let page = self.search_page(&cookie, term, Some(subject), Some(number), 0, 500)?;
+        parse_live_seats(&serde_json::to_string(&page).map_err(|e| e.to_string())?, subject, number)
     }
 
     fn ssb(&self) -> String {
@@ -350,11 +401,16 @@ impl BannerClient {
     }
 
     pub fn open_session(&self, term: &str) -> Result<String, String> {
-        let opened = ureq::post(&format!("{}term/search?mode=search", self.ssb()))
-            .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            .timeout(std::time::Duration::from_secs(30))
-            .send_string(&format!("term={term}&studyPath=&studyPathText=&startDatepicker=&endDatepicker="))
-            .map_err(|e| e.to_string())?;
+        let url = format!("{}term/search?mode=search", self.ssb());
+        let body = format!("term={term}&studyPath=&studyPathText=&startDatepicker=&endDatepicker=");
+        let opened = perform(|| {
+            classify(
+                ureq::post(&url)
+                    .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send_string(&body),
+            )
+        })?;
         let cookie = opened
             .all("set-cookie")
             .into_iter()
@@ -377,27 +433,57 @@ impl BannerClient {
         if let Some(number) = number {
             url.push_str(&format!("&txt_courseNumber={number}"));
         }
-        let body = ureq::get(&url).set("Cookie", cookie).timeout(std::time::Duration::from_secs(40)).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
+        let cookie = cookie.to_string();
+        let body = perform(|| classify(ureq::get(&url).set("Cookie", &cookie).timeout(std::time::Duration::from_secs(40)).call()))?.into_string().map_err(|e| e.to_string())?;
         serde_json::from_str(&body).map_err(|e| e.to_string())
     }
 
+    /// Every section in a term. A one-row probe reads `totalCount`, then up to
+    /// `SECTION_PARALLELISM` sessions each walk their own pages (`page % sessions`).
     pub fn fetch_all_sections(&self, term: &str) -> Result<Vec<crate::catalog::BannerSection>, String> {
-        let cookie = self.open_session(term)?;
-        let probe = self.search_page(&cookie, term, None, None, 0, 1)?;
+        let first = self.open_session(term)?;
+        let probe = self.search_page(&first, term, None, None, 0, 1)?;
         let total = probe.get("totalCount").and_then(|v| v.as_i64()).unwrap_or(0);
         if total <= 0 {
             return Ok(vec![]);
         }
         let page_size = 500i64;
-        let pages = (total + page_size - 1) / page_size;
+        let page_count = ((total + page_size - 1) / page_size) as usize;
+        let slots = session_pages(page_count, SECTION_PARALLELISM);
+        let mut cookies = Vec::with_capacity(slots.len());
+        cookies.push(first);
+        for _ in 1..slots.len() {
+            cookies.push(self.open_session(term)?);
+        }
+        let mut by_page: Vec<Vec<crate::catalog::BannerSection>> = vec![Vec::new(); page_count];
+        std::thread::scope(|scope| -> Result<(), String> {
+            let mut joins = Vec::new();
+            for (cookie, pages) in cookies.into_iter().zip(slots) {
+                let client = self.clone();
+                let term = term.to_string();
+                joins.push(scope.spawn(move || -> Result<Vec<(usize, Vec<crate::catalog::BannerSection>)>, String> {
+                    let mut found = Vec::new();
+                    for page in pages {
+                        let value = client.search_page(&cookie, &term, None, None, (page as i64 * page_size) as i32, page_size as i32)?;
+                        found.push((page, sections_of(&value)?));
+                    }
+                    Ok(found)
+                }));
+            }
+            for join in joins {
+                let part = join.join().map_err(|_| String::from("A section fetch stopped."))??;
+                for (page, sections) in part {
+                    if page < by_page.len() {
+                        by_page[page] = sections;
+                    }
+                }
+            }
+            Ok(())
+        })?;
         let mut all = Vec::new();
         let mut seen = HashSet::new();
-        for page in 0..pages {
-            let value = self.search_page(&cookie, term, None, None, (page * page_size) as i32, page_size as i32)?;
-            let rows = value.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
-            for mut row in rows {
-                coerce_section_ints(&mut row);
-                let section: crate::catalog::BannerSection = serde_json::from_value(row).map_err(|e| e.to_string())?;
+        for sections in by_page {
+            for section in sections {
                 if seen.insert(section.course_reference_number.clone()) {
                     all.push(section);
                 }
@@ -414,7 +500,8 @@ impl BannerClient {
         let mut offered = HashSet::new();
         for (index, key) in courses.iter().enumerate() {
             if index > 0 {
-                let _ = ureq::post(&format!("{}classSearch/resetDataForm", self.ssb())).set("Cookie", &cookie).call().map(|r| r.into_string());
+                let url = format!("{}classSearch/resetDataForm", self.ssb());
+                let _ = perform(|| classify(ureq::post(&url).set("Cookie", &cookie).timeout(std::time::Duration::from_secs(20)).call()));
             }
             let page = self.search_page(&cookie, term, Some(&key.subject), Some(&key.number), 0, 20)?;
             let rows = page.get("data").and_then(|d| d.as_array());
@@ -476,13 +563,16 @@ impl BannerClient {
     fn post_course_form(&self, path: &str, term: &str, course: &CourseKey) -> Result<String, String> {
         let url = format!("{}{path}", self.ssb());
         let body = format!("term={term}&subjectCode={}&courseNumber={}", course.subject, course.number);
-        ureq::post(&url)
-            .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            .timeout(std::time::Duration::from_secs(25))
-            .send_string(&body)
-            .map_err(|e| e.to_string())?
-            .into_string()
-            .map_err(|e| e.to_string())
+        perform(|| {
+            classify(
+                ureq::post(&url)
+                    .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                    .timeout(std::time::Duration::from_secs(25))
+                    .send_string(&body),
+            )
+        })?
+        .into_string()
+        .map_err(|e| e.to_string())
     }
 
     /// Catalog entry for one course in one term. `None` when that catalog does not list it.
@@ -634,5 +724,40 @@ mod tests {
     fn null_data_is_an_empty_list() {
         let seats = parse_live_seats(r#"{"success":true,"totalCount":0,"data":null}"#, "CS", "3000").unwrap();
         assert!(seats.is_empty());
+    }
+
+    #[test]
+    fn backoff_doubles_and_stops_after_four_attempts() {
+        let (sleep, next) = super::backoff(1, 1.0, 0.25).unwrap();
+        assert!((sleep - 1.25).abs() < 1e-9);
+        assert!((next - 2.0).abs() < 1e-9);
+        let (sleep, next) = super::backoff(2, 2.0, 0.0).unwrap();
+        assert!((sleep - 2.0).abs() < 1e-9);
+        assert!((next - 4.0).abs() < 1e-9);
+        let (sleep, next) = super::backoff(3, 16.0, 0.5).unwrap();
+        assert!((sleep - 16.5).abs() < 1e-9);
+        assert!((next - 20.0).abs() < 1e-9);
+        assert!(super::backoff(4, 20.0, 0.1).is_none());
+        let (sleep, _) = super::backoff(1, 1.0, 9.0).unwrap();
+        assert!((sleep - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn session_pages_assign_one_stream_per_cookie() {
+        let pages = super::session_pages(10, 4);
+        assert_eq!(pages, vec![vec![0, 4, 8], vec![1, 5, 9], vec![2, 6], vec![3, 7]]);
+        assert_eq!(super::session_pages(2, 4).len(), 2);
+        assert!(super::session_pages(0, 4).is_empty());
+        assert_eq!(super::session_pages(3, 0), vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn only_429_and_5xx_are_retried() {
+        assert!(super::should_retry_status(429));
+        assert!(super::should_retry_status(500));
+        assert!(super::should_retry_status(503));
+        assert!(!super::should_retry_status(404));
+        assert!(!super::should_retry_status(400));
+        assert!(!super::should_retry_status(200));
     }
 }
