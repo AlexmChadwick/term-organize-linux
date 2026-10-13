@@ -9,7 +9,7 @@ fn new_id() -> Uuid {
     Uuid::new_v4()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanSeason {
     Winter,

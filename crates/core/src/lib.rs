@@ -6,8 +6,12 @@
 
 pub mod archive;
 pub mod banner;
+pub mod calendar;
+pub mod catalog;
+pub mod course_info;
 pub mod degree_audit;
 pub mod degree_format;
+pub mod editing;
 pub mod equivalences;
 pub mod html;
 pub mod index;
@@ -16,14 +20,20 @@ pub mod links;
 pub mod model;
 pub mod nl;
 pub mod nupath;
+pub mod offering;
+pub mod outline;
+pub mod petition;
 pub mod planlogic;
 pub mod professors;
 pub mod program_parser;
+pub mod reorder;
 pub mod rooms;
 pub mod schedule;
 pub mod search;
 pub mod store;
+pub mod suggestions;
 pub mod sync;
+pub mod titles;
 pub mod upnext;
 pub mod watchlist;
 

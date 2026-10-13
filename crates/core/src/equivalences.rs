@@ -96,26 +96,50 @@ pub fn requisite_satisfied(req: &Requisite, taken: &HashSet<CourseKey>, equivale
     req.is_satisfied(&expanded, assume_tests)
 }
 
-/// Same number and title, not special topics, not an undergrad/grad pair.
+/// Same number and the same title, not special topics, not the same subject.
+/// A cross-list is an exact title match after collapsing whitespace, which is how
+/// `CourseEquivalences(crossListedIn:)` decides two sections are one course.
 pub fn cross_list_equivalent(a_subject: &str, a_number: &str, a_title: &str, a_topics: bool, b_subject: &str, b_number: &str, b_title: &str, b_topics: bool) -> bool {
-    if a_topics || b_topics { return false; }
-    if a_number != b_number || !titles_alike(a_title, b_title) { return false; }
-    if a_subject == b_subject { return false; }
-    let level = |n: &str| n.chars().next().and_then(|c| c.to_digit(10));
-    !matches!((level(a_number), level(b_number)), (Some(x), Some(y)) if (x >= 5) != (y >= 5))
+    if a_topics || b_topics || a_number != b_number || a_subject == b_subject {
+        return false;
+    }
+    let norm = |title: &str| title.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let (a, b) = (norm(a_title), norm(b_title));
+    !a.is_empty() && a == b
 }
 
 pub fn titles_alike(a: &str, b: &str) -> bool {
-    let aw = telling_words(a);
-    let bw = telling_words(b);
-    if aw.is_empty() || bw.is_empty() { return false; }
-    if aw == bw { return true; }
-    let inter = aw.intersection(&bw).count();
-    let denom = aw.len().min(bw.len());
-    inter * 2 >= denom && inter >= 2
+    crate::titles::similarity(a, b).is_some()
 }
 
-fn telling_words(title: &str) -> BTreeSet<String> {
-    let stop = ["and", "of", "the", "to", "in", "for", "a", "an", "with", "introduction", "intro", "advanced", "lab", "seminar"];
-    title.to_ascii_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| w.len() >= 4 && !stop.contains(w)).map(|s| s.to_string()).collect()
+impl CourseEquivalences {
+    /// Cross-listed sections that are the same course under more than one subject.
+    pub fn from_cross_listed(index: &crate::index::CatalogIndex) -> Self {
+        let mut pairs = Vec::new();
+        for section in &index.catalog.sections {
+            if section.cross_list_crns.is_empty() {
+                continue;
+            }
+            let key = section.course_key();
+            if index.course(&key).is_some_and(|course| course.special_topics) {
+                continue;
+            }
+            for crn in &section.cross_list_crns {
+                let Some(other) = index.section_crn(crn) else { continue };
+                let other_key = other.course_key();
+                if other_key.number != key.number || other_key.subject == key.subject {
+                    continue;
+                }
+                if index.course(&other_key).is_some_and(|course| course.special_topics) {
+                    continue;
+                }
+                let title = index.course(&key).map(|c| c.title.as_str()).unwrap_or(section.title.as_str());
+                let other_title = index.course(&other_key).map(|c| c.title.as_str()).unwrap_or(other.title.as_str());
+                if cross_list_equivalent(&key.subject, &key.number, title, false, &other_key.subject, &other_key.number, other_title, false) {
+                    pairs.push((key.clone(), other_key));
+                }
+            }
+        }
+        Self::from_pairs(&pairs)
+    }
 }

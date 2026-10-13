@@ -5,7 +5,7 @@
 use crate::html::{plain_text, table_rows};
 use crate::model::*;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct SubjectLookup {
@@ -209,17 +209,66 @@ pub fn expand_college_name(s: &str) -> String {
 }
 
 pub fn mutual_exclusions(html: &str, subjects: &SubjectLookup) -> Vec<CourseKey> {
-    let Some(rows) = table_rows(html) else { return vec![] };
-    let mut keys = vec![];
-    for cells in rows {
-        if cells.len() < 2 { continue; }
-        let subject = cells[0].trim();
-        let number = cells[1].trim();
-        if subject.is_empty() || number.is_empty() { continue; }
-        if !number.chars().next().is_some_and(|c| c.is_ascii_digit()) { continue; }
-        keys.push(CourseKey { subject: subjects.code(subject), number: number.to_string() });
+    let text = plain_text(html);
+    if text.to_ascii_lowercase().contains("no mutual exclusion") {
+        return vec![];
+    }
+    let mut keys = Vec::new();
+    if let Some(rows) = table_rows(html) {
+        for cells in rows {
+            let cells: Vec<String> = cells.iter().map(|c| c.trim().to_string()).collect();
+            for i in 0..cells.len().saturating_sub(1) {
+                if is_subject_text(&cells[i]) && is_course_number(&cells[i + 1]) {
+                    push_unique(&mut keys, CourseKey { subject: subjects.code(&cells[i]), number: cells[i + 1].clone() });
+                    break;
+                }
+            }
+        }
+    }
+    if keys.is_empty() {
+        for cap in Regex::new(r"\b([A-Z]{2,6})\s?(\d{3,4}[A-Z]?)\b").unwrap().captures_iter(&text) {
+            push_unique(&mut keys, CourseKey { subject: cap[1].to_string(), number: cap[2].to_string() });
+        }
     }
     keys
+}
+
+fn coerce_section_ints(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    for key in [
+        "maximumEnrollment",
+        "enrollment",
+        "seatsAvailable",
+        "waitCapacity",
+        "waitCount",
+        "waitAvailable",
+        "crossListCapacity",
+        "crossListCount",
+        "crossListAvailable",
+    ] {
+        if let Some(number) = obj.get(key).and_then(|v| v.as_f64()) {
+            obj.insert(key.to_string(), serde_json::json!(number.round() as i64));
+        }
+    }
+}
+
+fn push_unique(keys: &mut Vec<CourseKey>, key: CourseKey) {
+    if !keys.contains(&key) {
+        keys.push(key);
+    }
+}
+
+fn is_subject_text(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_alphabetic()) && !is_course_number(text)
+}
+
+fn is_course_number(text: &str) -> bool {
+    (3..=5).contains(&text.len()) && text.chars().next().is_some_and(|c| c.is_ascii_digit()) && text.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+pub fn catalog_lists(items: &[(String, String)], course: &CourseKey) -> bool {
+    let wanted = format!("{}{}", course.subject, course.number).chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
+    items.iter().any(|(code, _)| code.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase() == wanted)
 }
 
 #[derive(Clone, Debug)]
@@ -275,6 +324,209 @@ impl BannerClient {
             .into_string()
             .map_err(|e| e.to_string())?;
         parse_live_seats(&body, subject, number)
+    }
+
+    fn ssb(&self) -> String {
+        if self.base.contains("StudentRegistrationSsb") {
+            let base = self.base.trim_end_matches('/');
+            format!("{base}/")
+        } else {
+            format!("{}/StudentRegistrationSsb/ssb/", self.base.trim_end_matches('/'))
+        }
+    }
+
+    pub fn fetch_terms(&self, max: i32) -> Result<Vec<Term>, String> {
+        let url = format!("{}classSearch/getTerms?offset=1&max={max}&searchTerm=", self.ssb());
+        let body = self.get(&url)?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let code = row.get("code").and_then(|v| v.as_str())?.to_string();
+                let description = crate::html::decode_entities(row.get("description").and_then(|v| v.as_str()).unwrap_or(""));
+                Some(Term { code, banner_description: description })
+            })
+            .collect())
+    }
+
+    pub fn open_session(&self, term: &str) -> Result<String, String> {
+        let opened = ureq::post(&format!("{}term/search?mode=search", self.ssb()))
+            .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .timeout(std::time::Duration::from_secs(30))
+            .send_string(&format!("term={term}&studyPath=&studyPathText=&startDatepicker=&endDatepicker="))
+            .map_err(|e| e.to_string())?;
+        let cookie = opened
+            .all("set-cookie")
+            .into_iter()
+            .filter_map(|header| header.split(';').next().map(str::trim))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let _ = opened.into_string();
+        if cookie.is_empty() { Err("Banner did not start a search session".into()) } else { Ok(cookie) }
+    }
+
+    pub fn search_page(&self, cookie: &str, term: &str, subject: Option<&str>, number: Option<&str>, offset: i32, page_size: i32) -> Result<serde_json::Value, String> {
+        let mut url = format!(
+            "{}searchResults/searchResults?txt_term={term}&pageOffset={offset}&pageMaxSize={page_size}&sortColumn=subjectDescription&sortDirection=asc",
+            self.ssb()
+        );
+        if let Some(subject) = subject {
+            url.push_str(&format!("&txt_subject={subject}"));
+        }
+        if let Some(number) = number {
+            url.push_str(&format!("&txt_courseNumber={number}"));
+        }
+        let body = ureq::get(&url).set("Cookie", cookie).timeout(std::time::Duration::from_secs(40)).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
+        serde_json::from_str(&body).map_err(|e| e.to_string())
+    }
+
+    pub fn fetch_all_sections(&self, term: &str) -> Result<Vec<crate::catalog::BannerSection>, String> {
+        let cookie = self.open_session(term)?;
+        let probe = self.search_page(&cookie, term, None, None, 0, 1)?;
+        let total = probe.get("totalCount").and_then(|v| v.as_i64()).unwrap_or(0);
+        if total <= 0 {
+            return Ok(vec![]);
+        }
+        let page_size = 500i64;
+        let pages = (total + page_size - 1) / page_size;
+        let mut all = Vec::new();
+        let mut seen = HashSet::new();
+        for page in 0..pages {
+            let value = self.search_page(&cookie, term, None, None, (page * page_size) as i32, page_size as i32)?;
+            let rows = value.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+            for mut row in rows {
+                coerce_section_ints(&mut row);
+                let section: crate::catalog::BannerSection = serde_json::from_value(row).map_err(|e| e.to_string())?;
+                if seen.insert(section.course_reference_number.clone()) {
+                    all.push(section);
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    pub fn fetch_offered(&self, term: &str, courses: &[CourseKey]) -> Result<HashSet<CourseKey>, String> {
+        if courses.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let cookie = self.open_session(term)?;
+        let mut offered = HashSet::new();
+        for (index, key) in courses.iter().enumerate() {
+            if index > 0 {
+                let _ = ureq::post(&format!("{}classSearch/resetDataForm", self.ssb())).set("Cookie", &cookie).call().map(|r| r.into_string());
+            }
+            let page = self.search_page(&cookie, term, Some(&key.subject), Some(&key.number), 0, 20)?;
+            let rows = page.get("data").and_then(|d| d.as_array());
+            let hit = rows.is_some_and(|rows| {
+                rows.iter().any(|row| row.get("subject").and_then(|v| v.as_str()) == Some(key.subject.as_str()) && row.get("courseNumber").and_then(|v| v.as_str()) == Some(key.number.as_str()))
+            });
+            if hit {
+                offered.insert(key.clone());
+            }
+        }
+        Ok(offered)
+    }
+
+    pub fn catalog_lists_course(&self, course: &CourseKey, term: &str) -> Result<bool, String> {
+        let url = format!(
+            "{}courseSearch/get_subjectcoursecombo?searchTerm={}%20{}&term={term}&offset=1&max=10",
+            self.ssb(),
+            course.subject,
+            course.number
+        );
+        let body = self.get(&url)?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let items: Vec<(String, String)> = rows
+            .into_iter()
+            .filter_map(|row| Some((row.get("code")?.as_str()?.to_string(), row.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string())))
+            .collect();
+        Ok(catalog_lists(&items, course))
+    }
+
+    pub fn fetch_subjects(&self, term: &str) -> Result<Vec<Subject>, String> {
+        self.code_list(&format!("{}classSearch/get_subject?searchTerm=&term={term}&offset=1&max=900", self.ssb()))
+            .map(|rows| rows.into_iter().map(|(code, name)| Subject { code, name }).collect())
+    }
+
+    pub fn fetch_campuses(&self, term: &str) -> Result<Vec<Campus>, String> {
+        self.code_list(&format!("{}classSearch/get_campus?searchTerm=&term={term}&offset=1&max=200", self.ssb()))
+            .map(|rows| rows.into_iter().map(|(code, name)| Campus { code, name }).collect())
+    }
+
+    pub fn fetch_attributes(&self, term: &str) -> Result<Vec<AttributeInfo>, String> {
+        self.code_list(&format!("{}classSearch/get_attribute?searchTerm=&term={term}&offset=1&max=500", self.ssb()))
+            .map(|rows| rows.into_iter().map(|(code, name)| AttributeInfo { code, name }).collect())
+    }
+
+    fn code_list(&self, url: &str) -> Result<Vec<(String, String)>, String> {
+        let body = self.get(url)?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some((
+                    row.get("code")?.as_str()?.to_string(),
+                    crate::html::decode_entities(row.get("description").and_then(|v| v.as_str()).unwrap_or("")).trim().to_string(),
+                ))
+            })
+            .collect())
+    }
+
+    fn post_course_form(&self, path: &str, term: &str, course: &CourseKey) -> Result<String, String> {
+        let url = format!("{}{path}", self.ssb());
+        let body = format!("term={term}&subjectCode={}&courseNumber={}", course.subject, course.number);
+        ureq::post(&url)
+            .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .timeout(std::time::Duration::from_secs(25))
+            .send_string(&body)
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Catalog entry for one course in one term. `None` when that catalog does not list it.
+    pub fn fetch_course_info(&self, course: &CourseKey, term: &str, subjects: &SubjectLookup, now: f64) -> Result<Option<crate::course_info::CourseInfo>, String> {
+        if !self.catalog_lists_course(course, term)? {
+            return Ok(None);
+        }
+        let details_html = self.post_course_form("courseSearchResults/getCourseCatalogDetails", term, course)?;
+        let prereq_html = self.post_course_form("courseSearchResults/getPrerequisites", term, course)?;
+        let coreq_html = self.post_course_form("courseSearchResults/getCorequisites", term, course)?;
+        let exclusion_html = self.post_course_form("courseSearchResults/getCourseMutuallyExclusions", term, course)?;
+        let details = catalog_details(&details_html);
+        Ok(Some(crate::course_info::CourseInfo {
+            key: course.clone(),
+            title: details.title.unwrap_or_default(),
+            min_credits: details.min_credits,
+            max_credits: details.max_credits,
+            prerequisites: prerequisites(&prereq_html, subjects),
+            corequisites: corequisites(&coreq_html, subjects),
+            equivalents: mutual_exclusions(&exclusion_html, subjects),
+            source_term: term.to_string(),
+            is_retired: None,
+            fetched_at: now,
+        }))
+    }
+}
+
+impl crate::offering::OfferingSource for BannerClient {
+    fn terms(&self) -> Result<Vec<Term>, String> {
+        self.fetch_terms(120)
+    }
+    fn offered_courses(&self, term: &str, courses: &[CourseKey]) -> Result<HashSet<CourseKey>, String> {
+        self.fetch_offered(term, courses)
+    }
+}
+
+impl crate::course_info::CourseInfoSource for BannerClient {
+    fn terms(&self) -> Result<Vec<Term>, String> {
+        self.fetch_terms(120)
+    }
+    fn catalog_entry(&self, key: &CourseKey, term: &str) -> Result<Option<crate::course_info::CourseInfo>, String> {
+        let subjects = self.fetch_subjects(term).unwrap_or_default();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        self.fetch_course_info(key, term, &SubjectLookup::new(&subjects), now)
     }
 }
 

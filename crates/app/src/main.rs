@@ -39,6 +39,12 @@ fn main() {
 }
 
 pub fn load_index() -> Option<CatalogIndex> {
+    let preferred = store::load().preferences.selected_term_code;
+    if let Some(code) = preferred.as_deref() {
+        if let Some(index) = crate::ui::index_for_code(code) {
+            return Some(index);
+        }
+    }
     let path = bundled_catalog_path()?;
     let mut catalog = archive::read(&path).ok()?;
     catalog.recompute_postreqs();
