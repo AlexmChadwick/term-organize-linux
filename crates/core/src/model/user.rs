@@ -89,7 +89,7 @@ pub struct PlanCourse {
     pub key: CourseKey,
     #[serde(default = "yes")]
     pub is_required: bool,
-    #[serde(default)]
+    #[serde(default, alias = "excludedCrns", rename = "excludedCRNs")]
     pub excluded_crns: HashSet<String>,
     #[serde(default)]
     pub color_index: i32,
@@ -324,6 +324,54 @@ impl UserData {
 
     pub fn primary_degree_plan(&self) -> Option<&DegreePlan> {
         self.degree_plans.iter().find(|p| p.is_primary)
+    }
+
+    /// Whether a plan for the term already holds the course, or the given section.
+    /// `UserDataStore.courseIsInSchedule`: plans of that term only. A CRN counts when a
+    /// plan's selected CRNs contain it; otherwise the plan must contain the course.
+    pub fn course_is_in_schedule(&self, term_code: &str, key: &CourseKey, crn: Option<&str>) -> bool {
+        let plans = self.plans.iter().filter(|plan| plan.term_code == term_code);
+        if let Some(crn) = crn {
+            plans.into_iter().any(|plan| plan.selected_crns.iter().any(|item| item == crn))
+        } else {
+            plans.into_iter().any(|plan| plan.contains(key))
+        }
+    }
+
+    /// The first plan of a term is the primary schedule (`UserDataStore.createPlan`).
+    pub fn create_plan(&mut self, name: &str, term_code: &str) -> SchedulePlan {
+        let plan = SchedulePlan {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            term_code: term_code.to_string(),
+            courses: Vec::new(),
+            selected_crns: Vec::new(),
+            filters: ScheduleFilters::default(),
+            preferences: None,
+            favorite_combinations: Vec::new(),
+            is_primary: !self.plans.iter().any(|plan| plan.term_code == term_code),
+            created_at: 0.0,
+            updated_at: 0.0,
+        };
+        self.plans.push(plan.clone());
+        plan
+    }
+
+    /// Adds a course to a plan. Returns false if it was already there (`UserDataStore.addCourse`).
+    pub fn add_course(&mut self, key: CourseKey, plan_id: Uuid) -> bool {
+        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else { return false };
+        if plan.contains(&key) {
+            return false;
+        }
+        let color_index = plan.next_color_index();
+        plan.courses.push(PlanCourse { key, is_required: true, excluded_crns: HashSet::new(), color_index });
+        true
+    }
+
+    pub fn update_plan(&mut self, id: Uuid, change: impl FnOnce(&mut SchedulePlan)) {
+        if let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == id) {
+            change(plan);
+        }
     }
 
     pub fn add_schedule(&mut self, mut plan: SchedulePlan) -> Uuid {

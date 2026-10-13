@@ -1,7 +1,9 @@
 //! Symmetric, transitive groups of interchangeable courses.
 
-use crate::model::{CourseEquivalence, CourseKey, Requisite};
+use crate::model::{CourseEquivalence, CourseKey, DegreePlan, Requisite};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CourseEquivalences {
@@ -59,6 +61,10 @@ impl CourseEquivalences {
         Self::from_pairs(&items.iter().map(|e| (e.course.clone(), e.counts_as.clone())).collect::<Vec<_>>())
     }
     pub fn is_empty(&self) -> bool { self.groups.is_empty() }
+    /// Every course that has at least one equivalent.
+    pub fn courses(&self) -> BTreeSet<CourseKey> {
+        self.index.keys().cloned().collect()
+    }
     pub fn equivalents(&self, key: &CourseKey) -> BTreeSet<CourseKey> {
         let Some(i) = self.index.get(key) else { return BTreeSet::new() };
         self.groups[*i].iter().filter(|k| *k != key).cloned().collect()
@@ -81,14 +87,83 @@ impl CourseEquivalences {
         out
     }
     pub fn merging(&self, other: &CourseEquivalences) -> Self {
+        if other.is_empty() { return self.clone(); }
+        if self.is_empty() { return other.clone(); }
         let mut groups = self.groups.clone();
         groups.extend(other.groups.clone());
         Self::from_groups(&groups)
     }
-    pub fn satisfier<'a>(&self, required: &CourseKey, taken: &'a HashSet<CourseKey>) -> Option<&'a CourseKey> {
-        if taken.contains(required) { return taken.get(required); }
-        taken.iter().find(|k| self.are_equivalent(required, k))
+    /// A copy where `a` and `b` also count as one another.
+    pub fn adding(&self, a: CourseKey, b: CourseKey) -> Self {
+        self.merging(&Self::from_pairs(&[(a, b)]))
     }
+    /// The taken course that satisfies `required`, preferring `required` itself.
+    /// When several equivalents were taken, the lowest-numbered one is returned.
+    pub fn satisfier<'a>(&self, required: &CourseKey, taken: &'a HashSet<CourseKey>) -> Option<&'a CourseKey> {
+        if taken.contains(required) {
+            return taken.get(required);
+        }
+        let i = self.index.get(required)?;
+        self.groups[*i].iter().find_map(|key| taken.get(key))
+    }
+    /// Every taken course that satisfies `required`: the course itself when it was taken,
+    /// then the equivalents that were, in course order.
+    pub fn satisfiers(&self, required: &CourseKey, taken: &HashSet<CourseKey>) -> Vec<CourseKey> {
+        let mut result = Vec::new();
+        if taken.contains(required) {
+            result.push(required.clone());
+        }
+        if let Some(i) = self.index.get(required) {
+            for key in &self.groups[*i] {
+                if key != required && taken.contains(key) {
+                    result.push(key.clone());
+                }
+            }
+        }
+        result
+    }
+}
+
+impl Serialize for CourseEquivalences {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.groups.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CourseEquivalences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let groups = Vec::<Vec<CourseKey>>::deserialize(deserializer)?;
+        Ok(Self::from_groups(&groups))
+    }
+}
+
+/// Declares that taking `course` counts as `counts_as`. Does nothing, and returns false, when
+/// the courses are the same or the plan already declares them equivalent.
+pub fn declare_equivalence(plan: &mut DegreePlan, course: CourseKey, counts_as: CourseKey, note: &str) -> bool {
+    if course == counts_as || CourseEquivalences::from_declarations(&plan.course_equivalences).are_equivalent(&course, &counts_as) {
+        return false;
+    }
+    plan.course_equivalences.push(CourseEquivalence { id: Uuid::new_v4(), course, counts_as, note: note.to_string() });
+    true
+}
+
+pub fn remove_equivalence(plan: &mut DegreePlan, id: Uuid) {
+    plan.course_equivalences.retain(|item| item.id != id);
+}
+
+/// For each course a requisite names that was not taken itself but is covered by an equivalent
+/// that was, the equivalent: CS 2100 → CS 2510 for "Completed via CS 2510".
+pub fn covering_equivalents(requisite: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences) -> BTreeMap<CourseKey, CourseKey> {
+    let mut covering = BTreeMap::new();
+    for key in requisite.referenced_courses() {
+        if taken.contains(&key) {
+            continue;
+        }
+        if let Some(equivalent) = equivalences.satisfier(&key, taken) {
+            covering.insert(key, equivalent.clone());
+        }
+    }
+    covering
 }
 
 pub fn requisite_satisfied(req: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences, assume_tests: bool) -> bool {

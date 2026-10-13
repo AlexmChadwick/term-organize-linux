@@ -225,6 +225,14 @@ pub fn hour_axis_label(hour: i32) -> String {
     format!("{h12}{suffix}")
 }
 
+/// `8 AM`, `12 PM`, `9 PM`. 24 is the midnight that ends the day (`SettingsFormat.hourLabel`).
+pub fn hour_label(hour: i32) -> String {
+    let hour24 = hour.rem_euclid(24);
+    let hour12 = if hour24 % 12 == 0 { 12 } else { hour24 % 12 };
+    let period = if hour24 < 12 { "AM" } else { "PM" };
+    format!("{hour12} {period}")
+}
+
 pub fn minutes_from_hhmm(value: i32) -> i32 {
     (value / 100) * 60 + value % 100
 }

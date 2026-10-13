@@ -69,6 +69,8 @@ struct State {
     course_notes: HashMap<CourseKey, CourseInfo>,
     term_codes: Vec<String>,
     term_labels: Vec<String>,
+    /// Unordered pair ids the student turned down, newest last. Same store as the Mac prompt.
+    dismissed_pairs: Vec<String>,
 }
 
 struct Shell {
@@ -203,6 +205,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         course_notes: HashMap::new(),
         term_codes: vec![],
         term_labels: vec![],
+        dismissed_pairs: gap::load_dismissed(),
     }));
     load_saved_requirements(&state);
 
@@ -523,6 +526,7 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     filters_box.append(&sort_box);
     root.append(&filters_box);
     root.append(&search_filter_row(shell, &filters));
+    root.append(&column_headers(shell));
     let mut note = format!("Showing {} of {total}", rows.len());
     if let Some(crn) = crn {
         note = format!("CRN {crn}. {note}");
@@ -697,15 +701,21 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         let state = shell_ref.state.borrow();
         let subjects: Vec<(String, String)> = state.index.active_subjects.iter().map(|s| (s.code.clone(), s.name.clone())).collect();
         let selected = state.subject.clone().or_else(|| subjects.first().map(|(c, _)| c.clone()));
-        let courses = if let Some(code) = &selected {
-            state.index.courses.iter().filter(|c| &c.subject == code).map(|c| (c.key(), c.title.clone(), c.credits_label(), String::new())).take(400).collect::<Vec<_>>()
+        let mut courses = if let Some(code) = &selected {
+            state.index.courses.iter().filter(|c| &c.subject == code).map(|c| (c.key(), c.title.clone(), c.credits_label(), String::new())).collect::<Vec<_>>()
         } else {
             vec![]
         };
+        match state.sort {
+            SearchSort::Title => courses.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()).then(a.0.cmp(&b.0))),
+            SearchSort::CourseNumber | SearchSort::Relevance | SearchSort::OpenSeats => courses.sort_by(|a, b| a.0.cmp(&b.0)),
+        }
+        courses.truncate(400);
         (subjects, selected, courses)
     };
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_position(280);
+    install_pane_reset(&paned, 280);
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     for (code, name) in &subjects {
@@ -751,7 +761,10 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     paned.set_start_child(Some(&gtk::ScrolledWindow::builder().child(&list).build()));
-    paned.set_end_child(Some(&course_list(shell, &courses)));
+    let subject_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    subject_column.append(&column_headers(shell));
+    subject_column.append(&course_list(shell, &courses));
+    paned.set_end_child(Some(&subject_column));
     paned.upcast()
 }
 
@@ -929,6 +942,7 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snapshot = schedule_snapshot(shell);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_position(260);
+    install_pane_reset(&paned, 260);
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -1002,6 +1016,8 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     }
     main.append(&toolbar);
     main.append(&heading_label("Courses"));
+    main.append(&dim_label("Drop a course here from search or a degree plan."));
+    attach_schedule_drop(&main, shell);
     for (key, required) in &snapshot.courses {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.append(&gtk::Label::new(Some(&format!("{}{}", key, if *required { "" } else { " · optional" }))));
@@ -1089,8 +1105,12 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     drawing.set_content_height(360);
     drawing.set_hexpand(true);
     let blocks = snapshot.blocks.clone();
+    let show_weekends = snapshot.show_weekends;
+    let start_hour = snapshot.start_hour;
+    let end_hour = snapshot.end_hour;
     let dark = adw::StyleManager::default().is_dark();
-    drawing.set_draw_func(move |_, cr, width, height| draw_week(cr, width, height, &blocks, dark));
+    let view = WeekView { dark, show_weekends, start_hour, end_hour };
+    drawing.set_draw_func(move |_, cr, width, height| draw_week(cr, width, height, &blocks, &view));
     main.append(&drawing);
     let scroll = gtk::ScrolledWindow::builder().child(&main).build();
     paned.set_end_child(Some(&scroll));
@@ -1108,6 +1128,9 @@ struct ScheduleSnap {
     total_label: String,
     suggestions: Vec<String>,
     blocks: Vec<WeekBlock>,
+    show_weekends: bool,
+    start_hour: i32,
+    end_hour: i32,
 }
 
 struct SchedLine {
@@ -1170,6 +1193,9 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
         total_label: state.generated.len().to_string(),
         suggestions,
         blocks,
+        show_weekends: state.data.preferences.show_weekends,
+        start_hour: state.data.preferences.calendar_start_hour,
+        end_hour: state.data.preferences.calendar_end_hour,
     }
 }
 
@@ -1195,6 +1221,7 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snap = degree_snapshot(shell);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_position(240);
+    install_pane_reset(&paned, 240);
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -1286,6 +1313,7 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             main.append(&selectable(line));
         }
     }
+    main.append(&gap::equivalence_section(shell));
     main.append(&gap::petition_section(shell));
     main.append(&heading_label("Semesters"));
     main.append(&gap::semester_section(shell));
@@ -1413,28 +1441,61 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     root.upcast()
 }
 
-fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBlock], dark: bool) {
+fn visible_days(blocks: &[WeekBlock], show_weekends: bool) -> Vec<i32> {
+    let has = |day: i32| blocks.iter().any(|block| block.day == day);
+    let mut days = vec![1, 2, 3, 4, 5];
+    if show_weekends || has(6) {
+        days.push(6);
+    }
+    if show_weekends || has(0) {
+        days.insert(0, 0);
+    }
+    days
+}
+
+fn hour_span(blocks: &[WeekBlock], start_hour: i32, end_hour: i32) -> (i32, i32) {
+    if blocks.is_empty() {
+        return (start_hour, end_hour.max(start_hour + 1));
+    }
+    let min_start = blocks.iter().map(|block| block.start).min().unwrap_or(start_hour * 60) / 60;
+    let max_end_min = blocks.iter().map(|block| block.end).max().unwrap_or(end_hour * 60);
+    let max_end = (max_end_min + 59) / 60;
+    let lower = start_hour.min(min_start).clamp(0, 23);
+    let upper = end_hour.max(max_end).max(lower + 1).clamp(lower + 1, 24);
+    (lower, upper)
+}
+
+struct WeekView {
+    dark: bool,
+    show_weekends: bool,
+    start_hour: i32,
+    end_hour: i32,
+}
+
+fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBlock], view: &WeekView) {
     let width = width as f64;
     let height = height as f64;
+    let WeekView { dark, show_weekends, start_hour, end_hour } = *view;
     if dark {
         cr.set_source_rgb(0.12, 0.12, 0.14);
     } else {
         cr.set_source_rgb(0.97, 0.97, 0.96);
     }
     let _ = cr.paint();
-    let start = 8 * 60;
-    let end = 21 * 60;
+    let days = visible_days(blocks, show_weekends);
+    let (start_hour, end_hour) = hour_span(blocks, start_hour, end_hour);
+    let start = start_hour * 60;
+    let end = end_hour * 60;
     let header = 28.0;
     let left = 48.0;
-    let days = 5.0;
-    let col = (width - left - 8.0) / days;
-    let span = (end - start) as f64;
+    let col = (width - left - 8.0) / days.len().max(1) as f64;
+    let span = (end - start).max(60) as f64;
     if dark {
         cr.set_source_rgb(0.75, 0.75, 0.78);
     } else {
         cr.set_source_rgb(0.25, 0.25, 0.28);
     }
-    for hour in 8..=21 {
+    for hour in start_hour..=end_hour {
         let y = header + (hour * 60 - start) as f64 / span * (height - header - 8.0);
         cr.move_to(8.0, y);
         let _ = cr.show_text(&hour_axis_label(hour));
@@ -1443,17 +1504,15 @@ fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBl
     }
     cr.set_line_width(1.0);
     let _ = cr.stroke();
-    for day in 1..=5 {
-        let x = left + (day - 1) as f64 * col;
+    for (index, day) in days.iter().enumerate() {
+        let x = left + index as f64 * col;
         cr.move_to(x + 6.0, 18.0);
-        let _ = cr.show_text(DaySet::SHORT[day]);
+        let _ = cr.show_text(DaySet::SHORT[*day as usize]);
     }
     let palette = [(0.20, 0.45, 0.75), (0.15, 0.55, 0.40), (0.75, 0.40, 0.20), (0.55, 0.30, 0.65), (0.70, 0.25, 0.35), (0.20, 0.55, 0.60), (0.55, 0.50, 0.15), (0.35, 0.35, 0.40)];
     for block in blocks {
-        if !(1..=5).contains(&block.day) {
-            continue;
-        }
-        let x = left + (block.day - 1) as f64 * col + 3.0;
+        let Some(index) = days.iter().position(|day| *day == block.day) else { continue };
+        let x = left + index as f64 * col + 3.0;
         let y = header + (block.start - start).max(0) as f64 / span * (height - header - 8.0);
         let h = ((block.end - block.start).max(20) as f64 / span * (height - header - 8.0)).max(16.0);
         let (r, g, b) = palette[block.color % palette.len()];
@@ -1464,6 +1523,67 @@ fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBl
         cr.move_to(x + 4.0, y + 14.0);
         let _ = cr.show_text(&block.label);
     }
+}
+
+fn install_pane_reset(paned: &gtk::Paned, default_position: i32) {
+    paned.set_tooltip_text(Some("Drag to resize. Double-click the divider to reset."));
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    let handle = paned.clone();
+    click.connect_released(move |_, n_press, x, _| {
+        if n_press == 2 && (x as i32 - handle.position()).abs() <= 14 {
+            handle.set_position(default_position);
+        }
+    });
+    paned.add_controller(click);
+}
+
+fn column_headers(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_margin_start(12);
+    row.set_margin_top(4);
+    for (label, sort) in [("Code", SearchSort::CourseNumber), ("Title", SearchSort::Title), ("Open seats", SearchSort::OpenSeats)] {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some("Sort this column"));
+        button.connect_clicked({
+            let shell = shell.clone();
+            move |_| {
+                shell.borrow().state.borrow_mut().sort = sort;
+                refresh(&shell);
+            }
+        });
+        row.append(&button);
+    }
+    row.upcast()
+}
+
+fn attach_schedule_drop(widget: &impl IsA<gtk::Widget>, shell: &Rc<RefCell<Shell>>) {
+    let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+    target.connect_drop({
+        let shell = shell.clone();
+        move |_, value, _, _| {
+            let Ok(text) = value.get::<String>() else { return false };
+            if let Some(raw) = text.strip_prefix("key:") {
+                let Some(key) = CourseKey::parse(raw) else { return false };
+                add_course_to_plan(&shell, &key);
+                return true;
+            }
+            if let Some(raw) = text.strip_prefix("id:") {
+                let Some(id) = Uuid::parse_str(raw).ok() else { return false };
+                let key = {
+                    let shell_ref = shell.borrow();
+                    let state = shell_ref.state.borrow();
+                    state.data.degree_plans.iter().flat_map(|plan| plan.terms.iter()).flat_map(|term| term.courses.iter()).find(|course| course.id == id).and_then(|course| course.key.clone())
+                };
+                let Some(key) = key else { return false };
+                add_course_to_plan(&shell, &key);
+                return true;
+            }
+            false
+        }
+    });
+    widget.add_controller(target);
 }
 
 fn new_schedule(shell: &Rc<RefCell<Shell>>) {
@@ -2549,7 +2669,36 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
         });
         row.append(&button);
     }
+    let class_types = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let mut names = vec!["Any type".to_string()];
+        names.extend(state.index.class_types.iter().take(16).cloned());
+        names
+    };
+    let type_refs: Vec<&str> = class_types.iter().map(|name| name.as_str()).collect();
+    let class_type = gtk::DropDown::from_strings(&type_refs);
+    let selected_type = filters.class_types.iter().next().cloned();
+    class_type.set_selected(selected_type.as_ref().and_then(|name| class_types.iter().position(|item| item == name)).unwrap_or(0) as u32);
+    class_type.set_tooltip_text(Some("Class type"));
+    class_type.connect_selected_notify({
+        let shell = shell.clone();
+        let class_types = class_types.clone();
+        move |menu| {
+            let mut filters = shell.borrow().state.borrow().filters.clone();
+            filters.class_types.clear();
+            let index = menu.selected() as usize;
+            if index > 0 {
+                if let Some(name) = class_types.get(index) {
+                    filters.class_types.insert(name.clone());
+                }
+            }
+            shell.borrow().state.borrow_mut().filters = filters;
+            refresh(&shell);
+        }
+    });
     row.append(&campus);
+    row.append(&class_type);
     row.append(&instruction);
     row.append(&nupath);
     row.append(&level);

@@ -308,6 +308,10 @@ impl Limits {
     pub fn probe() -> Self {
         Self { max_results: 1, max_exhaustive_leaves: 300, max_nodes: 300_000, time_budget: 0.25, sample_leaves: 0, sample_time_budget: 0.0, allow_sampling: false }
     }
+    /// Cheap existence checks: a thousand leaves is proof enough, and sampling stays off.
+    pub fn blocker_probe() -> Self {
+        Self { max_results: 1, max_exhaustive_leaves: 1_000, max_nodes: 250_000, time_budget: 0.15, sample_leaves: 0, sample_time_budget: 0.0, allow_sampling: false }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -540,6 +544,15 @@ impl Default for Measure {
     fn default() -> Self {
         Self { class_days: 0, campus_days: 0, earliest: i32::MAX, latest: i32::MIN, gap_minutes: 0, class_day_mask: 0, max_day_minutes: 0, total_minutes: 0, back_to_back: 0, tight_transitions: 0, lunch_misses: 0 }
     }
+}
+
+pub fn measure_sections(sections: &[CourseSection]) -> Measure {
+    let mut buildings = BuildingTable::default();
+    let mut intervals = vec![];
+    for section in sections {
+        intervals.extend(intervals_for(section, &mut buildings));
+    }
+    measure(&intervals, &MeasureOptions::default())
 }
 
 pub(crate) fn measure(intervals: &[Interval], options: &MeasureOptions) -> Measure {
@@ -953,6 +966,10 @@ fn soft_limit(minutes_outside: i32) -> f64 {
 }
 
 pub fn reasons_for(sections: &[CourseSection], p: &SchedulePreferences) -> Vec<ScheduleReason> {
+    preference_reasons(sections, p, 4, 2)
+}
+
+pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, max_benefits: usize, max_caveats: usize) -> Vec<ScheduleReason> {
     if p.is_default() || sections.is_empty() {
         return vec![];
     }
@@ -1143,9 +1160,9 @@ pub fn reasons_for(sections: &[CourseSection], p: &SchedulePreferences) -> Vec<S
         reasons.into_iter().filter(|r| seen.insert(r.id())).collect()
     }
     let mut out = unique(good);
-    out.truncate(4);
+    out.truncate(max_benefits);
     let mut caveats = unique(bad);
-    caveats.truncate(2);
+    caveats.truncate(max_caveats);
     out.extend(caveats);
     out
 }
@@ -2188,4 +2205,1115 @@ pub fn autofill_courses(plan: &DegreePlan, term: &Term, index: &crate::index::Ca
         .next()
         .map(|s| s.courses)
         .unwrap_or_default()
+}
+
+// MARK: - What a plan resolves to, and the words around an empty search
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attention {
+    Error,
+    Warning,
+    Neutral,
+    Info,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleWarning {
+    pub text: String,
+    pub symbol: String,
+    pub severity: Attention,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoticeFix {
+    RemoveSections(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleNotice {
+    pub id: String,
+    pub severity: Attention,
+    pub title: String,
+    pub lines: Vec<String>,
+    pub fix: Option<NoticeFix>,
+}
+
+impl ScheduleNotice {
+    pub fn fix_title(&self) -> Option<&'static str> {
+        self.fix.as_ref().map(|_| "Remove")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PlanEntry {
+    pub plan_course: PlanCourse,
+    pub course: Option<Course>,
+    pub all_sections: Vec<CourseSection>,
+    pub selected: Vec<CourseSection>,
+    pub catalog_available: bool,
+}
+
+impl PlanEntry {
+    pub fn key(&self) -> &CourseKey {
+        &self.plan_course.key
+    }
+    pub fn is_missing(&self) -> bool {
+        self.catalog_available && self.course.is_none() && self.all_sections.is_empty()
+    }
+    pub fn has_no_sections(&self) -> bool {
+        self.catalog_available && self.course.is_some() && self.all_sections.is_empty()
+    }
+    pub fn course_crns(&self) -> HashSet<String> {
+        self.all_sections.iter().map(|s| s.crn.clone()).collect()
+    }
+    pub fn counts_towards_credits(&self) -> bool {
+        self.plan_course.is_required || !self.selected.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ScheduleConflict {
+    pub first: CourseSection,
+    pub second: CourseSection,
+    pub days: DaySet,
+    pub start: i32,
+    pub end: i32,
+}
+
+impl ScheduleConflict {
+    pub fn summary(&self) -> String {
+        format!("{} overlaps {} · {} {}", self.first.course_key(), self.second.course_key(), self.days.short_label(), range_label(self.start, self.end))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedPlan {
+    pub plan: SchedulePlan,
+    pub has_catalog: bool,
+    pub entries: Vec<PlanEntry>,
+    pub unlisted_crns: Vec<String>,
+    pub orphaned_crns: Vec<String>,
+    pub conflicts: Vec<ScheduleConflict>,
+    pub full_sections: Vec<CourseSection>,
+    pub missing_courses: Vec<CourseKey>,
+    pub credits_min: f64,
+    pub credits_max: f64,
+}
+
+impl ResolvedPlan {
+    pub fn resolve(plan: &SchedulePlan, index: Option<&crate::index::CatalogIndex>) -> Self {
+        let mut by_section = HashMap::new();
+        if let Some(index) = index {
+            for crn in &plan.selected_crns {
+                if let Some(section) = index.section_crn(crn) {
+                    by_section.insert(crn.clone(), section.clone());
+                }
+            }
+        }
+        let mut entries = vec![];
+        let mut claimed = HashSet::new();
+        for plan_course in &plan.courses {
+            let all = index.map(|index| index.sections_for(&plan_course.key)).unwrap_or_default();
+            let mut selected = vec![];
+            for crn in &plan.selected_crns {
+                if let Some(section) = by_section.get(crn) {
+                    if section.course_key() == plan_course.key {
+                        claimed.insert(crn.clone());
+                        selected.push(section.clone());
+                    }
+                }
+            }
+            entries.push(PlanEntry {
+                plan_course: plan_course.clone(),
+                course: index.and_then(|index| index.course(&plan_course.key).cloned()),
+                all_sections: all,
+                selected,
+                catalog_available: index.is_some(),
+            });
+        }
+        let unclaimed: Vec<String> = if index.is_none() {
+            vec![]
+        } else {
+            plan.selected_crns.iter().filter(|crn| !claimed.contains(*crn)).cloned().collect()
+        };
+        let unlisted_crns = unclaimed.iter().filter(|crn| !by_section.contains_key(*crn)).cloned().collect();
+        let orphaned_crns = unclaimed.iter().filter(|crn| by_section.contains_key(*crn)).cloned().collect();
+        let sections: Vec<CourseSection> = entries.iter().flat_map(|e| e.selected.clone()).collect();
+        let mut full_sections = vec![];
+        for entry in &entries {
+            for section in &entry.selected {
+                if section.is_full() {
+                    full_sections.push(section.clone());
+                }
+            }
+        }
+        let conflicts = find_conflicts(&sections);
+        let missing_courses = entries.iter().filter(|e| e.is_missing() || e.has_no_sections()).map(|e| e.key().clone()).collect();
+        let mut credits_min = 0.0;
+        let mut credits_max = 0.0;
+        for entry in &entries {
+            if !entry.counts_towards_credits() {
+                continue;
+            }
+            if let Some(course) = &entry.course {
+                credits_min += course.min_credits;
+                credits_max += course.max_credits;
+            }
+        }
+        Self { plan: plan.clone(), has_catalog: index.is_some(), entries, unlisted_crns, orphaned_crns, conflicts, full_sections, missing_courses, credits_min, credits_max }
+    }
+
+    pub fn courses_without_section(&self) -> Vec<&PlanEntry> {
+        self.entries.iter().filter(|e| e.selected.is_empty() && !e.is_missing() && !e.has_no_sections()).collect()
+    }
+
+    pub fn is_over_credit_limit(&self) -> bool {
+        self.credits_min > 19.0
+    }
+
+    pub fn warnings(&self) -> Vec<ScheduleWarning> {
+        if !self.has_catalog {
+            return vec![];
+        }
+        let mut items = vec![];
+        if !self.conflicts.is_empty() {
+            let n = self.conflicts.len();
+            items.push(ScheduleWarning { text: if n == 1 { "1 conflict".into() } else { format!("{n} conflicts") }, symbol: "exclamationmark.triangle.fill".into(), severity: Attention::Error });
+        }
+        if !self.full_sections.is_empty() {
+            let n = self.full_sections.len();
+            items.push(ScheduleWarning { text: if n == 1 { "1 full section".into() } else { format!("{n} full sections") }, symbol: "chair".into(), severity: Attention::Warning });
+        }
+        if !self.missing_courses.is_empty() {
+            let n = self.missing_courses.len();
+            items.push(ScheduleWarning { text: if n == 1 { "1 course not offered".into() } else { format!("{n} courses not offered") }, symbol: "questionmark.folder".into(), severity: Attention::Warning });
+        }
+        if self.is_over_credit_limit() {
+            items.push(ScheduleWarning { text: "Over 19 credits".into(), symbol: "exclamationmark.circle".into(), severity: Attention::Warning });
+        }
+        let missing_sections = self.courses_without_section().iter().filter(|e| e.plan_course.is_required).count();
+        if missing_sections > 0 && !self.plan.courses.is_empty() {
+            items.push(ScheduleWarning {
+                text: if missing_sections == 1 { "1 course needs a section".into() } else { format!("{missing_sections} courses need sections") },
+                symbol: "circle.dashed".into(),
+                severity: Attention::Neutral,
+            });
+        }
+        items
+    }
+}
+
+pub fn section_title(section: &CourseSection) -> String {
+    if section.section_number.is_empty() { section.class_type.clone() } else { format!("{} {}", section.class_type, section.section_number) }
+}
+
+fn find_conflicts(sections: &[CourseSection]) -> Vec<ScheduleConflict> {
+    let mut result = vec![];
+    for i in 0..sections.len() {
+        for j in (i + 1)..sections.len() {
+            if let Some((days, start, end)) = section_overlap(&sections[i], &sections[j]) {
+                result.push(ScheduleConflict { first: sections[i].clone(), second: sections[j].clone(), days, start, end });
+            }
+        }
+    }
+    result
+}
+
+fn section_overlap(a: &CourseSection, b: &CourseSection) -> Option<(DaySet, i32, i32)> {
+    let mut days = DaySet(0);
+    let mut window: Option<(i32, i32)> = None;
+    for m1 in a.weekly_meetings() {
+        for m2 in b.weekly_meetings() {
+            if !m1.overlaps(m2) {
+                continue;
+            }
+            let (Some(s1), Some(e1), Some(s2), Some(e2)) = (m1.start, m1.end, m2.start, m2.end) else { continue };
+            days = days.union(m1.days.intersection(m2.days));
+            let start = s1.max(s2);
+            let end = e1.min(e2);
+            if window.is_none_or(|current| start < current.0) {
+                window = Some((start, end));
+            }
+        }
+    }
+    window.map(|(start, end)| (days, start, end))
+}
+
+pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailable: bool) -> Vec<ScheduleNotice> {
+    let mut items = vec![];
+    if !resolved.has_catalog && catalog_unavailable && !resolved.plan.courses.is_empty() {
+        items.push(ScheduleNotice {
+            id: "catalog".into(),
+            severity: Attention::Warning,
+            title: format!("Course data for {term_name} isn’t on this device"),
+            lines: vec!["Switch to that term and download its catalog to see sections, times and seats.".into()],
+            fix: None,
+        });
+    }
+    if !resolved.conflicts.is_empty() {
+        let count = resolved.conflicts.len();
+        let mut lines: Vec<String> = resolved.conflicts.iter().take(3).map(|c| c.summary()).collect();
+        if count > 3 {
+            lines.push(format!("and {} more", count - 3));
+        }
+        items.push(ScheduleNotice {
+            id: "conflicts".into(),
+            severity: Attention::Error,
+            title: if count == 1 { "1 time conflict".into() } else { format!("{count} time conflicts") },
+            lines,
+            fix: None,
+        });
+    }
+    if !resolved.full_sections.is_empty() {
+        let lines = resolved.full_sections.iter().map(|section| {
+            let waitlist = if section.waitlist_capacity > 0 { format!(" · {} waitlist spots left", section.waitlist_remaining) } else { String::new() };
+            format!("{} {} is full{waitlist}", section.course_key(), section_title(section))
+        }).collect();
+        let n = resolved.full_sections.len();
+        items.push(ScheduleNotice {
+            id: "full".into(),
+            severity: Attention::Warning,
+            title: if n == 1 { "1 section is full".into() } else { format!("{n} sections are full") },
+            lines,
+            fix: None,
+        });
+    }
+    if !resolved.missing_courses.is_empty() {
+        let n = resolved.missing_courses.len();
+        items.push(ScheduleNotice {
+            id: "missing".into(),
+            severity: Attention::Warning,
+            title: if n == 1 { format!("1 course isn’t offered in {term_name}") } else { format!("{n} courses aren’t offered in {term_name}") },
+            lines: resolved.missing_courses.iter().map(|key| format!("{key} has no sections this term.")).collect(),
+            fix: None,
+        });
+    }
+    if resolved.is_over_credit_limit() {
+        items.push(ScheduleNotice {
+            id: "credits".into(),
+            severity: Attention::Warning,
+            title: format!("{} is a heavy load", credit_span(resolved.credits_min, resolved.credits_max)),
+            lines: vec!["Above 19 credits you may need approval from your advisor or college.".into()],
+            fix: None,
+        });
+    }
+    if !resolved.unlisted_crns.is_empty() {
+        let unlisted = resolved.unlisted_crns.clone();
+        let n = unlisted.len();
+        items.push(ScheduleNotice {
+            id: "unlisted".into(),
+            severity: Attention::Info,
+            title: if n == 1 { "A saved section is no longer listed".into() } else { format!("{n} saved sections are no longer listed") },
+            lines: vec![format!("CRN {} isn’t in the current {term_name} catalog.", unlisted.join(", "))],
+            fix: Some(NoticeFix::RemoveSections(unlisted)),
+        });
+    }
+    if !resolved.orphaned_crns.is_empty() {
+        let orphaned = resolved.orphaned_crns.clone();
+        let n = orphaned.len();
+        items.push(ScheduleNotice {
+            id: "orphaned".into(),
+            severity: Attention::Info,
+            title: if n == 1 { "A section from a removed course is still selected".into() } else { format!("{n} sections from removed courses are still selected") },
+            lines: vec![format!("CRN {} doesn’t belong to any course in this schedule.", orphaned.join(", "))],
+            fix: Some(NoticeFix::RemoveSections(orphaned)),
+        });
+    }
+    items
+}
+
+fn credit_span(min: f64, max: f64) -> String {
+    if (min - max).abs() < 1e-9 { format!("{} credits", credit_number(min)) } else { format!("{}–{} credits", credit_number(min), credit_number(max)) }
+}
+
+fn credit_number(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 { format!("{}", value.round() as i64) } else { format!("{value:.1}") }
+}
+
+pub fn inputs_for(plan: &SchedulePlan, index: &crate::index::CatalogIndex) -> Vec<ScheduleCourseInput> {
+    plan.courses.iter().map(|course| {
+        let listed = index.course(&course.key);
+        ScheduleCourseInput {
+            key: course.key.clone(),
+            is_required: course.is_required,
+            sections: index.sections_for(&course.key),
+            excluded_crns: course.excluded_crns.clone(),
+            min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
+            max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
+        }
+    }).collect()
+}
+
+pub fn favorites_of(plan: &SchedulePlan, index: &crate::index::CatalogIndex, preferences: &SchedulePreferences) -> Vec<GeneratedSchedule> {
+    let order: HashMap<CourseKey, usize> = plan.courses.iter().enumerate().map(|(i, course)| (course.key.clone(), i)).collect();
+    let mut out = vec![];
+    for crns in plan.favorite_combinations.iter().rev() {
+        let sections: Vec<CourseSection> = crns.iter().filter_map(|crn| index.section_crn(crn).cloned()).collect();
+        if sections.len() != crns.len() || sections.is_empty() || sections.iter().any(|s| !order.contains_key(&s.course_key())) {
+            continue;
+        }
+        let mut ordered = sections;
+        ordered.sort_by_key(|section| order.get(&section.course_key()).copied().unwrap_or(usize::MAX));
+        out.push(GeneratedSchedule::from_sections(&ordered, preferences));
+    }
+    out
+}
+
+pub fn apply_relaxation(plan: &mut SchedulePlan, relaxation: &Relaxation) {
+    match relaxation {
+        Relaxation::MakeOptional(key) => set_required(plan, key, false),
+        Relaxation::Preference(_) => {
+            let mut preferences = plan.preferences.clone().unwrap_or_default();
+            relaxation.apply_preferences(&mut preferences);
+            plan.preferences = if preferences.is_default() { None } else { Some(preferences) };
+        }
+        other => other.apply_filters(&mut plan.filters),
+    }
+}
+
+pub fn make_optional(plan: &mut SchedulePlan, keys: &[CourseKey]) {
+    for key in keys {
+        set_required(plan, key, false);
+    }
+}
+
+fn set_required(plan: &mut SchedulePlan, key: &CourseKey, required: bool) {
+    if let Some(course) = plan.courses.iter_mut().find(|course| &course.key == key) {
+        course.is_required = required;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockerOption {
+    pub courses: Vec<CourseKey>,
+    pub schedule_count: usize,
+    pub is_lower_bound: bool,
+}
+
+impl BlockerOption {
+    pub fn id(&self) -> String {
+        self.courses.iter().map(|key| key.to_string()).collect::<Vec<_>>().join("+")
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BlockerAnalysis {
+    pub required_count: usize,
+    pub not_offered: Vec<CourseKey>,
+    pub filtered_out: Vec<CourseKey>,
+    pub options: Vec<BlockerOption>,
+    pub conflicting_pairs: Vec<ConflictPair>,
+    pub is_incomplete: bool,
+}
+
+impl BlockerAnalysis {
+    pub fn blocking_courses(&self) -> Vec<CourseKey> {
+        self.options.first().map(|option| option.courses.clone()).unwrap_or_default()
+    }
+    pub fn all_blocking_courses(&self) -> Vec<CourseKey> {
+        let mut seen = HashSet::new();
+        let mut out = vec![];
+        for option in &self.options {
+            for course in &option.courses {
+                if seen.insert(course.clone()) {
+                    out.push(course.clone());
+                }
+            }
+        }
+        out
+    }
+    pub fn clashes(&self, key: &CourseKey) -> Vec<CourseKey> {
+        self.conflicting_pairs.iter().filter_map(|pair| {
+            if &pair.first == key { Some(pair.second.clone()) } else if &pair.second == key { Some(pair.first.clone()) } else { None }
+        }).collect()
+    }
+}
+
+pub fn analyze_blockers(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, diagnostics: Option<&ScheduleDiagnostics>, time_budget: f64, max_probes: usize) -> BlockerAnalysis {
+    let started = Instant::now();
+    let mut analysis = BlockerAnalysis::default();
+    let required: Vec<usize> = courses.iter().enumerate().filter(|(_, course)| course.is_required).map(|(i, _)| i).collect();
+    analysis.required_count = required.len();
+    if required.is_empty() {
+        return analysis;
+    }
+    let owned;
+    let base = if let Some(diagnostics) = diagnostics {
+        diagnostics
+    } else {
+        owned = generate(courses, filters, preferences, ScheduleSort::Best, &Limits::probe()).diagnostics;
+        &owned
+    };
+    analysis.conflicting_pairs = base.conflicting_pairs.clone();
+    if base.count_problem.is_some() || base.courses.len() != courses.len() {
+        return analysis;
+    }
+    let mut dead = vec![];
+    for index in &required {
+        if base.courses[*index].is_blocked() {
+            dead.push(*index);
+            if base.courses[*index].total_sections == 0 {
+                analysis.not_offered.push(courses[*index].key.clone());
+            } else {
+                analysis.filtered_out.push(courses[*index].key.clone());
+            }
+        }
+    }
+    let others: Vec<usize> = required.iter().copied().filter(|index| !dead.contains(index)).collect();
+    let mut probes = 0usize;
+    let over_budget = |probes: usize| probes >= max_probes || started.elapsed().as_secs_f64() > time_budget;
+    let probe = |drop: &[usize], probes: &mut usize| -> Option<BlockerOption> {
+        *probes += 1;
+        let mut relaxed = courses.to_vec();
+        for index in drop {
+            relaxed[*index].is_required = false;
+        }
+        let result = generate(&relaxed, filters, preferences, ScheduleSort::Best, &Limits::blocker_probe());
+        if result.total_found == 0 {
+            return None;
+        }
+        let mut indexes = drop.to_vec();
+        indexes.sort_unstable();
+        Some(BlockerOption {
+            courses: indexes.iter().map(|index| courses[*index].key.clone()).collect(),
+            schedule_count: result.total_found,
+            is_lower_bound: !result.is_exhaustive,
+        })
+    };
+    let mut found = vec![];
+    if !dead.is_empty() {
+        if let Some(option) = probe(&dead, &mut probes) {
+            found.push(option);
+        }
+    }
+    if found.is_empty() {
+        for index in &others {
+            if over_budget(probes) {
+                analysis.is_incomplete = true;
+                break;
+            }
+            let mut drop = dead.clone();
+            drop.push(*index);
+            if let Some(option) = probe(&drop, &mut probes) {
+                found.push(option);
+            }
+        }
+    }
+    if found.is_empty() && !analysis.is_incomplete && others.len() >= 2 {
+        'search: for i in 0..others.len() {
+            for j in (i + 1)..others.len() {
+                if over_budget(probes) {
+                    analysis.is_incomplete = true;
+                    break 'search;
+                }
+                let mut drop = dead.clone();
+                drop.push(others[i]);
+                drop.push(others[j]);
+                if let Some(option) = probe(&drop, &mut probes) {
+                    found.push(option);
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.courses.len().cmp(&b.courses.len()).then(b.schedule_count.cmp(&a.schedule_count)));
+    analysis.options = found;
+    analysis
+}
+
+#[derive(Clone, Debug)]
+pub struct EmptyResult {
+    pub diagnostics: ScheduleDiagnostics,
+    pub suggestions: Vec<Suggestion>,
+    pub blockers: BlockerAnalysis,
+}
+
+pub fn analyze_empty_result(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, diagnostics: &ScheduleDiagnostics, include_blockers: bool) -> EmptyResult {
+    let blockers = if include_blockers {
+        analyze_blockers(courses, filters, preferences, Some(diagnostics), 1.5, 60)
+    } else {
+        BlockerAnalysis::default()
+    };
+    let suggestions = suggest_relaxations(courses, filters, preferences, !include_blockers);
+    EmptyResult { diagnostics: diagnostics.clone(), suggestions, blockers }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoResultReason {
+    pub symbol: String,
+    pub title: String,
+    pub detail: Option<String>,
+}
+
+pub fn course_list(keys: &[CourseKey]) -> String {
+    let names: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        _ => format!("{} and {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
+    }
+}
+
+pub fn no_results_headline_for(diagnostics: &ScheduleDiagnostics, blockers: Option<&BlockerAnalysis>) -> String {
+    if diagnostics.has_no_courses() {
+        return "Add some courses to this schedule first.".into();
+    }
+    if blockers.is_some_and(|blockers| !blockers.options.is_empty()) {
+        return "Here’s what would work.".into();
+    }
+    if diagnostics.count_problem.is_some() || !diagnostics.blocked_required().is_empty() || !diagnostics.conflicting_pairs.is_empty() {
+        return "Here’s what’s getting in the way.".into();
+    }
+    "These courses can’t all be taken together with the current rules.".into()
+}
+
+pub fn blocker_detail(option: &BlockerOption, blockers: &BlockerAnalysis, term_name: &str) -> String {
+    let noun = if option.schedule_count == 1 && !option.is_lower_bound { "schedule" } else { "schedules" };
+    let mut parts = vec![if option.is_lower_bound { format!("{}+ {noun}", option.schedule_count) } else { format!("{} {noun}", option.schedule_count) }];
+    for key in &option.courses {
+        if blockers.not_offered.contains(key) {
+            parts.push(format!("{key} isn’t offered in {term_name}"));
+        } else if blockers.filtered_out.contains(key) {
+            parts.push(format!("your rules rule out every {key} section"));
+        }
+    }
+    if option.courses.len() == 1 {
+        if let Some(key) = option.courses.first() {
+            let clashes = blockers.clashes(key);
+            if !clashes.is_empty() {
+                parts.push(format!("overlaps {}", course_list(&clashes)));
+            }
+        }
+    }
+    parts.join(" · ")
+}
+
+pub fn is_uncertain(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("unknown") || lower.contains("couldn’t")
+}
+
+pub fn no_results_reasons(diagnostics: &ScheduleDiagnostics, term_name: &str) -> Vec<NoResultReason> {
+    let mut result = vec![];
+    for report in diagnostics.courses.iter().filter(|report| report.is_blocked() && report.is_required) {
+        if report.total_sections == 0 {
+            result.push(NoResultReason { symbol: "questionmark.folder".into(), title: format!("{} isn’t offered in {term_name}", report.key), detail: Some("Remove it from the schedule or make it optional.".into()) });
+        } else {
+            result.push(NoResultReason { symbol: "xmark.circle".into(), title: format!("No {} sections left", report.key), detail: Some(rejection_text(report, diagnostics)) });
+        }
+    }
+    for pair in &diagnostics.conflicting_pairs {
+        match pair.reason {
+            ConflictReason::Overlap => result.push(NoResultReason {
+                symbol: "rectangle.on.rectangle.slash".into(),
+                title: format!("{} and {} always overlap", pair.first, pair.second),
+                detail: Some("Every remaining section of one meets while a section of the other does. Make one optional or pick different sections.".into()),
+            }),
+            ConflictReason::TravelTime => result.push(NoResultReason {
+                symbol: "figure.walk".into(),
+                title: format!("{} and {} are always too close together", pair.first, pair.second),
+                detail: Some(format!("Every combination leaves less than {} minutes between them in different buildings. Lower the walking time or make one optional.", diagnostics.preferences.minimum_break_minutes)),
+            }),
+        }
+    }
+    match &diagnostics.count_problem {
+        Some(CountProblem::TooManyRequired { required, wanted }) => result.push(NoResultReason {
+            symbol: "number.circle".into(),
+            title: format!("{required} courses are required, but schedules are limited to {wanted}"),
+            detail: Some("Raise the number of courses or make some courses optional.".into()),
+        }),
+        Some(CountProblem::TooFewCourses { available, wanted }) => result.push(NoResultReason {
+            symbol: "number.circle".into(),
+            title: format!("Only {available} {} sections left, but {wanted} are wanted", if *available == 1 { "course has" } else { "courses have" }),
+            detail: Some("Lower the number of courses or relax a filter.".into()),
+        }),
+        Some(CountProblem::CreditsOverTarget { required, limit }) => result.push(NoResultReason {
+            symbol: "number.circle".into(),
+            title: format!("The required courses are {required} credits, but your target stops at {limit}"),
+            detail: Some("Raise the credit target or make a course optional.".into()),
+        }),
+        Some(CountProblem::CreditsUnderTarget { available, wanted }) => result.push(NoResultReason {
+            symbol: "number.circle".into(),
+            title: format!("Your courses add up to {available} credits, but you want {wanted}"),
+            detail: Some("Lower the credit target or add a course.".into()),
+        }),
+        None => {}
+    }
+    for report in diagnostics.courses.iter().filter(|report| report.is_blocked() && !report.is_required && report.total_sections > 0) {
+        result.push(NoResultReason { symbol: "minus.circle".into(), title: format!("{} (optional) can’t be added", report.key), detail: Some(rejection_text(report, diagnostics)) });
+    }
+    result
+}
+
+fn rejection_text(report: &CourseReport, diagnostics: &ScheduleDiagnostics) -> String {
+    let total = report.total_sections;
+    let mut ordered: Vec<(FilterReason, i32)> = report.rejections.iter().filter(|(_, count)| **count > 0).map(|(reason, count)| (*reason, *count)).collect();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then((a.0 as u32).cmp(&(b.0 as u32))));
+    if ordered.is_empty() {
+        return if total == 1 { "Its only section was filtered out.".into() } else { format!("All {total} sections were filtered out.") };
+    }
+    if ordered.len() == 1 && ordered[0].1 as usize == total {
+        let phrase = rejection_phrase(ordered[0].0, total != 1, diagnostics);
+        return if total == 1 { format!("Its only section {phrase}.") } else { format!("All {total} sections {phrase}.") };
+    }
+    let parts: Vec<String> = ordered.iter().map(|(reason, count)| format!("{count} {}", rejection_phrase(*reason, *count != 1, diagnostics))).collect();
+    format!("Of {total} sections: {}.", parts.join(", "))
+}
+
+fn rejection_phrase(reason: FilterReason, plural: bool, diagnostics: &ScheduleDiagnostics) -> String {
+    let filters = &diagnostics.filters;
+    let preferences = &diagnostics.preferences;
+    let clock = |minutes: i32| label_minutes(minutes, true);
+    match reason {
+        FilterReason::ExcludedByUser => if plural { "are skipped by you" } else { "is skipped by you" }.into(),
+        FilterReason::StartsTooEarly => format!("{} before {}", if plural { "start" } else { "starts" }, filters.earliest_start.map(clock).unwrap_or_else(|| "your limit".into())),
+        FilterReason::EndsTooLate => format!("{} after {}", if plural { "end" } else { "ends" }, filters.latest_end.map(clock).unwrap_or_else(|| "your limit".into())),
+        FilterReason::FreeDay => format!("{} on a day you want free", if plural { "meet" } else { "meets" }),
+        FilterReason::Honors => if plural { "are honors sections" } else { "is an honors section" }.into(),
+        FilterReason::Online => if plural { "are online" } else { "is online" }.into(),
+        FilterReason::Seats => if plural { "are full or low on seats" } else { "is full or low on seats" }.into(),
+        FilterReason::Campus => if plural { "are on another campus" } else { "is on another campus" }.into(),
+        FilterReason::BlockedTime => if plural { "overlap a blocked time" } else { "overlaps a blocked time" }.into(),
+        FilterReason::PrefStartsTooEarly => format!("{} before {}", if plural { "start" } else { "starts" }, preferences.earliest_start.as_ref().map(|l| clock(l.minutes)).unwrap_or_else(|| "your earliest time".into())),
+        FilterReason::PrefEndsTooLate => format!("{} after {}", if plural { "end" } else { "ends" }, preferences.latest_end.as_ref().map(|l| clock(l.minutes)).unwrap_or_else(|| "your latest time".into())),
+        FilterReason::PrefDayOff => format!("{} on a day you want off", if plural { "meet" } else { "meets" }),
+        FilterReason::PrefFormat => format!("{}{}", if plural { "aren’t " } else { "isn’t " }, preferences.format.title().to_ascii_lowercase()),
+        FilterReason::PrefSeats => if plural { "have no open seats" } else { "has no open seats" }.into(),
+        FilterReason::PrefCampus => if plural { "are on another campus" } else { "is on another campus" }.into(),
+        FilterReason::PrefWorkload => if plural { "run longer in a day than your limit" } else { "runs longer in a day than your limit" }.into(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub day: i32,
+    pub start: i32,
+    pub end: i32,
+    pub is_conflict: bool,
+    pub is_ghost: bool,
+    pub payload: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+pub fn marking_conflicts(events: &[CalendarEvent]) -> Vec<CalendarEvent> {
+    let mut result = events.to_vec();
+    for i in 0..result.len() {
+        for j in 0..result.len() {
+            if i == j || result[i].is_ghost || result[j].is_ghost {
+                continue;
+            }
+            let (a_day, a_start, a_end, a_payload, a_from, a_to) = (result[i].day, result[i].start, result[i].end, result[i].payload.clone(), result[i].start_date.clone(), result[i].end_date.clone());
+            let b = &result[j];
+            if a_day == b.day && a_start < b.end && b.start < a_end && a_payload != b.payload && date_windows_overlap(a_from.as_deref(), a_to.as_deref(), b.start_date.as_deref(), b.end_date.as_deref()) {
+                result[i].is_conflict = true;
+            }
+        }
+    }
+    result
+}
+
+pub struct CarouselLayout {
+    pub hours: std::ops::RangeInclusive<i32>,
+    pub days: Vec<i32>,
+}
+
+impl CarouselLayout {
+    pub fn from_schedules(schedules: &[GeneratedSchedule], preferences: &AppPreferences) -> Self {
+        let mut earliest = i32::MAX;
+        let mut latest = 0;
+        let mut weekdays = HashSet::new();
+        for schedule in schedules {
+            if let Some(start) = schedule.earliest_start { earliest = earliest.min(start); }
+            if let Some(end) = schedule.latest_end { latest = latest.max(end); }
+            for section in &schedule.sections {
+                for meeting in section.weekly_meetings() {
+                    for day in meeting.days.indices() {
+                        weekdays.insert(day);
+                    }
+                }
+            }
+        }
+        let hours = if earliest == i32::MAX {
+            let start = preferences.calendar_start_hour.max(0);
+            let end = (start + 5).max(preferences.calendar_end_hour.min(24));
+            start..=end
+        } else {
+            let lower = (earliest / 60).max(0);
+            let upper = ((latest as f64 / 60.0).ceil() as i32).max(lower + 5).min(24);
+            lower..=upper
+        };
+        let mut days = vec![1, 2, 3, 4, 5];
+        if preferences.show_weekends || weekdays.contains(&6) { days.push(6); }
+        if preferences.show_weekends || weekdays.contains(&0) { days.insert(0, 0); }
+        Self { hours, days }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AutofillSuggestion {
+    pub id: String,
+    pub plan_name: String,
+    pub semester: Option<String>,
+    pub title: String,
+    pub detail: String,
+    pub is_exact_term: bool,
+    pub courses: Vec<CourseKey>,
+    pub unavailable: Vec<CourseKey>,
+    pub from_schedule: bool,
+}
+
+pub fn autofill_suggestions(plan: &SchedulePlan, terms: &[Term], degree_plans: &[DegreePlan], schedule_plans: &[SchedulePlan], index: Option<&crate::index::CatalogIndex>) -> Vec<AutofillSuggestion> {
+    let has_siblings = schedule_plans.iter().any(|other| other.term_code == plan.term_code && other.id != plan.id && !other.courses.is_empty());
+    if degree_plans.is_empty() && !has_siblings {
+        return vec![];
+    }
+    let term = resolve_term(&plan.term_code, terms, index);
+    let already: HashSet<CourseKey> = plan.courses.iter().map(|course| course.key.clone()).collect();
+    crate::planlogic::schedule_suggestions(&term, degree_plans, schedule_plans, Some(plan.id), &already, index)
+        .into_iter()
+        .map(|suggestion| {
+            let from_schedule = suggestion.semester.is_none();
+            let id = if from_schedule {
+                schedule_plans.iter().find(|other| other.name == suggestion.plan_name && other.term_code == term.code).map(|other| format!("schedule-{}", other.id)).unwrap_or_else(|| format!("schedule-{}", suggestion.plan_name))
+            } else {
+                degree_plans.iter().find(|other| other.name == suggestion.plan_name).map(|other| format!("degree-{}", other.id)).unwrap_or_else(|| format!("degree-{}", suggestion.plan_name))
+            };
+            AutofillSuggestion {
+                id,
+                plan_name: suggestion.plan_name,
+                semester: suggestion.semester,
+                title: suggestion.title,
+                detail: suggestion.detail,
+                is_exact_term: suggestion.is_exact_term,
+                courses: suggestion.courses,
+                unavailable: suggestion.unavailable,
+                from_schedule,
+            }
+        })
+        .collect()
+}
+
+pub fn autofill_source_name(suggestion: &AutofillSuggestion) -> String {
+    match &suggestion.semester {
+        Some(term) => format!("“{}” · {term}", suggestion.plan_name),
+        None => format!("Copy “{}”", suggestion.plan_name),
+    }
+}
+
+pub fn course_count_label(count: usize) -> String {
+    if count == 1 { "1 course".into() } else { format!("{count} courses") }
+}
+
+pub fn dismissal_key(plan_id: uuid::Uuid, suggestion_id: &str) -> String {
+    format!("{plan_id}|{suggestion_id}")
+}
+
+pub fn dismissal_contains(key: &str, raw: &str) -> bool {
+    raw.split('\n').any(|line| line == key)
+}
+
+pub fn dismissal_adding(key: &str, raw: &str, limit: usize) -> String {
+    let mut keys: Vec<String> = raw.split('\n').filter(|line| !line.is_empty() && *line != key).map(str::to_string).collect();
+    keys.push(key.to_string());
+    let start = keys.len().saturating_sub(limit);
+    keys[start..].join("\n")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DroppedCourse {
+    pub key: CourseKey,
+    pub crn: Option<String>,
+}
+
+pub fn parse_dropped(items: &[String]) -> Vec<DroppedCourse> {
+    let mut seen = HashSet::new();
+    let mut out = vec![];
+    for item in items {
+        for line in item.split(['\n', '\r']) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let Some(key) = CourseKey::parse(&format!("{} {}", parts[0], parts[1])) else { continue };
+            if !key.number.chars().any(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let crn = parts.get(2).filter(|text| text.len() == 5 && text.chars().all(|c| c.is_ascii_digit())).map(|text| (*text).to_string());
+            let dropped = DroppedCourse { key, crn };
+            if seen.insert((dropped.key.clone(), dropped.crn.clone())) {
+                out.push(dropped);
+            }
+        }
+    }
+    out
+}
+
+/// Minutes after midnight, clamped to a single day. Time pickers round-trip through this.
+pub fn clock_minutes(minutes: i32) -> i32 {
+    minutes.clamp(0, 24 * 60 - 1)
+}
+
+#[derive(Clone, Debug)]
+pub struct InstructorOption {
+    pub name: String,
+    pub display_name: String,
+    pub courses: Vec<CourseKey>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PreferencesContext {
+    pub campus_names: Vec<String>,
+    pub instructors: Vec<InstructorOption>,
+    pub optional_course_count: i32,
+    pub required_credits: i32,
+    pub total_credits: i32,
+}
+
+pub fn preferences_context(plan: &SchedulePlan, index: Option<&crate::index::CatalogIndex>) -> PreferencesContext {
+    let Some(index) = index else { return PreferencesContext::default() };
+    let campus_names = index.campus_names.iter().filter(|name| {
+        let lower = name.to_ascii_lowercase();
+        !lower.contains("online") && !lower.contains("no campus")
+    }).cloned().collect();
+    let mut by_name: HashMap<String, InstructorOption> = HashMap::new();
+    let mut optional_course_count = 0;
+    let mut required_credits = 0;
+    let mut total_credits = 0;
+    for plan_course in &plan.courses {
+        let course = index.course(&plan_course.key);
+        let least = course.map(|c| c.min_credits.ceil() as i32).unwrap_or(0);
+        let most = course.map(|c| c.max_credits.ceil() as i32).unwrap_or(0);
+        if plan_course.is_required { required_credits += least; } else { optional_course_count += 1; }
+        total_credits += least.max(most);
+        for section in index.sections_for(&plan_course.key) {
+            if plan_course.excluded_crns.contains(&section.crn) {
+                continue;
+            }
+            for instructor in section.instructors.as_ref().into_iter().flatten() {
+                let option = by_name.entry(instructor.name.clone()).or_insert_with(|| InstructorOption { name: instructor.name.clone(), display_name: instructor.display_name(), courses: vec![] });
+                if !option.courses.contains(&plan_course.key) {
+                    option.courses.push(plan_course.key.clone());
+                }
+            }
+        }
+    }
+    let mut instructors: Vec<_> = by_name.into_values().collect();
+    instructors.sort_by_key(|instructor| instructor.name.to_ascii_lowercase());
+    PreferencesContext { campus_names, instructors, optional_course_count, required_credits, total_credits }
+}
+
+pub fn create_plan(data: &mut UserData, name: &str, term_code: &str) -> SchedulePlan {
+    let plan = SchedulePlan {
+        id: uuid::Uuid::new_v4(),
+        name: name.to_string(),
+        term_code: term_code.to_string(),
+        courses: vec![],
+        selected_crns: vec![],
+        filters: ScheduleFilters::default(),
+        preferences: None,
+        favorite_combinations: vec![],
+        is_primary: !data.plans.iter().any(|plan| plan.term_code == term_code),
+        created_at: 0.0,
+        updated_at: 0.0,
+    };
+    data.plans.push(plan.clone());
+    plan
+}
+
+pub fn update_plan(data: &mut UserData, id: uuid::Uuid, change: impl FnOnce(&mut SchedulePlan)) {
+    if let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == id) {
+        change(plan);
+    }
+}
+
+pub fn duplicate_plan(data: &mut UserData, id: uuid::Uuid) -> Option<SchedulePlan> {
+    let mut copy = data.plans.iter().find(|plan| plan.id == id)?.clone();
+    copy.id = uuid::Uuid::new_v4();
+    copy.name = format!("{} Copy", copy.name);
+    copy.is_primary = false;
+    data.plans.push(copy.clone());
+    Some(copy)
+}
+
+pub fn plan_by_id(data: &UserData, id: uuid::Uuid) -> Option<&SchedulePlan> {
+    data.plans.iter().find(|plan| plan.id == id)
+}
+
+pub fn add_course(data: &mut UserData, plan_id: uuid::Uuid, key: CourseKey, required: bool) -> bool {
+    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else { return false };
+    if plan.contains(&key) {
+        return false;
+    }
+    let color = plan.next_color_index();
+    plan.courses.push(PlanCourse { key, is_required: required, excluded_crns: HashSet::new(), color_index: color });
+    true
+}
+
+pub fn remove_course(data: &mut UserData, plan_id: uuid::Uuid, key: &CourseKey, sections_of_course: &[String]) {
+    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+    plan.courses.retain(|course| &course.key != key);
+    let crns: HashSet<&str> = sections_of_course.iter().map(String::as_str).collect();
+    plan.selected_crns.retain(|crn| !crns.contains(crn.as_str()));
+    plan.favorite_combinations.retain(|combination| !combination.iter().any(|crn| crns.contains(crn.as_str())));
+}
+
+#[derive(Clone, Debug)]
+pub struct CourseRemoval {
+    pub course: PlanCourse,
+    pub index: usize,
+    pub selected_crns: Vec<String>,
+    pub favorite_combinations: Vec<Vec<String>>,
+}
+
+pub fn remove_plan_course(data: &mut UserData, plan_id: uuid::Uuid, key: &CourseKey, index: Option<&crate::index::CatalogIndex>) -> Option<CourseRemoval> {
+    let plan = data.plans.iter().find(|plan| plan.id == plan_id)?.clone();
+    let resolved = ResolvedPlan::resolve(&plan, index);
+    let entry = resolved.entries.iter().find(|entry| entry.key() == key)?;
+    let mut crns = entry.course_crns();
+    for section in &entry.selected {
+        crns.insert(section.crn.clone());
+    }
+    if let Some(index) = index {
+        for section in index.sections_for(key) {
+            crns.insert(section.crn);
+        }
+    }
+    let removal = CourseRemoval {
+        course: entry.plan_course.clone(),
+        index: plan.courses.iter().position(|course| &course.key == key).unwrap_or(plan.courses.len()),
+        selected_crns: plan.selected_crns.iter().filter(|crn| crns.contains(*crn)).cloned().collect(),
+        favorite_combinations: plan.favorite_combinations.iter().filter(|combination| combination.iter().any(|crn| crns.contains(crn))).cloned().collect(),
+    };
+    remove_course(data, plan_id, key, &crns.into_iter().collect::<Vec<_>>());
+    Some(removal)
+}
+
+pub fn restore_removal(plan: &mut SchedulePlan, removal: &CourseRemoval) {
+    if plan.contains(&removal.course.key) {
+        return;
+    }
+    let index = removal.index.min(plan.courses.len());
+    plan.courses.insert(index, removal.course.clone());
+    for crn in &removal.selected_crns {
+        if !plan.selected_crns.contains(crn) {
+            plan.selected_crns.push(crn.clone());
+        }
+    }
+    for combination in &removal.favorite_combinations {
+        if !plan.favorite_combinations.contains(combination) {
+            plan.favorite_combinations.push(combination.clone());
+        }
+    }
+}
+
+pub fn add_autofill_courses(data: &mut UserData, plan_id: uuid::Uuid, courses: &[CourseKey]) -> Vec<CourseKey> {
+    let mut added = vec![];
+    for key in courses {
+        if add_course(data, plan_id, key.clone(), true) {
+            added.push(key.clone());
+        }
+    }
+    added
+}
+
+pub fn undo_autofill(data: &mut UserData, plan_id: uuid::Uuid, keys: &[CourseKey], index: Option<&crate::index::CatalogIndex>) {
+    for key in keys {
+        let crns: Vec<String> = index.map(|index| index.sections_for(key).into_iter().map(|section| section.crn).collect()).unwrap_or_default();
+        remove_course(data, plan_id, key, &crns);
+    }
+}
+
+pub fn active_primary_plan(plans: &[SchedulePlan], now: f64) -> Option<&SchedulePlan> {
+    let candidates: Vec<(&SchedulePlan, (f64, f64))> = plans.iter().filter_map(|plan| {
+        if !plan.is_primary || plan.selected_crns.is_empty() {
+            return None;
+        }
+        Some((plan, crate::calendar::approximate_window(&plan.term_code)?))
+    }).collect();
+    if let Some((plan, _)) = candidates.iter().filter(|(_, window)| now >= window.0 && now <= window.1).max_by_key(|(plan, _)| plan.selected_crns.len()) {
+        return Some(*plan);
+    }
+    if let Some((plan, _)) = candidates.iter().filter(|(_, window)| window.0 > now).min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap_or(std::cmp::Ordering::Equal)) {
+        return Some(*plan);
+    }
+    let cutoff = now - 14.0 * 24.0 * 3600.0;
+    candidates.iter().filter(|(_, window)| window.1 >= cutoff).max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(plan, _)| *plan)
+}
+
+pub fn reorder_semester<'a>(plan: &SchedulePlan, degree: Option<&'a DegreePlan>, terms: &[Term], index: Option<&crate::index::CatalogIndex>) -> Option<(&'a DegreePlan, Term)> {
+    let degree = degree?;
+    let term = resolve_term(&plan.term_code, terms, index);
+    degree.term_matching(&term)?;
+    Some((degree, term))
+}
+
+fn resolve_term(code: &str, terms: &[Term], index: Option<&crate::index::CatalogIndex>) -> Term {
+    if let Some(known) = terms.iter().find(|term| term.code == code) {
+        return known.clone();
+    }
+    if let Some(index) = index {
+        if index.catalog.term.code == code {
+            return index.catalog.term.clone();
+        }
+    }
+    Term { code: code.to_string(), banner_description: String::new() }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReorderOption {
+    pub id: String,
+    pub title: String,
+    pub reasons: Vec<String>,
+    pub adds_semester: bool,
+    pub moved_away: Vec<CourseKey>,
+    pub moved_in: Vec<CourseKey>,
+    suggestion: Option<crate::reorder::Suggestion>,
+}
+
+impl ReorderOption {
+    pub fn from_suggestion(suggestion: &crate::reorder::Suggestion, origin: uuid::Uuid) -> Self {
+        let (moved_away, moved_in, adds_semester, _) = crate::reorder::schedule_option(suggestion, origin);
+        Self { id: suggestion.id.clone(), title: suggestion.title.clone(), reasons: suggestion.reasons.clone(), adds_semester, moved_away, moved_in, suggestion: Some(suggestion.clone()) }
+    }
+    pub fn custom(title: impl Into<String>) -> Self {
+        Self { id: "x".into(), title: title.into(), reasons: vec![], adds_semester: false, moved_away: vec![], moved_in: vec![], suggestion: None }
+    }
+    pub fn applied_text(&self) -> String {
+        self.title.strip_prefix("Move ").map(|rest| format!("Moved {rest}")).unwrap_or_else(|| "Updated your degree plan".into())
+    }
+    pub fn schedule_effect(&self) -> String {
+        let mut parts = vec![];
+        if !self.moved_away.is_empty() {
+            let verb = if self.moved_away.len() == 1 { "comes" } else { "come" };
+            parts.push(format!("{} {verb} out of this schedule.", course_list(&self.moved_away)));
+        }
+        if !self.moved_in.is_empty() {
+            let verb = if self.moved_in.len() == 1 { "it’s" } else { "they’re" };
+            parts.push(format!("{} will be added to it if {verb} offered this term.", course_list(&self.moved_in)));
+        }
+        parts.join(" ")
+    }
+    pub fn apply_to(&self, plan: &mut DegreePlan) {
+        if let Some(suggestion) = &self.suggestion {
+            crate::reorder::apply(suggestion, plan);
+        }
+    }
+}
+
+/// The offline early return: nothing is looked up when the blocking course is not in the semester.
+pub fn reorder_load_offline(blocking: &[CourseKey], degree_plan: &DegreePlan, term: &Term) -> Vec<ReorderOption> {
+    let mut plan = degree_plan.clone();
+    plan.sort_terms();
+    let Some(origin) = plan.terms.iter().find(|semester| semester.matches_term(term)).cloned() else { return vec![] };
+    let in_semester: HashSet<CourseKey> = origin.courses.iter().filter_map(|course| course.key.clone()).collect();
+    let candidates: Vec<CourseKey> = blocking.iter().filter(|key| in_semester.contains(*key)).cloned().collect();
+    if candidates.is_empty() {
+        return vec![];
+    }
+    let history = crate::offering::OfferingHistory::empty();
+    crate::reorder::suggestions(&plan, origin.id, &candidates, &history, |_| None, &crate::CourseEquivalences::none(), 20.0)
+        .iter()
+        .map(|suggestion| ReorderOption::from_suggestion(suggestion, origin.id))
+        .collect()
 }

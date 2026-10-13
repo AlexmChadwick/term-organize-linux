@@ -367,3 +367,62 @@ fn label_before(window: &str) -> String {
 fn normalize_clock(text: &str) -> String {
     minutes_from_clock(text).map(clock_string).unwrap_or_else(|| text.trim().to_string())
 }
+
+/// Whether a description can be read by the on-device model. The survey still works either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssistantAvailability {
+    Available,
+    DeviceNotEligible,
+    NotEnabled,
+    NotReady,
+    UnsupportedLanguage,
+    Unavailable,
+}
+
+impl AssistantAvailability {
+    pub fn is_available(self) -> bool {
+        self == Self::Available
+    }
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Self::Available => None,
+            Self::DeviceNotEligible => Some("Apple Intelligence isn’t available on this device, but the survey below still works."),
+            Self::NotEnabled => Some("Turn on Apple Intelligence in Settings to describe your week in your own words. The survey below works without it."),
+            Self::NotReady => Some("Apple Intelligence isn’t ready yet. Try again later; the survey below works in the meantime."),
+            Self::UnsupportedLanguage => Some("Apple Intelligence doesn’t support your language yet, but the survey below still works."),
+            Self::Unavailable => Some("Apple Intelligence isn’t available right now, but the survey below still works."),
+        }
+    }
+}
+
+/// Why a description could not be turned into survey answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssistantFailure {
+    Unavailable(AssistantAvailability),
+    EmptyDescription,
+    DescriptionTooLong,
+    Guardrail,
+    ContextTooLarge,
+    UnsupportedLanguage,
+    Busy,
+    TimedOut,
+    NothingFound,
+    Failed(String),
+}
+
+impl AssistantFailure {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Unavailable(availability) => availability.note().unwrap_or("Apple Intelligence isn’t available right now.").to_string(),
+            Self::EmptyDescription => "Describe the schedule you want first.".into(),
+            Self::DescriptionTooLong => "That’s a lot to read at once. Try describing the most important things in a few sentences.".into(),
+            Self::Guardrail => "Apple Intelligence couldn’t use that description. Try rephrasing it, or fill in the survey yourself.".into(),
+            Self::ContextTooLarge => "That description is too long for Apple Intelligence. Shorten it, or fill in the survey yourself.".into(),
+            Self::UnsupportedLanguage => "Apple Intelligence can’t read that language yet. Try English, or fill in the survey yourself.".into(),
+            Self::Busy => "Apple Intelligence is busy right now. Try again in a moment.".into(),
+            Self::TimedOut => "Apple Intelligence took too long. Try a shorter description, or fill in the survey yourself.".into(),
+            Self::NothingFound => "Couldn’t find any schedule wishes in that. Try mentioning times, days or commitments, like “no classes before 10” or “work Tuesdays 1–5”.".into(),
+            Self::Failed(_) => "Something went wrong reading that. Try again, or fill in the survey yourself.".into(),
+        }
+    }
+}

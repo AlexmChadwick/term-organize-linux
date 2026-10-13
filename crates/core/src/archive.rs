@@ -26,6 +26,10 @@ pub fn term_code_from_file_name(name: &str) -> Option<String> {
     }
 }
 
+pub fn encode(catalog: &TermCatalog) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(catalog).map_err(|e| format!("catalog JSON: {e}"))
+}
+
 pub fn decode(data: &[u8]) -> Result<TermCatalog, String> {
     let json = if data.first() == Some(&b'{') {
         data.to_vec()

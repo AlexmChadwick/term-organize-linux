@@ -425,3 +425,36 @@ pub fn cached_catalogs() -> Vec<TermCatalog> {
 pub fn indexes_on_disk() -> Vec<CatalogIndex> {
     cached_catalogs().into_iter().map(CatalogIndex::build).collect()
 }
+
+/// A row of Banner's cross-listed sections table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrossListedSection {
+    pub crn: String,
+    pub course: CourseKey,
+    pub title: String,
+    pub section: String,
+}
+
+/// Sections named in a cross-list HTML table. An empty or header-only page is an empty list.
+pub fn cross_listed_sections(html: &str, subjects: &crate::banner::SubjectLookup) -> Vec<CrossListedSection> {
+    let Some(rows) = crate::html::table_rows(html) else { return Vec::new() };
+    rows.into_iter()
+        .filter_map(|cells| {
+            if cells.len() < 4 {
+                return None;
+            }
+            let crn = cells[0].trim().to_string();
+            let subject = cells[1].trim().to_string();
+            let number = cells[2].trim().to_string();
+            if crn.is_empty() || !crn.chars().all(|c| c.is_ascii_digit()) || subject.is_empty() || number.is_empty() {
+                return None;
+            }
+            Some(CrossListedSection {
+                crn,
+                course: CourseKey { subject: subjects.code(&subject), number },
+                title: cells[3].trim().to_string(),
+                section: cells.get(4).map(|text| text.trim().to_string()).unwrap_or_default(),
+            })
+        })
+        .collect()
+}

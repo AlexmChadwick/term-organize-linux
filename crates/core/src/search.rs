@@ -481,3 +481,214 @@ pub fn make_stats(sections: &[CourseSection]) -> CourseStats {
     stats.instructor_names = names;
     stats
 }
+
+/// Meeting-day presets (`SearchDayPreset`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchDayPreset {
+    Any,
+    NoFridays,
+    Mwr,
+    Tf,
+    Mr,
+    Wf,
+    Custom,
+}
+
+impl SearchDayPreset {
+    pub const ALL: [Self; 7] = [Self::Any, Self::NoFridays, Self::Mwr, Self::Tf, Self::Mr, Self::Wf, Self::Custom];
+
+    pub fn days(self) -> Option<DaySet> {
+        Some(match self {
+            Self::Any | Self::Custom => return None,
+            Self::NoFridays => DaySet::from_indices([1, 2, 3, 4]),
+            Self::Mwr => DaySet::from_indices([1, 3, 4]),
+            Self::Tf => DaySet::from_indices([2, 5]),
+            Self::Mr => DaySet::from_indices([1, 4]),
+            Self::Wf => DaySet::from_indices([3, 5]),
+        })
+    }
+
+    pub fn chip_title(self) -> &'static str {
+        match self {
+            Self::Any => "Days",
+            Self::NoFridays => "No Fridays",
+            Self::Mwr => "MWR only",
+            Self::Tf => "TF only",
+            Self::Mr => "MR only",
+            Self::Wf => "WF only",
+            Self::Custom => "Custom days",
+        }
+    }
+
+    pub fn matching(days: Option<DaySet>) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| *preset != Self::Custom && preset.days() == days)
+    }
+
+    pub fn selection(days: Option<DaySet>) -> Self {
+        Self::matching(days).unwrap_or(Self::Custom)
+    }
+}
+
+pub fn filter_days_title(days: Option<DaySet>) -> String {
+    let Some(days) = days else { return "Days".into() };
+    if let Some(preset) = SearchDayPreset::matching(Some(days)) {
+        return preset.chip_title().into();
+    }
+    if days.is_empty() { "No set days".into() } else { format!("{} only", days.compact_label()) }
+}
+
+pub fn filter_subjects_title(subjects: &HashSet<String>) -> String {
+    match subjects.len() {
+        0 => "Subject".into(),
+        1 => subjects.iter().next().cloned().unwrap_or_else(|| "Subject".into()),
+        n => format!("{n} subjects"),
+    }
+}
+
+pub fn filter_nupaths_title(nupaths: &HashSet<NuPath>) -> String {
+    match nupaths.len() {
+        0 => "NUpath".into(),
+        1 | 2 => NuPath::ALL.into_iter().filter(|path| nupaths.contains(path)).map(|path| path.short()).collect::<Vec<_>>().join(", "),
+        n => format!("NUpath · {n}"),
+    }
+}
+
+pub fn filter_level_title(level: i32) -> String {
+    if level == 0 { "Under 1000".into() } else { format!("{level}000") }
+}
+
+/// Minutes after midnight, clamped to the day (`SearchTimeOfDay`).
+pub fn date_from_minutes(minutes: i32) -> i32 {
+    minutes.clamp(0, 24 * 60 - 1)
+}
+
+pub fn minutes_from_date(minutes: i32) -> i32 {
+    minutes
+}
+
+/// Preset searches on the catalog home screen (`HomeQuickSearch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomeQuickSearch {
+    OpenSeats,
+    Honors,
+    Online,
+    NoFridays,
+    FirstYear,
+}
+
+impl HomeQuickSearch {
+    pub const ALL: [Self; 5] = [Self::OpenSeats, Self::Honors, Self::Online, Self::NoFridays, Self::FirstYear];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::OpenSeats => "Open seats",
+            Self::Honors => "Honors",
+            Self::Online => "Online",
+            Self::NoFridays => "No Friday classes",
+            Self::FirstYear => "1000-level",
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::OpenSeats => "chair",
+            Self::Honors => "star",
+            Self::Online => "laptopcomputer",
+            Self::NoFridays => "calendar.badge.minus",
+            Self::FirstYear => "1.circle",
+        }
+    }
+
+    pub fn filters(self) -> SearchFilters {
+        let mut filters = SearchFilters::default();
+        match self {
+            Self::OpenSeats => filters.open_seats_only = true,
+            Self::Honors => filters.honors_only = true,
+            Self::Online => filters.instruction = InstructionFilter::Online,
+            Self::NoFridays => filters.allowed_days = Some(DaySet::from_indices([1, 2, 3, 4])),
+            Self::FirstYear => { filters.levels.insert(1); }
+        }
+        filters
+    }
+}
+
+pub fn browse_summary_text(shown: i32, total: i32, open: i32, open_only: bool, noun: &str) -> String {
+    let plural = |count: i32| if count == 1 { noun.to_string() } else { format!("{noun}s") };
+    let mut text = if shown == total {
+        format!("{total} {}", plural(total))
+    } else {
+        format!("{shown} of {total} {}", plural(total))
+    };
+    if open > 0 && !open_only {
+        text.push_str(&format!(" · {open} with open seats"));
+    }
+    text
+}
+
+pub fn browse_level_title(level: i32) -> String {
+    if level == 0 { "Under 1000".into() } else { format!("{level}000-level") }
+}
+
+pub fn browse_level_noun(level: i32) -> String {
+    if level == 0 { "courses under 1000".into() } else { format!("{level}000-level courses") }
+}
+
+pub fn course_count_by_subject(index: &CatalogIndex) -> std::collections::HashMap<String, i32> {
+    let mut counts = std::collections::HashMap::new();
+    for course in &index.courses {
+        *counts.entry(course.subject.clone()).or_default() += 1;
+    }
+    counts
+}
+
+pub fn popular_subjects(index: &CatalogIndex, limit: usize) -> Vec<Subject> {
+    let counts = course_count_by_subject(index);
+    let mut subjects = index.active_subjects.clone();
+    subjects.sort_by(|left, right| {
+        let left_count = counts.get(&left.code).copied().unwrap_or(0);
+        let right_count = counts.get(&right.code).copied().unwrap_or(0);
+        right_count.cmp(&left_count).then(left.code.cmp(&right.code))
+    });
+    subjects.truncate(limit);
+    subjects
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchExample {
+    pub title: String,
+    pub caption: String,
+    pub symbol: String,
+}
+
+pub fn search_examples(index: &CatalogIndex) -> Vec<SearchExample> {
+    let mut result = Vec::new();
+    let preferred = ["CS 3000", "CS 2500", "MATH 1341", "ENGW 1111", "PHYS 1151"];
+    let example_key = preferred.iter().filter_map(|code| CourseKey::parse(code)).find(|key| index.course(key).is_some())
+        .or_else(|| index.courses.first().map(|course| course.key()));
+    if let Some(key) = &example_key {
+        result.push(SearchExample { title: key.to_string(), caption: "Course code".into(), symbol: "book.closed".into() });
+    }
+    let topics = ["machine learning", "data structures", "calculus", "psychology", "writing"];
+    if let Some(topic) = topics.iter().find(|topic| index.documents.iter().any(|doc| doc.title_normalized.contains(*topic))) {
+        result.push(SearchExample { title: (*topic).to_string(), caption: "Topic or title".into(), symbol: "lightbulb".into() });
+    }
+    let crn = example_key.as_ref().and_then(|key| index.sections_for(key).first().map(|section| section.crn.clone()))
+        .or_else(|| index.catalog.sections.first().map(|section| section.crn.clone()));
+    if let Some(crn) = crn {
+        result.push(SearchExample { title: crn, caption: "CRN".into(), symbol: "number".into() });
+    }
+    let teacher = example_key.as_ref().and_then(|key| {
+        index.sections_for(key).into_iter().find_map(|section| {
+            let list = section.instructors?;
+            let instructor = list.iter().find(|item| item.primary).or_else(|| list.first())?;
+            index.instructors.iter().find(|summary| summary.name == instructor.name).cloned()
+        })
+    });
+    let professor = teacher.or_else(|| {
+        index.instructors.iter().max_by_key(|summary| summary.course_keys.len()).cloned()
+    });
+    if let Some(professor) = professor {
+        result.push(SearchExample { title: professor.display_name, caption: "Professor".into(), symbol: "person.crop.circle".into() });
+    }
+    result
+}

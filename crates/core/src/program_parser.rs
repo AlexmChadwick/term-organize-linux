@@ -69,6 +69,25 @@ pub fn programs_from_az(html: &str) -> Vec<CatalogProgram> {
     programs
 }
 
+/// Programs whose degree matches an audit code such as `CS-B-CSCI-BSCS` (the last segment).
+/// Campus-less listings come first, then Boston, then anywhere else.
+pub fn suggested_programs(code: Option<&str>, programs: &[CatalogProgram]) -> Vec<CatalogProgram> {
+    let Some(degree) = code.and_then(|text| text.split('-').next_back()).filter(|degree| degree.len() >= 2) else {
+        return vec![];
+    };
+    let mut matched: Vec<CatalogProgram> = programs.iter().filter(|program| program.degree().is_some_and(|name| name.eq_ignore_ascii_case(degree))).cloned().collect();
+    matched.sort_by(|left, right| campus_rank(left).cmp(&campus_rank(right)).then_with(|| left.title.cmp(&right.title)));
+    matched
+}
+
+fn campus_rank(program: &CatalogProgram) -> i32 {
+    match program.campus().as_deref() {
+        None => 0,
+        Some("Boston") => 1,
+        Some(_) => 2,
+    }
+}
+
 pub fn universitywide_link(html: &str) -> Option<String> {
     let re = Regex::new(r###"(?is)<a\s[^>]*href="([^"#]+)"[^>]*>"###).unwrap();
     let cue = Regex::new(r"(?i)university-?wide-?requirements").unwrap();

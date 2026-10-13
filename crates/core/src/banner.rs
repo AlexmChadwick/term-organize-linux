@@ -569,6 +569,19 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
     Ok(seats)
 }
 
+/// `09/09/2026` becomes `2026-09-09`. An ISO date is kept. Empty stays absent.
+fn banner_slash_date(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = raw.split('/').collect();
+    if parts.len() == 3 && parts[0].len() <= 2 && parts[1].len() <= 2 && parts[2].len() == 4 {
+        return Some(format!("{:0>4}-{:0>2}-{:0>2}", parts[2], parts[0], parts[1]));
+    }
+    Some(raw.to_string())
+}
+
 /// Meeting from Banner's compact day string and HHMM times.
 pub fn meeting_from_banner(days: &str, start_hhmm: i32, end_hhmm: i32, building: &str, room: &str, start_date: &str, end_date: &str) -> Meeting {
     let mut set = DaySet(0);
@@ -587,8 +600,8 @@ pub fn meeting_from_banner(days: &str, start_hhmm: i32, end_hhmm: i32, building:
         room: if room.is_empty() { None } else { Some(room.into()) },
         campus_code: None,
         kind: "Class".into(),
-        start_date: if start_date.is_empty() { None } else { Some(start_date.into()) },
-        end_date: if end_date.is_empty() { None } else { Some(end_date.into()) },
+        start_date: banner_slash_date(start_date),
+        end_date: banner_slash_date(end_date),
     }
 }
 

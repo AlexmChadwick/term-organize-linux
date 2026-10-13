@@ -1145,7 +1145,7 @@ impl AuditEngine {
                 };
                 (None, detail)
             };
-            items.push(NoteItem { id: requirement.path.short().into(), title: requirement.title(), status, detail, courses: chosen.iter().map(|c| c.id()).collect() });
+            items.push(NoteItem { id: requirement.path.code().into(), title: requirement.title(), status, detail, courses: chosen.iter().map(|c| c.id()).collect() });
         }
         let met: Vec<&NoteItem> = items.iter().filter(|i| i.status.is_some_and(|s| s.is_satisfied())).collect();
         let open: Vec<&NoteItem> = items.iter().filter(|i| !i.status.is_some_and(|s| s.is_satisfied())).collect();
@@ -1159,7 +1159,11 @@ impl AuditEngine {
         let mut detail = format!("{} of {} met", met.len(), items.len());
         let missing: Vec<&NoteItem> = items.iter().filter(|i| i.status == Some(AuditStatus::Missing) || i.status == Some(AuditStatus::Partial)).collect();
         if !missing.is_empty() && missing.len() <= 3 {
-            let names = missing.iter().map(|i| NuPath::from_short(&i.id).map(|p| p.short().to_string()).unwrap_or_else(|| i.title.clone())).collect::<Vec<_>>().join(", ");
+            let names = missing
+                .iter()
+                .map(|i| NuPath::ALL.into_iter().find(|p| p.code() == i.id).map(|p| p.short().to_string()).unwrap_or_else(|| i.title.clone()))
+                .collect::<Vec<_>>()
+                .join(", ");
             detail.push_str(" · missing ");
             detail.push_str(&names);
         }
@@ -1806,6 +1810,252 @@ fn visit(
 /// A course declared equivalent, used when building groups from a plan plus catalog pairs.
 pub fn declared_pairs(items: &[CourseEquivalence]) -> Vec<(CourseKey, CourseKey)> {
     items.iter().map(|e| (e.course.clone(), e.counts_as.clone())).collect()
+}
+
+/// Which requirements a page shows. Remaining is not yet complete; Done is complete or waived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequirementsFilter {
+    All,
+    Remaining,
+    Done,
+}
+
+impl RequirementsFilter {
+    pub fn includes_status(self, status: AuditStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::Remaining => status <= AuditStatus::Planned,
+            Self::Done => status >= AuditStatus::Complete,
+        }
+    }
+
+    /// A check that does not count yet shows in All only.
+    pub fn includes(self, check: &NoteCheck) -> bool {
+        if check.counts { self.includes_status(check.status) } else { self == Self::All }
+    }
+}
+
+/// One item of a requirement's list, in catalog order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListEntry {
+    pub id: i32,
+    pub alternatives: Vec<Vec<CourseKey>>,
+    pub category: Option<String>,
+}
+
+impl ListEntry {
+    pub fn courses(&self) -> Vec<CourseKey> {
+        self.alternatives.iter().flatten().cloned().collect()
+    }
+}
+
+/// A catalog sentence and the check the audit made of it.
+#[derive(Clone, Debug)]
+pub struct NoteEntry {
+    pub section_id: String,
+    pub text: String,
+    pub check: Option<NoteCheck>,
+}
+
+/// How a course stands in a requirement row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CourseStanding {
+    Planned(String),
+    NotInPlan,
+    Completed(Option<String>),
+    InProgress(String),
+    NotNeeded,
+}
+
+#[derive(Clone, Debug)]
+pub struct CourseRowInfo {
+    pub status: CourseStanding,
+    pub is_counted_here: bool,
+    pub by_substitution: bool,
+    pub caption: Option<String>,
+}
+
+pub fn has_header_row(result: &RuleResult) -> bool {
+    match result.effective_kind.as_ref() {
+        None => true,
+        Some(RuleKind::Required(_)) => is_replaced(result),
+        Some(_) => true,
+    }
+}
+
+pub fn is_replaced(result: &RuleResult) -> bool {
+    result.substitutions.iter().any(|item| matches!(item.change, SubstitutionChange::Replace(_)))
+}
+
+pub fn is_shown(use_: &CourseUse, listed: &HashSet<CourseKey>) -> bool {
+    listed.contains(&use_.key) || use_.satisfies.as_ref().is_some_and(|key| listed.contains(key))
+}
+
+pub fn alternative_entries(option: &CourseOption) -> Vec<ListEntry> {
+    option
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, alternative)| ListEntry { id: index as i32, alternatives: vec![alternative.clone()], category: None })
+        .collect()
+}
+
+pub fn option_entries(options: &[CourseOption], rule: &RequirementRule, subject_name: impl Fn(&str) -> Option<String>) -> Vec<ListEntry> {
+    let starts = category_starts(options, rule, subject_name);
+    options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| ListEntry {
+            id: index as i32,
+            alternatives: option.alternatives.clone(),
+            category: starts.get(&index).cloned(),
+        })
+        .collect()
+}
+
+pub fn listing(rule: &RequirementRule) -> (Vec<CourseOption>, Vec<CourseRange>) {
+    match &rule.kind {
+        RuleKind::Required(option) => (vec![option.clone()], vec![]),
+        RuleKind::Choose { options, ranges, .. } => (options.clone(), ranges.clone()),
+        RuleKind::GeneralElectives { .. } => (vec![], vec![]),
+    }
+}
+
+/// The relevant entries and the first `extra` others, in catalog order.
+pub fn collapsed_entries(entries: &[ListEntry], extra: i32, is_relevant: impl Fn(&ListEntry) -> bool) -> Vec<ListEntry> {
+    let mut others = 0;
+    entries
+        .iter()
+        .filter(|entry| {
+            if is_relevant(entry) {
+                return true;
+            }
+            if others >= extra {
+                return false;
+            }
+            others += 1;
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn note_entries(section: &RequirementSection, audit: &DegreeAudit, filter: RequirementsFilter, states_total_hours: bool) -> Vec<NoteEntry> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (note, shows_unchecked) in section
+        .notes
+        .iter()
+        .map(|note| (note, true))
+        .chain(section.groups.iter().filter(|group| group.rules.is_empty()).flat_map(|group| group.notes.iter().map(|note| (note, false))))
+    {
+        let id = format!("{}|{note}", section.id);
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(check) = audit.note_check(&section.id, note) {
+            if filter.includes(check) {
+                out.push(NoteEntry { section_id: section.id.clone(), text: note.clone(), check: Some(check.clone()) });
+            }
+            continue;
+        }
+        let restated = states_total_hours && note.to_ascii_lowercase().contains("total semester hours");
+        if filter == RequirementsFilter::All && shows_unchecked && !restated {
+            out.push(NoteEntry { section_id: section.id.clone(), text: note.clone(), check: None });
+        }
+    }
+    out
+}
+
+pub fn split_unlisted(result: &RuleResult, listed: &HashSet<CourseKey>) -> (Vec<CourseUse>, Vec<CourseUse>) {
+    let unlisted: Vec<CourseUse> = result.used.iter().filter(|use_| !is_shown(use_, listed)).cloned().collect();
+    let substitutes = unlisted.iter().filter(|use_| use_.by_substitution).cloned().collect();
+    let others = unlisted.into_iter().filter(|use_| !use_.by_substitution).collect();
+    (substitutes, others)
+}
+
+pub fn requirement_name(result: &RuleResult, requirements: &ProgramRequirements) -> String {
+    requirements.degree_short_name(&result.rule.id).unwrap_or_else(|| result.rule.display_label())
+}
+
+pub fn counting_note(key: &CourseKey, result: &RuleResult) -> Option<String> {
+    result.substitutions.iter().find(|item| matches!(&item.change, SubstitutionChange::CountCourse(course) if course == key)).and_then(substitution_caption)
+}
+
+pub fn counting_caption(key: &CourseKey, result: &RuleResult, requirements: &ProgramRequirements) -> String {
+    let mut parts = vec![format!("Counts for {} by substitution", requirement_name(result, requirements))];
+    if let Some(note) = counting_note(key, result) {
+        parts.push(note);
+    }
+    parts.join(" · ")
+}
+
+pub fn row_caption(info: &CourseRowInfo, key: &CourseKey, result: &RuleResult, requirements: &ProgramRequirements, is_child: bool) -> Option<String> {
+    if !info.by_substitution {
+        return info.caption.clone();
+    }
+    if is_child { counting_note(key, result) } else { Some(counting_caption(key, result, requirements)) }
+}
+
+fn substitution_caption(item: &crate::model::RequirementSubstitution) -> Option<String> {
+    let note = item.note.trim();
+    if note.is_empty() { None } else { Some(note.to_string()) }
+}
+
+fn category_starts(options: &[CourseOption], rule: &RequirementRule, subject_name: impl Fn(&str) -> Option<String>) -> HashMap<usize, String> {
+    if let RuleKind::Choose { options: own, .. } = &rule.kind {
+        if own == options {
+            if let Some(categories) = &rule.option_categories {
+                if categories.len() == options.len() {
+                    let mut starts = HashMap::new();
+                    for (index, category) in categories.iter().enumerate() {
+                        if let Some(category) = category {
+                            if index == 0 || categories[index - 1].as_deref() != Some(category.as_str()) {
+                                starts.insert(index, category.clone());
+                            }
+                        }
+                    }
+                    return starts;
+                }
+            }
+        }
+    }
+    let categories: Vec<&str> = rule.notes.iter().filter(|note| degree_is_category(note)).map(|note| note.as_str()).collect();
+    let Some(first) = categories.first() else { return HashMap::new() };
+    if options.is_empty() {
+        return HashMap::new();
+    }
+    let subjects: Vec<String> = options.iter().map(|option| option.all_courses().first().map(|key| key.subject.clone()).unwrap_or_default()).collect();
+    let runs: Vec<usize> = subjects.iter().enumerate().filter(|(index, subject)| *index == 0 || subjects[*index - 1] != **subject).map(|(index, _)| index).collect();
+    if runs.len() == categories.len() {
+        return runs.into_iter().zip(categories).map(|(index, name)| (index, name.to_string())).collect();
+    }
+    let mut starts = HashMap::new();
+    starts.insert(0, (*first).to_string());
+    let mut current = 0usize;
+    for start in runs.into_iter().skip(1) {
+        if current + 1 >= categories.len() {
+            break;
+        }
+        let name = subject_name(&subjects[start]).unwrap_or_else(|| subjects[start].clone());
+        if shares_word(&name, categories[current + 1]) {
+            current += 1;
+            starts.insert(start, categories[current].to_string());
+        }
+    }
+    if current == categories.len() - 1 { starts } else { HashMap::new() }
+}
+
+fn degree_is_category(note: &str) -> bool {
+    note.chars().count() <= 48 && !note.contains('.') && !note.contains(':')
+}
+
+fn shares_word(left: &str, right: &str) -> bool {
+    fn words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphabetic()).map(|word| word.to_ascii_lowercase()).filter(|word| word.chars().count() >= 4).collect()
+    }
+    let right = words(right);
+    words(left).iter().any(|word| right.iter().any(|other| word.starts_with(other.as_str()) || other.starts_with(word.as_str())))
 }
 
 /// Suppress unused import warning if a limit variant is only constructed via serde.

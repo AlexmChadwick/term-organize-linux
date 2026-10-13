@@ -17,6 +17,14 @@ pub struct EquivalenceSuggestion {
 }
 
 impl EquivalenceSuggestion {
+    pub fn id(&self) -> String {
+        format!("{}|{}", self.course, self.candidate)
+    }
+    /// The share of the retired course's dependents that list the candidate beside it.
+    /// 0 when the suggestion rests on the titles alone.
+    pub fn confidence(&self) -> f64 {
+        if self.total > 0 { self.together as f64 / self.total as f64 } else { 0.0 }
+    }
     pub fn evidence(&self) -> String {
         let listing = if self.together > 0 {
             Some(if self.total == 1 {

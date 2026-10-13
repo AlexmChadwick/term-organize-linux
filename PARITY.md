@@ -10,11 +10,11 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | --- | --- | --- |
 | Sidebar of Search, Subjects, Saved, Professors, Free Rooms, schedules, degree plans, watchlist | `crates/app/src/ui.rs` areas, `adw::NavigationSplitView` | ported |
 | Term menu in the toolbar | Header `DropDown`. Bundled and cached terms open immediately. The menu also lists Banner’s terms (`classSearch/getTerms`) and downloads a missing term with `CatalogBuilder` (`catalog.rs`), then caches `term-{code}.catalog` | ported |
-| Resizable panes; small window floats the sidebar | `gtk::Paned` inside Subjects, Schedules, and Degree Plans. Sidebar collapses under 860px. Double-click does not reset a pane | partial |
+| Resizable panes; small window floats the sidebar | `gtk::Paned` inside Subjects, Schedules, and Degree Plans. Double-click the divider (`install_pane_reset`) puts the pixel position back. Sidebar collapses under 860px (View → Show or Hide Sidebar, Ctrl+Alt+0). The divider position is pixels, not a share of the window, and dragging it to the edge does not hide the pane | partial |
 | Course and professor windows side by side | Clicking a course or professor opens an `adw::Window`. Search stays put, so several courses can be open at once | ported |
-| Tables, context menus, Return to open, Delete to remove | List rows, click to open, Remove buttons. No column sort UI | partial |
+| Tables, context menus, Return to open, Delete to remove | Search and Subjects have column buttons for code, title, and open seats. Click opens a course. Saved courses, schedule courses, and the watchlist use Remove. No context menu, and Delete does not remove a row | partial |
 | Drag a degree-audit PDF onto the window | `gtk::DropTarget` on the window, plus File → Import and Ctrl+O | ported |
-| Drag courses between semesters, or a code onto a schedule | Semester rows drag by course id (`editing::move_course_at`). A search row can be dropped onto a semester. Dropping onto the schedule builder is still add-by-code | partial |
+| Drag courses between semesters, or a code onto a schedule | Semester rows drag by course id (`editing::move_course_at`). A search row or a degree-plan course can be dropped onto a semester or onto the schedule’s course list (`attach_schedule_drop`) | ported |
 | Menus and shortcuts (New Schedule, New Degree Plan, Import, Export, Print, Reload, areas 1–8) | Menubar and accelerators in `install_actions`. Print is Ctrl+P | ported |
 | Settings: General, Data, iCloud, Notifications, About | Preferences window. Folder sync stands in for iCloud. About uses `adw::AboutWindow` and `crates/core/src/legal.rs` | substituted |
 | Dark mode | `adw::StyleManager` Follow system / Light / Dark | ported |
@@ -25,7 +25,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Swift | Linux | Status |
 | --- | --- | --- |
 | `Services/SearchEngine.swift` — codes over titles, prefixes, typos, aliases, CRN, every token | `crates/core/src/search.rs` | ported |
-| Filters: subjects, NUpath (all must match), level, credits, campus, class type, honors, open seats, instruction, allowed days, starts after, ends before | Same struct. The window exposes subject, honors, open seats, campus, instruction, NUpath, level, credits, days, and time bounds. Class type is in the filter struct and not a separate control | partial |
+| Filters: subjects, NUpath (all must match), level, credits, campus, class type, honors, open seats, instruction, allowed days, starts after, ends before | Same struct. The window exposes each of those, including a class-type dropdown (one type at a time) | ported |
 | Empty query lists courses that pass the filters | Same | ported |
 | Sort relevance, number, title, open seats | Header dropdown | ported |
 
@@ -44,7 +44,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Swift | Linux | Status |
 | --- | --- | --- |
 | Plans, primary plan, add and remove courses | `SchedulePlan` and the Schedules pane | ported |
-| Week calendar | Cairo week drawing, Mon–Fri 8–21. The “show weekends” setting is stored and not yet drawn | partial |
+| Week calendar | Cairo week drawing. Saturday and Sunday appear when Settings → show weekends is on, or when a meeting falls on them. The hour range follows the calendar start and end hours and stretches to fit the meetings | ported |
 | Conflict detection, 5-minute masks, half-term date overlap | `schedule.rs` `ScheduleSlotMask`, `Meeting::overlaps` | ported |
 | Generator: DFS, forward checking, optional courses, sampling, best-N | `schedule::generate` | ported |
 | Preferences survey | Time-of-day bands, days off and strength, earliest and latest, day layout, gaps, breaks, minimum break, lunch, blocked times (add, enable, strength, remove), format and strength, campus and strength, seats, instructors, credit target, plus the natural-language line | ported |
@@ -67,7 +67,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Autofill missing catalog courses | Audit leftovers that exist in the snapshot | ported |
 | Requirements from catalog.northeastern.edu | “Load requirements” fetches the path and runs `program_parser`. Saved next to user data | ported |
 | `DegreeAudit.swift` greedy fill, substitutions, petitions, waivers, rebalance, NUpath, minimums | `degree_audit.rs` and `nupath.rs`. Petition questions (`petition.rs`) are a section on the degree plan: same-as-requirement, any number, or a different minimum, plus near misses | ported |
-| Equivalences, renumbered courses, title match | `equivalences.rs` groups, `titles_alike`, `cross_list_equivalent`. The “did CS 2510 count as CS 2100?” prompt is not in the window | partial |
+| Equivalences, renumbered courses, title match | `equivalences.rs` groups, `titles_alike`, `cross_list_equivalent`. Degree Plans asks “Does CS 2510 count as CS 2100?” for a plan course the term does not list (`suggestions.rs`). Yes declares an equivalence. No is remembered in `dismissed-equivalences.txt` | ported |
 | Older-term offering history and catalog entries | `offering.rs` and `course_info.rs`. Degree Plans → Check older terms asks Banner, caches the answers, shows offering summaries, and suggests semester moves (`reorder.rs`) | ported |
 | Student name and ID | Kept only when present in an import. Left out of exports and folder sync unless Settings includes them | ported |
 
@@ -91,14 +91,13 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | User data JSON, export and import | `store.rs`. Export omits the student unless the setting is on | ported |
 | iCloud / CloudKit merge | `sync.rs` last-write-wins folder sync. Device-only fields (color scheme, seat interval) stay local. No CloudKit | substituted |
 | Legal text and disclaimer | `legal.rs`, first-run dialog, About | ported |
-| Tests | `crates/core/tests/parity.rs` covers search, the schedule generator, degree-plan text, catalog audit, substitutions, and watchlist sync. `banner.rs` tests the live-seat JSON parse (the live Banner call stays ignored). PrerequisiteDataTests, the rest of the degree-audit suites, and the schedule scoring suites are not ported assertion by assertion | partial |
+| Tests | All 373 Swift `@Test`s are ported under `crates/core/tests/` (`prerequisite_data.rs` 99, `schedule_suites.rs` 120, `degree_suites.rs` 66, `support_suites.rs` 88), plus `parity.rs`. CloudKit container, entitlement, and code-signature checks assert the Linux stand-in: merge does not read a container id or a signature. The live Banner call in `banner.rs` stays ignored | ported |
 
 ## Not carried over
 
 - The iPhone and iPad apps, widgets, and App Intents.
 - CloudKit entitlements and code-signature checks.
 - Banner’s retry-with-jitter session pool. Term download and older-term lookups are one request at a time, then cached.
-- Double-click to reset a split pane, column sorting, and dropping a course onto the schedule builder (semester drag-and-drop is in).
-- Drawing Saturday and Sunday on the week calendar. The “show weekends” setting is stored.
-- A class-type filter control. The filter struct still has the field.
-- The “did this renumbering count?” prompt. Equivalence suggestions exist in `suggestions.rs`; the degree plan does not ask that question in its own screen.
+- Context menus, Return on a table row, and the Delete key. Column buttons cover code, title, and open seats, not every Mac table column.
+- A pane divider that keeps a fraction of the window and hides the pane when dragged to the edge. Double-click resets the pixel position.
+- Free rooms as a drawn timeline. The page lists open stretches for one day.

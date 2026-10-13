@@ -1,10 +1,13 @@
 //! Catalog entries for courses that are not in the loaded term.
 //! Port of `CourseInfo.swift` and `CourseInfoRepository.swift`.
 
+use crate::equivalences::CourseEquivalences;
 use crate::index::CatalogIndex;
 use crate::model::*;
+use crate::offering::{OfferingHistory, OfferingRepository, OfferingSource};
+use crate::suggestions::{self, EquivalenceSuggestion};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -46,11 +49,33 @@ impl CourseInfo {
     }
 
     pub fn with_equivalents(mut self, equivalents: Vec<CourseKey>) -> Self {
-        let mut equivalents: Vec<CourseKey> = equivalents.into_iter().filter(|key| key != &self.key).collect();
-        equivalents.sort();
-        equivalents.dedup();
-        self.equivalents = equivalents;
+        self.equivalents = normalize_equivalents(&self.key, equivalents);
         self
+    }
+
+    /// Catalog entry. Equivalents are sorted, deduped, and never include the course itself.
+    pub fn entry(
+        key: CourseKey,
+        title: impl Into<String>,
+        min_credits: Option<f64>,
+        max_credits: Option<f64>,
+        prerequisites: Option<Requisite>,
+        equivalents: Vec<CourseKey>,
+        source_term: impl Into<String>,
+        fetched_at: f64,
+    ) -> Self {
+        let mut info = Self::new(key, title, source_term, fetched_at);
+        info.min_credits = min_credits;
+        info.max_credits = max_credits;
+        info.prerequisites = prerequisites;
+        info.with_equivalents(equivalents)
+    }
+
+    /// `4 credits`, `1–4 credits`; none when the credit hours are unknown.
+    pub fn credits_label(&self) -> Option<String> {
+        let low = self.min_credits.or(self.max_credits)?;
+        let high = self.max_credits.unwrap_or(low);
+        Some(credit_label(low, high))
     }
 
     pub fn from_loaded(key: &CourseKey, indexes: &[CatalogIndex]) -> Option<Self> {
@@ -329,4 +354,262 @@ fn search_one<F: CourseInfoSource>(fetcher: &F, key: &CourseKey, terms: &[String
 fn unique(keys: &[CourseKey]) -> Vec<CourseKey> {
     let mut seen = HashSet::new();
     keys.iter().filter(|key| seen.insert((*key).clone())).cloned().collect()
+}
+
+fn normalize_equivalents(key: &CourseKey, equivalents: Vec<CourseKey>) -> Vec<CourseKey> {
+    let mut equivalents: Vec<CourseKey> = equivalents.into_iter().filter(|item| item != key).collect();
+    equivalents.sort();
+    equivalents.dedup();
+    equivalents
+}
+
+fn nonempty(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// What a screen has learned about a course. Synchronous port of `CourseInfoStore`.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum StoreState {
+    Unknown,
+    Found(CourseInfo),
+    NotFound,
+    Failed,
+}
+
+pub struct CourseInfoStore<F, O> {
+    pub repository: CourseInfoRepository<F>,
+    pub offering: OfferingRepository<O>,
+    pub now: f64,
+    infos: HashMap<CourseKey, CourseInfo>,
+    not_found: HashSet<CourseKey>,
+    failed_at: HashMap<CourseKey, f64>,
+    derived: CourseEquivalences,
+    indexes: Vec<CatalogIndex>,
+    index_stamp: BTreeMap<String, f64>,
+    pub version: u64,
+    retry_delay: f64,
+}
+
+impl<F, O> CourseInfoStore<F, O> {
+    pub fn new(repository: CourseInfoRepository<F>, offering: OfferingRepository<O>, now: f64) -> Self {
+        Self {
+            repository,
+            offering,
+            now,
+            infos: HashMap::new(),
+            not_found: HashSet::new(),
+            failed_at: HashMap::new(),
+            derived: CourseEquivalences::none(),
+            indexes: Vec::new(),
+            index_stamp: BTreeMap::new(),
+            version: 0,
+            retry_delay: 60.0,
+        }
+    }
+
+    pub fn info(&self, key: &CourseKey) -> Option<&CourseInfo> {
+        self.infos.get(key)
+    }
+
+    pub fn state(&self, key: &CourseKey) -> StoreState {
+        if let Some(info) = self.infos.get(key) {
+            return StoreState::Found(info.clone());
+        }
+        if self.not_found.contains(key) {
+            return StoreState::NotFound;
+        }
+        if self.failed_at.contains_key(key) {
+            return StoreState::Failed;
+        }
+        StoreState::Unknown
+    }
+
+    /// `None` when the course is not known, `Some(None)` when it has no prerequisites.
+    pub fn requisite_lookup(&self) -> HashMap<CourseKey, Option<Requisite>> {
+        self.infos.iter().map(|(key, info)| (key.clone(), info.prerequisites.clone())).collect()
+    }
+
+    pub fn equivalences(&self, plan: Option<&DegreePlan>) -> CourseEquivalences {
+        match plan {
+            None => self.derived.clone(),
+            Some(plan) => self.derived.merging(&CourseEquivalences::from_declarations(&plan.course_equivalences)),
+        }
+    }
+
+    pub fn equivalence_suggestions(
+        &self,
+        key: &CourseKey,
+        plan: Option<&DegreePlan>,
+        limit: usize,
+        catalog_titles: &HashMap<CourseKey, String>,
+        also_comparing: &[CourseKey],
+    ) -> Vec<EquivalenceSuggestion> {
+        let Some(newest) = self.indexes.first() else { return Vec::new() };
+        if newest.course(key).is_some() {
+            return Vec::new();
+        }
+        match self.state(key) {
+            StoreState::Found(info) if info.is_retired == Some(false) => return Vec::new(),
+            StoreState::Found(_) | StoreState::NotFound => {}
+            StoreState::Unknown | StoreState::Failed => return Vec::new(),
+        }
+        let prerequisites: Vec<(CourseKey, Requisite)> = newest
+            .courses
+            .iter()
+            .filter_map(|course| course.prereqs.clone().map(|requisite| (course.key(), requisite)))
+            .collect();
+        let mut candidates = Vec::new();
+        if let Some(plan) = plan {
+            candidates.extend(plan.completed.iter().filter_map(|course| course.key.clone()));
+            candidates.extend(plan.terms.iter().flat_map(|term| term.courses.iter().filter_map(|course| course.key.clone())));
+        }
+        candidates.extend(also_comparing.iter().cloned());
+        let known = self.equivalences(plan);
+        suggestions::suggestions(
+            key,
+            &prerequisites,
+            |course| newest.course(course).is_some(),
+            &known,
+            2,
+            0.5,
+            limit,
+            |course| self.title_of(course, catalog_titles, plan),
+            &candidates,
+            crate::titles::MINIMUM_SIMILARITY,
+        )
+    }
+
+    fn title_of(&self, key: &CourseKey, catalog_titles: &HashMap<CourseKey, String>, plan: Option<&DegreePlan>) -> Option<String> {
+        if let Some(title) = catalog_titles.get(key).and_then(|text| nonempty(text)) {
+            return Some(title);
+        }
+        if let Some(title) = self.infos.get(key).and_then(|info| nonempty(&info.title)) {
+            return Some(title);
+        }
+        for index in &self.indexes {
+            if let Some(title) = index.course(key).and_then(|course| nonempty(&course.title)) {
+                return Some(title);
+            }
+        }
+        let plan = plan?;
+        for course in plan.completed.iter().chain(plan.terms.iter().flat_map(|term| term.courses.iter())) {
+            if course.key.as_ref() == Some(key) {
+                if let Some(title) = nonempty(&course.title) {
+                    return Some(title);
+                }
+            }
+        }
+        None
+    }
+
+    /// True when `derived` changed.
+    fn rebuild_equivalences(&mut self) -> bool {
+        let groups: Vec<Vec<CourseKey>> = self
+            .infos
+            .values()
+            .filter(|info| !info.equivalents.is_empty())
+            .map(|info| {
+                let mut group = vec![info.key.clone()];
+                group.extend(info.equivalents.iter().cloned());
+                group
+            })
+            .collect();
+        let mut result = CourseEquivalences::from_groups(&groups);
+        for index in &self.indexes {
+            result = result.merging(&CourseEquivalences::from_cross_listed(index));
+        }
+        if result == self.derived {
+            return false;
+        }
+        self.derived = result;
+        true
+    }
+}
+
+impl<F: CourseInfoSource, O> CourseInfoStore<F, O> {
+    pub fn load(&mut self, keys: &[CourseKey], indexes: &[CatalogIndex]) {
+        self.repository.now = self.now;
+        self.indexes = indexes.to_vec();
+        let mut seen = HashSet::new();
+        let wanted: Vec<CourseKey> = keys.iter().filter(|key| seen.insert((*key).clone())).cloned().collect();
+
+        let mut changed = false;
+        for key in &wanted {
+            let Some(mut info) = CourseInfo::from_loaded(key, indexes) else { continue };
+            if let Some(previous) = self.infos.get(key) {
+                if info.source_term.as_str() < previous.source_term.as_str() {
+                    continue;
+                }
+                info.equivalents = previous.equivalents.clone();
+                if info == *previous {
+                    continue;
+                }
+            }
+            self.infos.insert(key.clone(), info);
+            self.not_found.remove(key);
+            changed = true;
+        }
+        let mut stamp = BTreeMap::new();
+        for index in indexes {
+            stamp.entry(index.catalog.term.code.clone()).or_insert(index.catalog.sections_updated_at);
+        }
+        let indexes_changed = stamp != self.index_stamp;
+        self.index_stamp = stamp;
+        if (changed || indexes_changed) && self.rebuild_equivalences() {
+            changed = true;
+        }
+        if changed {
+            self.version += 1;
+        }
+
+        let pending: Vec<CourseKey> = wanted
+            .into_iter()
+            .filter(|key| {
+                !self.infos.contains_key(key)
+                    && !self.not_found.contains(key)
+                    && self.failed_at.get(key).is_none_or(|at| self.now - *at > self.retry_delay)
+            })
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let results = self.repository.lookup(&pending, indexes);
+        for key in pending {
+            let result = results.get(&key).cloned().unwrap_or(Lookup::Failed);
+            self.receive(key, result);
+        }
+    }
+
+    fn receive(&mut self, key: CourseKey, result: Lookup) {
+        match result {
+            Lookup::Found(info) => {
+                self.infos.insert(key.clone(), info);
+                self.not_found.remove(&key);
+                self.failed_at.remove(&key);
+                self.rebuild_equivalences();
+            }
+            Lookup::NotFound => {
+                self.failed_at.remove(&key);
+                self.not_found.insert(key);
+            }
+            Lookup::Failed => {
+                self.failed_at.insert(key, self.now);
+            }
+        }
+        self.version += 1;
+    }
+}
+
+impl<F, O: OfferingSource> CourseInfoStore<F, O> {
+    pub fn offering_history(&mut self, keys: &[CourseKey], indexes: Option<&[CatalogIndex]>) -> OfferingHistory {
+        self.offering.now = self.now;
+        if let Some(indexes) = indexes {
+            self.offering.history(keys, indexes)
+        } else {
+            let indexes = self.indexes.clone();
+            self.offering.history(keys, &indexes)
+        }
+    }
 }

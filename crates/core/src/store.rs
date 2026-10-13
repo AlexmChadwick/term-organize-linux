@@ -71,3 +71,49 @@ pub fn import_json(text: &str) -> UserData {
     keep_one_primary(&mut data);
     data
 }
+
+/// The local user file keeps whole seconds (`JSONEncoder.iso8601` drops fractions).
+pub fn round_trip_user_file(data: &UserData) -> Result<UserData, String> {
+    let mut value = serde_json::to_value(data).map_err(|e| e.to_string())?;
+    floor_user_dates(&mut value);
+    let text = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+const INSTANT_KEYS: &[&str] = &[
+    "createdAt", "updatedAt", "savedAt", "addedAt", "viewedAt", "lastCheckedAt", "lastNotifiedAt", "printedAt",
+];
+
+pub fn floor_user_dates(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if key == "changedAt" {
+                    if let Some(serde_json::Value::Object(times)) = map.get_mut(&key) {
+                        let names: Vec<String> = times.keys().cloned().collect();
+                        for name in names {
+                            if let Some(seconds) = times.get(&name).and_then(|v| v.as_f64()) {
+                                times.insert(name, serde_json::json!(seconds.floor()));
+                            }
+                        }
+                    }
+                }
+                if INSTANT_KEYS.contains(&key.as_str()) {
+                    if let Some(seconds) = map.get(&key).and_then(|v| v.as_f64()) {
+                        map.insert(key.clone(), serde_json::json!(seconds.floor()));
+                    }
+                }
+                if let Some(child) = map.get_mut(&key) {
+                    floor_user_dates(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                floor_user_dates(item);
+            }
+        }
+        _ => {}
+    }
+}

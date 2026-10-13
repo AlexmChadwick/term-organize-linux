@@ -1,6 +1,7 @@
 use super::requisite::Requisite;
 use super::section::CourseKey;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,5 +191,43 @@ impl NuPath {
 
     pub fn from_short(short: &str) -> Option<NuPath> {
         Self::ALL.into_iter().find(|p| p.short().eq_ignore_ascii_case(short))
+    }
+}
+
+/// What the primary degree plan does with a course (`CourseDegreePlanStanding`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DegreeStandingKind {
+    Completed { via: Option<CourseKey> },
+    Planned { semester: String, via: Option<CourseKey> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DegreePlanStanding {
+    pub plan_id: Uuid,
+    pub kind: DegreeStandingKind,
+}
+
+impl DegreePlanStanding {
+    pub fn text(&self) -> String {
+        match &self.kind {
+            DegreeStandingKind::Completed { via: None } => "Completed".into(),
+            DegreeStandingKind::Completed { via: Some(key) } => format!("Completed via {key}"),
+            DegreeStandingKind::Planned { semester, via: None } => format!("Planned · {semester}"),
+            DegreeStandingKind::Planned { semester, via: Some(key) } => format!("Planned via {key} · {semester}"),
+        }
+    }
+    pub fn symbol(&self) -> &'static str {
+        match self.kind {
+            DegreeStandingKind::Completed { .. } => "checkmark.circle.fill",
+            DegreeStandingKind::Planned { .. } => "calendar",
+        }
+    }
+    pub fn spoken_text(&self) -> String {
+        match &self.kind {
+            DegreeStandingKind::Completed { via: None } => "Completed, in your degree plan".into(),
+            DegreeStandingKind::Completed { via: Some(key) } => format!("Completed via {key}, in your degree plan"),
+            DegreeStandingKind::Planned { semester, via: None } => format!("Planned for {semester} in your degree plan"),
+            DegreeStandingKind::Planned { semester, via: Some(key) } => format!("Planned via {key} for {semester} in your degree plan"),
+        }
     }
 }

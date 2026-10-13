@@ -10,6 +10,7 @@ use termorganize_core::offering::{OfferingHistory, OfferingRepository, OfferingS
 use termorganize_core::outline::{GroupKind, ItemKind, PathContent, RequisiteItem, RequisiteLayout, RequisitePart};
 use termorganize_core::petition::{self, CourseNumberChoice};
 use termorganize_core::reorder;
+use termorganize_core::suggestions;
 
 struct LocalTerms {
     terms: Vec<Term>,
@@ -30,7 +31,7 @@ pub fn install_css() {
     provider.load_from_string(
         ".req-chip { padding: 2px 4px; }
          .req-grey { opacity: 0.5; }
-         .req-branch { margin-start: 12px; padding: 4px; }
+         .req-branch { margin-left: 12px; padding: 4px; }
          .semester-card { padding: 8px; }",
     );
     gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -1232,4 +1233,155 @@ fn blocked_form(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 
 fn split_names(text: &str) -> Vec<String> {
     text.split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect()
+}
+
+pub fn load_dismissed() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dismissed_path()) else { return Vec::new() };
+    text.lines().filter(|line| !line.is_empty()).map(|line| line.to_string()).collect()
+}
+
+fn dismissed_path() -> std::path::PathBuf {
+    store::data_dir().join("dismissed-equivalences.txt")
+}
+
+fn save_dismissed(pairs: &[String]) {
+    let path = dismissed_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, pairs.join("\n"));
+}
+
+fn pair_id(a: &CourseKey, b: &CourseKey) -> String {
+    if a < b { format!("{a}|{b}") } else { format!("{b}|{a}") }
+}
+
+fn unbroken(key: &CourseKey) -> String {
+    format!("{}\u{00A0}{}", key.subject, key.number)
+}
+
+pub fn equivalence_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let prompts = equivalence_prompts(shell);
+    if prompts.is_empty() {
+        return root.upcast();
+    }
+    root.append(&heading_label("Did this count?"));
+    root.append(&dim_label("A retired course may be the same class under a new number. Saying yes counts it everywhere, including prerequisites."));
+    for (taken, counts_as, evidence) in prompts {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        card.add_css_class("card");
+        card.add_css_class("semester-card");
+        card.append(&heading_label(&format!("Does {} count as {}?", unbroken(&taken), unbroken(&counts_as))));
+        if !evidence.is_empty() {
+            card.append(&selectable(&evidence));
+        }
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let yes = gtk::Button::with_label("Yes, it counts");
+        let no = gtk::Button::with_label("No");
+        yes.connect_clicked({
+            let shell = shell.clone();
+            let taken = taken.clone();
+            let counts_as = counts_as.clone();
+            move |_| declare_equivalence(&shell, &taken, &counts_as)
+        });
+        no.connect_clicked({
+            let shell = shell.clone();
+            let taken = taken.clone();
+            let counts_as = counts_as.clone();
+            move |_| dismiss_equivalence(&shell, &taken, &counts_as)
+        });
+        actions.append(&yes);
+        actions.append(&no);
+        card.append(&actions);
+        root.append(&card);
+    }
+    root.upcast()
+}
+
+fn equivalence_prompts(shell: &Rc<RefCell<Shell>>) -> Vec<(CourseKey, CourseKey, String)> {
+    let shell_ref = shell.borrow();
+    let state = shell_ref.state.borrow();
+    let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return vec![] };
+    let Some(plan) = state.data.degree_plans.iter().find(|plan| plan.id == plan_id) else { return vec![] };
+    let known = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let dismissed: HashSet<String> = state.dismissed_pairs.iter().cloned().collect();
+    let mut plan_titles = HashMap::new();
+    let mut retired = Vec::new();
+    for course in plan.terms.iter().flat_map(|term| term.courses.iter()) {
+        let Some(key) = course.key.clone() else { continue };
+        plan_titles.insert(key.clone(), course.title.clone());
+        if state.index.course(&key).is_none() && !retired.contains(&key) {
+            retired.push(key);
+        }
+    }
+    let title_candidates: Vec<CourseKey> = state.index.courses.iter().map(|course| course.key()).collect();
+    let mut prompts = Vec::new();
+    for key in retired {
+        let pairs: Vec<(CourseKey, Requisite)> = state
+            .index
+            .courses
+            .iter()
+            .filter_map(|course| course.prereqs.clone().map(|requisite| (course.key(), requisite)))
+            .filter(|(_, requisite)| requisite.referenced_courses().iter().any(|named| named == &key))
+            .collect();
+        let found = suggestions::suggestions(
+            &key,
+            &pairs,
+            |candidate| state.index.course(candidate).is_some(),
+            &known,
+            2,
+            0.5,
+            1,
+            |candidate| {
+                state.index.course(candidate).map(|course| course.title.clone()).or_else(|| plan_titles.get(candidate).cloned()).or_else(|| state.course_notes.get(candidate).map(|info| info.title.clone()))
+            },
+            &title_candidates,
+            titles_minimum(),
+        );
+        if let Some(best) = found.into_iter().find(|item| !dismissed.contains(&pair_id(&key, &item.candidate)) && !known.are_equivalent(&key, &item.candidate)) {
+            let evidence = best.evidence();
+            prompts.push((key, best.candidate, evidence));
+        }
+        if prompts.len() == 3 {
+            break;
+        }
+    }
+    prompts
+}
+
+fn titles_minimum() -> f64 {
+    termorganize_core::titles::MINIMUM_SIMILARITY
+}
+
+fn declare_equivalence(shell: &Rc<RefCell<Shell>>, taken: &CourseKey, counts_as: &CourseKey) {
+    {
+        let shell_ref = shell.borrow();
+        let mut state = shell_ref.state.borrow_mut();
+        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return };
+        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+        let known = CourseEquivalences::from_declarations(&plan.course_equivalences);
+        if taken != counts_as && !known.are_equivalent(taken, counts_as) {
+            plan.course_equivalences.push(CourseEquivalence { id: Uuid::new_v4(), course: taken.clone(), counts_as: counts_as.clone(), note: String::new() });
+            plan.updated_at = Some(now_secs().to_string());
+            persist(&state.data);
+        }
+    }
+    refresh(shell);
+}
+
+fn dismiss_equivalence(shell: &Rc<RefCell<Shell>>, taken: &CourseKey, counts_as: &CourseKey) {
+    let id = pair_id(taken, counts_as);
+    let shell_ref = shell.borrow();
+    let mut state = shell_ref.state.borrow_mut();
+    state.dismissed_pairs.retain(|pair| pair != &id);
+    state.dismissed_pairs.push(id);
+    if state.dismissed_pairs.len() > 200 {
+        let extra = state.dismissed_pairs.len() - 200;
+        state.dismissed_pairs.drain(0..extra);
+    }
+    save_dismissed(&state.dismissed_pairs);
+    drop(state);
+    drop(shell_ref);
+    refresh(shell);
 }

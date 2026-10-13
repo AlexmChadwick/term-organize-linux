@@ -330,6 +330,112 @@ fn term_has_ended(term: &Term, year: i32, month: u32) -> bool {
     (year, month) > end
 }
 
+fn credits_phrase(value: f64) -> String {
+    let number = credit_number(value);
+    if (value - 1.0).abs() < 1e-9 { format!("{number} credit") } else { format!("{number} credits") }
+}
+
+fn courses_phrase(count: usize) -> String {
+    if count == 1 { "1 course".into() } else { format!("{count} courses") }
+}
+
+pub fn completed_line(plan: &DegreePlan) -> String {
+    if plan.completed.is_empty() { "No completed courses yet".into() } else { format!("{} completed", credits_phrase(plan.completed_credits())) }
+}
+
+/// Banner code of a semester at Northeastern (`202730` for Spring 2027).
+pub fn banner_code(term: &DegreePlanTerm) -> String {
+    match term.season {
+        PlanSeason::Fall => format!("{}10", term.year + 1),
+        PlanSeason::Winter => format!("{}20", term.year),
+        PlanSeason::Spring => format!("{}30", term.year),
+        PlanSeason::SummerA => format!("{}40", term.year),
+        PlanSeason::SummerFull => format!("{}50", term.year),
+        PlanSeason::SummerB => format!("{}60", term.year),
+    }
+}
+
+pub fn semester_has_ended(term: &DegreePlanTerm, now: f64) -> bool {
+    crate::calendar::approximate_window(&banner_code(term)).is_some_and(|(_, end)| end < now)
+}
+
+pub fn next_summary(plan: &DegreePlan, now: f64) -> Option<String> {
+    let next = plan.terms.iter().find(|term| !semester_has_ended(term, now) && !term.courses.is_empty())?;
+    Some(format!("{} · {} · {}", next.name(), credits_phrase(next.credits()), courses_phrase(next.courses.len())))
+}
+
+pub fn next_line(plan: &DegreePlan, now: f64) -> String {
+    if let Some(summary) = next_summary(plan, now) {
+        return format!("Next: {summary}");
+    }
+    if plan.terms.is_empty() {
+        return "No semesters planned yet".into();
+    }
+    if plan.terms.iter().all(|term| semester_has_ended(term, now)) {
+        return "No upcoming semesters".into();
+    }
+    "No courses planned yet".into()
+}
+
+pub fn now_unix() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// A schedule opened for one semester of a degree plan.
+#[derive(Clone, Debug)]
+pub struct SemesterSchedule {
+    pub plan: SchedulePlan,
+    pub is_new: bool,
+    pub course_count: usize,
+}
+
+pub fn schedule_for_semester(data: &mut UserData, semester: &DegreePlanTerm, term_code: &str) -> Option<SemesterSchedule> {
+    let mut seen = HashSet::new();
+    let keys: Vec<CourseKey> = semester.courses.iter().filter_map(|course| course.key.clone()).filter(|key| seen.insert(key.clone())).collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let wanted: HashSet<CourseKey> = keys.iter().cloned().collect();
+    if let Some(existing) = data.plans.iter().find(|plan| plan.term_code == term_code && plan.courses.iter().map(|course| course.key.clone()).collect::<HashSet<_>>() == wanted) {
+        return Some(SemesterSchedule { plan: existing.clone(), is_new: false, course_count: keys.len() });
+    }
+    let names: Vec<String> = data.plans.iter().filter(|plan| plan.term_code == term_code).map(|plan| plan.name.clone()).collect();
+    let schedule = SchedulePlan {
+        id: Uuid::new_v4(),
+        name: unique_schedule_name(&format!("{} plan", semester.name()), &names),
+        term_code: term_code.to_string(),
+        courses: keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| PlanCourse { key: key.clone(), is_required: true, excluded_crns: HashSet::new(), color_index: index as i32 })
+            .collect(),
+        selected_crns: vec![],
+        filters: ScheduleFilters::default(),
+        preferences: None,
+        favorite_combinations: vec![],
+        is_primary: false,
+        created_at: 0.0,
+        updated_at: 0.0,
+    };
+    let id = schedule.id;
+    data.add_schedule(schedule);
+    let stored = data.plans.iter().find(|plan| plan.id == id).cloned()?;
+    Some(SemesterSchedule { plan: stored, is_new: true, course_count: keys.len() })
+}
+
+fn unique_schedule_name(base: &str, existing: &[String]) -> String {
+    let taken: HashSet<String> = existing.iter().map(|name| name.trim().to_ascii_lowercase()).collect();
+    let wanted = base.trim();
+    if !taken.contains(&wanted.to_ascii_lowercase()) {
+        return wanted.to_string();
+    }
+    let mut number = 2;
+    while taken.contains(&format!("{wanted} {number}").to_ascii_lowercase()) {
+        number += 1;
+    }
+    format!("{wanted} {number}")
+}
+
 pub fn next_semesters(plan: &DegreePlan, count: usize, year: i32, month: u32) -> Vec<DegreePlanTerm> {
     let order = [PlanSeason::Spring, PlanSeason::SummerA, PlanSeason::SummerB, PlanSeason::Fall];
     let mut year = year;

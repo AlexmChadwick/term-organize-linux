@@ -188,6 +188,9 @@ pub struct BlockedTime {
 fn yes() -> bool { true }
 
 impl BlockedTime {
+    pub fn new(label: impl Into<String>, days: DaySet, start: i32, end: i32) -> Self {
+        Self { id: Uuid::new_v4(), label: label.into(), days, start, end, strength: PreferenceStrength::Required, is_enabled: true }
+    }
     pub fn is_valid(&self) -> bool {
         !self.days.is_empty() && self.end > self.start && self.start >= 0 && self.end <= 24 * 60
     }
@@ -380,6 +383,7 @@ impl SchedulePreferences {
         n += self.active_blocked_times().len() as i32;
         if self.format != FormatPreference::NoPreference { n += 1; }
         if self.campus.is_some() { n += 1; }
+        if self.seats != SeatPolicy::Any { n += 1; }
         if !self.preferred_instructors.is_empty() || !self.avoided_instructors.is_empty() { n += 1; }
         if self.credit_target.is_some() { n += 1; }
         n

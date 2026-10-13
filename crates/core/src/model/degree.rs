@@ -171,8 +171,55 @@ pub struct DegreePlan {
     pub concentration_id: Option<String>,
     #[serde(default)]
     pub substitutions: Vec<RequirementSubstitution>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_vec_on_error")]
     pub course_equivalences: Vec<CourseEquivalence>,
+}
+
+fn empty_vec_on_error<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Visitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list, or anything else treated as empty")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(item) = seq.next_element()? {
+                items.push(item);
+            }
+            Ok(items)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_str<E: serde::de::Error>(self, _value: &str) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_bool<E: serde::de::Error>(self, _value: bool) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_i64<E: serde::de::Error>(self, _value: i64) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_u64<E: serde::de::Error>(self, _value: u64) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+            Ok(Vec::new())
+        }
+    }
+    deserializer.deserialize_any(Visitor(std::marker::PhantomData))
 }
 
 fn default_plan_name() -> String {
