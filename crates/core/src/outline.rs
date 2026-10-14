@@ -29,14 +29,28 @@ impl RequisiteItem {
         self.course_key().is_some() && !self.is_offered && !self.is_complete
     }
     pub fn score_text(&self) -> Option<String> {
-        let ItemKind::Test { name, score: Some(score) } = &self.kind else { return None };
+        let ItemKind::Test {
+            name,
+            score: Some(score),
+        } = &self.kind
+        else {
+            return None;
+        };
         let text = if (score - score.round()).abs() < 1e-9 {
             format!("{}", *score as i64)
         } else {
             let tenths = (score * 100.0).round() / 100.0;
-            if (tenths - tenths.round()).abs() < 1e-9 { format!("{}", tenths as i64) } else { format!("{tenths}") }
+            if (tenths - tenths.round()).abs() < 1e-9 {
+                format!("{}", tenths as i64)
+            } else {
+                format!("{tenths}")
+            }
         };
-        if name.contains(&text) { None } else { Some(text) }
+        if name.contains(&text) {
+            None
+        } else {
+            Some(text)
+        }
     }
     pub fn spoken_text(&self) -> String {
         match &self.kind {
@@ -68,7 +82,9 @@ impl RequisiteNode {
     pub fn all_items(&self) -> Vec<RequisiteItem> {
         match self {
             Self::Item(item) => vec![item.clone()],
-            Self::All(members) | Self::OneOf(members) => members.iter().flat_map(|m| m.all_items()).collect(),
+            Self::All(members) | Self::OneOf(members) => {
+                members.iter().flat_map(|m| m.all_items()).collect()
+            }
         }
     }
     pub fn is_done(&self) -> bool {
@@ -171,7 +187,10 @@ impl RequisiteChecklist {
                 }
                 RequisiteNode::OneOf(alternatives) => {
                     if let Some(items) = item_members(alternatives) {
-                        parts.push(RequisitePart::Group(RequisiteGroup { kind: GroupKind::OneOf, items: choice_order(items) }));
+                        parts.push(RequisitePart::Group(RequisiteGroup {
+                            kind: GroupKind::OneOf,
+                            items: choice_order(items),
+                        }));
                     } else {
                         parts.push(RequisitePart::Expression(member.clone()));
                     }
@@ -183,17 +202,31 @@ impl RequisiteChecklist {
             parts[index] = if loose.len() == 1 {
                 RequisitePart::Item(loose[0].clone())
             } else {
-                RequisitePart::Group(RequisiteGroup { kind: GroupKind::All, items: loose })
+                RequisitePart::Group(RequisiteGroup {
+                    kind: GroupKind::All,
+                    items: loose,
+                })
             };
         }
-        Self { requirement_count: members.len(), parts }
+        Self {
+            requirement_count: members.len(),
+            parts,
+        }
     }
     pub fn is_done(&self) -> bool {
         self.parts.iter().all(|p| p.is_done())
     }
     pub fn spoken_text(&self) -> String {
-        let separator = if self.parts.iter().any(|p| p.is_expression()) { "; and " } else { ", and " };
-        self.parts.iter().map(|p| p.spoken_text()).collect::<Vec<_>>().join(separator)
+        let separator = if self.parts.iter().any(|p| p.is_expression()) {
+            "; and "
+        } else {
+            ", and "
+        };
+        self.parts
+            .iter()
+            .map(|p| p.spoken_text())
+            .collect::<Vec<_>>()
+            .join(separator)
     }
 }
 
@@ -219,15 +252,26 @@ impl RequisitePath {
                 RequisiteNode::Item(item) => {
                     if loose_index.is_none() {
                         loose_index = Some(paths.len());
-                        paths.push(RequisitePath { content: PathContent::Item(item.clone()) });
+                        paths.push(RequisitePath {
+                            content: PathContent::Item(item.clone()),
+                        });
                     }
                     loose.push(item.clone());
                 }
                 RequisiteNode::All(inner) => {
                     if let Some(items) = item_members(inner) {
-                        paths.push(RequisitePath { content: PathContent::Group(RequisiteGroup { kind: GroupKind::All, items }) });
+                        paths.push(RequisitePath {
+                            content: PathContent::Group(RequisiteGroup {
+                                kind: GroupKind::All,
+                                items,
+                            }),
+                        });
                     } else {
-                        paths.push(RequisitePath { content: PathContent::Checklist(RequisiteChecklist::from_members(inner)) });
+                        paths.push(RequisitePath {
+                            content: PathContent::Checklist(RequisiteChecklist::from_members(
+                                inner,
+                            )),
+                        });
                     }
                 }
                 RequisiteNode::OneOf(_) => {}
@@ -237,7 +281,10 @@ impl RequisitePath {
             paths[index].content = if loose.len() == 1 {
                 PathContent::Item(loose[0].clone())
             } else {
-                PathContent::Group(RequisiteGroup { kind: GroupKind::OneOf, items: choice_order(loose) })
+                PathContent::Group(RequisiteGroup {
+                    kind: GroupKind::OneOf,
+                    items: choice_order(loose),
+                })
             };
         }
         paths
@@ -267,7 +314,11 @@ pub enum RequisiteLayout {
 }
 
 impl RequisiteLayout {
-    pub fn build(requisite: &Requisite, is_offered: impl Fn(&CourseKey) -> bool, completion: impl Fn(&CourseKey) -> (bool, Option<CourseKey>)) -> Option<Self> {
+    pub fn build(
+        requisite: &Requisite,
+        is_offered: impl Fn(&CourseKey) -> bool,
+        completion: impl Fn(&CourseKey) -> (bool, Option<CourseKey>),
+    ) -> Option<Self> {
         let tree = normalized(requisite)?;
         Some(Self::from_node(&make_node(&tree, &is_offered, &completion)))
     }
@@ -278,7 +329,10 @@ impl RequisiteLayout {
             RequisiteNode::All(members) => {
                 let members = flatten(members, false);
                 if let Some(items) = item_members(&members) {
-                    Self::Group(RequisiteGroup { kind: GroupKind::All, items })
+                    Self::Group(RequisiteGroup {
+                        kind: GroupKind::All,
+                        items,
+                    })
                 } else {
                     Self::Checklist(RequisiteChecklist::from_members(&members))
                 }
@@ -286,7 +340,10 @@ impl RequisiteLayout {
             RequisiteNode::OneOf(members) => {
                 let members = flatten(members, true);
                 if let Some(items) = item_members(&members) {
-                    Self::Group(RequisiteGroup { kind: GroupKind::OneOf, items: choice_order(items) })
+                    Self::Group(RequisiteGroup {
+                        kind: GroupKind::OneOf,
+                        items: choice_order(items),
+                    })
                 } else {
                     Self::Paths(RequisitePath::paths(&members))
                 }
@@ -308,7 +365,14 @@ impl RequisiteLayout {
             Self::Item(item) => item.spoken_text(),
             Self::Group(group) => group.spoken_text(),
             Self::Checklist(list) => list.spoken_text(),
-            Self::Paths(paths) => format!("either {}", paths.iter().map(|p| p.spoken_text()).collect::<Vec<_>>().join("; or ")),
+            Self::Paths(paths) => format!(
+                "either {}",
+                paths
+                    .iter()
+                    .map(|p| p.spoken_text())
+                    .collect::<Vec<_>>()
+                    .join("; or ")
+            ),
         };
         format!("{title}: {body}.")
     }
@@ -326,7 +390,9 @@ fn merging(items: &[Requisite], as_and: bool) -> Option<Requisite> {
     let mut members = Vec::new();
     let mut seen = HashSet::new();
     for item in items {
-        let Some(member) = normalized(item) else { continue };
+        let Some(member) = normalized(item) else {
+            continue;
+        };
         match (&member, as_and) {
             (Requisite::And(inner), true) | (Requisite::Or(inner), false) => {
                 for child in inner {
@@ -339,7 +405,11 @@ fn merging(items: &[Requisite], as_and: bool) -> Option<Requisite> {
     match members.len() {
         0 => None,
         1 => members.pop(),
-        _ => Some(if as_and { Requisite::And(members) } else { Requisite::Or(members) }),
+        _ => Some(if as_and {
+            Requisite::And(members)
+        } else {
+            Requisite::Or(members)
+        }),
     }
 }
 
@@ -352,7 +422,10 @@ fn push_unique(members: &mut Vec<Requisite>, seen: &mut HashSet<String>, member:
 fn display_key(requisite: &Requisite) -> String {
     match requisite {
         Requisite::Course(key) => format!("c:{key}"),
-        Requisite::Test { name, score } => format!("t:{name}:{}", score.map(|s| s.to_string()).unwrap_or_default()),
+        Requisite::Test { name, score } => format!(
+            "t:{name}:{}",
+            score.map(|s| s.to_string()).unwrap_or_default()
+        ),
         Requisite::And(items) => {
             let mut keys: Vec<String> = items.iter().map(display_key).collect();
             keys.sort();
@@ -366,7 +439,11 @@ fn display_key(requisite: &Requisite) -> String {
     }
 }
 
-fn make_node(requisite: &Requisite, is_offered: &impl Fn(&CourseKey) -> bool, completion: &impl Fn(&CourseKey) -> (bool, Option<CourseKey>)) -> RequisiteNode {
+fn make_node(
+    requisite: &Requisite,
+    is_offered: &impl Fn(&CourseKey) -> bool,
+    completion: &impl Fn(&CourseKey) -> (bool, Option<CourseKey>),
+) -> RequisiteNode {
     match requisite {
         Requisite::Course(key) => {
             let (is_complete, via) = completion(key);
@@ -378,13 +455,26 @@ fn make_node(requisite: &Requisite, is_offered: &impl Fn(&CourseKey) -> bool, co
             })
         }
         Requisite::Test { name, score } => RequisiteNode::Item(RequisiteItem {
-            kind: ItemKind::Test { name: name.clone(), score: *score },
+            kind: ItemKind::Test {
+                name: name.clone(),
+                score: *score,
+            },
             is_complete: false,
             via: None,
             is_offered: true,
         }),
-        Requisite::And(items) => RequisiteNode::All(items.iter().map(|i| make_node(i, is_offered, completion)).collect()),
-        Requisite::Or(items) => RequisiteNode::OneOf(items.iter().map(|i| make_node(i, is_offered, completion)).collect()),
+        Requisite::And(items) => RequisiteNode::All(
+            items
+                .iter()
+                .map(|i| make_node(i, is_offered, completion))
+                .collect(),
+        ),
+        Requisite::Or(items) => RequisiteNode::OneOf(
+            items
+                .iter()
+                .map(|i| make_node(i, is_offered, completion))
+                .collect(),
+        ),
     }
 }
 
@@ -415,7 +505,13 @@ fn choice_order(items: Vec<RequisiteItem>) -> Vec<RequisiteItem> {
         .into_iter()
         .enumerate()
         .map(|(offset, item)| {
-            let rank = if item.is_complete { 0 } else if item.course_key().is_some() && item.is_offered { 1 } else { 2 };
+            let rank = if item.is_complete {
+                0
+            } else if item.course_key().is_some() && item.is_offered {
+                1
+            } else {
+                2
+            };
             (rank, offset, item)
         })
         .collect();
@@ -424,7 +520,9 @@ fn choice_order(items: Vec<RequisiteItem>) -> Vec<RequisiteItem> {
 }
 
 fn spoken_list(names: &[String], word: &str) -> String {
-    let Some(last) = names.last() else { return String::new() };
+    let Some(last) = names.last() else {
+        return String::new();
+    };
     if names.len() == 1 {
         return last.clone();
     }
@@ -442,6 +540,13 @@ fn spoken_expression(node: &RequisiteNode) -> String {
                 format!("all of {}", spoken_list(&spoken, "and"))
             }
         }
-        RequisiteNode::OneOf(members) => format!("either {}", members.iter().map(spoken_expression).collect::<Vec<_>>().join(", or ")),
+        RequisiteNode::OneOf(members) => format!(
+            "either {}",
+            members
+                .iter()
+                .map(spoken_expression)
+                .collect::<Vec<_>>()
+                .join(", or ")
+        ),
     }
 }

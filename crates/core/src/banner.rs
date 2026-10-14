@@ -50,13 +50,21 @@ pub fn prerequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> 
     if rows.is_empty() {
         return None;
     }
-    let mut nodes = vec![Node { is_and: false, items: vec![] }];
+    let mut nodes = vec![Node {
+        is_and: false,
+        items: vec![],
+    }];
     let mut stack = vec![0usize];
     for cells in rows {
         if cells.len() < 6 {
             continue;
         }
-        let cell = |i: usize| cells.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
+        let cell = |i: usize| {
+            cells
+                .get(i)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
         let and_or = cell(0).to_ascii_lowercase();
         let current = *stack.last().unwrap();
         if and_or == "and" {
@@ -65,7 +73,10 @@ pub fn prerequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> 
             nodes[current].is_and = false;
         }
         if !cell(1).is_empty() {
-            nodes.push(Node { is_and: false, items: vec![] });
+            nodes.push(Node {
+                is_and: false,
+                items: vec![],
+            });
             let child = nodes.len() - 1;
             nodes[current].items.push(Item::Node(child));
             stack.push(child);
@@ -73,11 +84,19 @@ pub fn prerequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> 
         let current = *stack.last().unwrap();
         if !cell(2).is_empty() {
             let score = cell(3).parse().ok();
-            nodes[current].items.push(Item::Leaf(Requisite::Test { name: cell(2), score }));
+            nodes[current].items.push(Item::Leaf(Requisite::Test {
+                name: cell(2),
+                score,
+            }));
         }
         if !cell(4).is_empty() && !cell(5).is_empty() {
-            let key = CourseKey { subject: subjects.code(&cell(4)), number: cell(5) };
-            nodes[current].items.push(Item::Leaf(Requisite::Course(key)));
+            let key = CourseKey {
+                subject: subjects.code(&cell(4)),
+                number: cell(5),
+            };
+            nodes[current]
+                .items
+                .push(Item::Leaf(Requisite::Course(key)));
         }
         if !cell(8).is_empty() && stack.len() > 1 {
             stack.pop();
@@ -120,7 +139,10 @@ pub fn corequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> {
             if subject.trim().is_empty() || number.trim().is_empty() {
                 return None;
             }
-            Some(Requisite::Course(CourseKey { subject: subjects.code(subject.trim()), number: number.trim().to_string() }))
+            Some(Requisite::Course(CourseKey {
+                subject: subjects.code(subject.trim()),
+                number: number.trim().to_string(),
+            }))
         })
         .collect();
     match items.len() {
@@ -133,7 +155,8 @@ pub fn corequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> {
 pub fn description(html: &str) -> String {
     let text = plain_text(html);
     let lowered = text.to_ascii_lowercase();
-    if lowered.starts_with("no course description") || lowered.contains("no information available") {
+    if lowered.starts_with("no course description") || lowered.contains("no information available")
+    {
         String::new()
     } else {
         text
@@ -150,7 +173,11 @@ pub struct CatalogDetails {
 }
 
 pub fn catalog_details(html: &str) -> CatalogDetails {
-    let lines: Vec<String> = plain_text(html).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<String> = plain_text(html)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
     fn value(lines: &[String], label: &str) -> Option<String> {
         let i = lines.iter().position(|l| l.starts_with(label))?;
         let inline = lines[i][label.len()..].trim().to_string();
@@ -158,14 +185,22 @@ pub fn catalog_details(html: &str) -> CatalogDetails {
             return Some(inline);
         }
         let next = lines.get(i + 1)?;
-        if next.ends_with(':') { None } else { Some(next.clone()) }
+        if next.ends_with(':') {
+            None
+        } else {
+            Some(next.clone())
+        }
     }
     fn strip_code(s: Option<String>) -> Option<String> {
         let s = s?;
         let mut parts: Vec<&str> = s.split_whitespace().collect();
         if parts.len() > 1 {
             if let Some(last) = parts.last() {
-                if last.len() <= 4 && last.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+                if last.len() <= 4
+                    && last
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                {
                     parts.pop();
                 }
             }
@@ -183,7 +218,11 @@ pub fn catalog_details(html: &str) -> CatalogDetails {
 }
 
 pub fn credit_range(text: &str) -> Option<(f64, f64)> {
-    let nums: Vec<f64> = Regex::new(r"\d+(?:\.\d+)?").unwrap().find_iter(text).filter_map(|m| m.as_str().parse().ok()).collect();
+    let nums: Vec<f64> = Regex::new(r"\d+(?:\.\d+)?")
+        .unwrap()
+        .find_iter(text)
+        .filter_map(|m| m.as_str().parse().ok())
+        .collect();
     let first = *nums.first()?;
     let second = nums.get(1).copied().unwrap_or(first);
     Some((first.min(second), first.max(second)))
@@ -219,22 +258,39 @@ pub fn mutual_exclusions(html: &str, subjects: &SubjectLookup) -> Vec<CourseKey>
             let cells: Vec<String> = cells.iter().map(|c| c.trim().to_string()).collect();
             for i in 0..cells.len().saturating_sub(1) {
                 if is_subject_text(&cells[i]) && is_course_number(&cells[i + 1]) {
-                    push_unique(&mut keys, CourseKey { subject: subjects.code(&cells[i]), number: cells[i + 1].clone() });
+                    push_unique(
+                        &mut keys,
+                        CourseKey {
+                            subject: subjects.code(&cells[i]),
+                            number: cells[i + 1].clone(),
+                        },
+                    );
                     break;
                 }
             }
         }
     }
     if keys.is_empty() {
-        for cap in Regex::new(r"\b([A-Z]{2,6})\s?(\d{3,4}[A-Z]?)\b").unwrap().captures_iter(&text) {
-            push_unique(&mut keys, CourseKey { subject: cap[1].to_string(), number: cap[2].to_string() });
+        for cap in Regex::new(r"\b([A-Z]{2,6})\s?(\d{3,4}[A-Z]?)\b")
+            .unwrap()
+            .captures_iter(&text)
+        {
+            push_unique(
+                &mut keys,
+                CourseKey {
+                    subject: cap[1].to_string(),
+                    number: cap[2].to_string(),
+                },
+            );
         }
     }
     keys
 }
 
 fn coerce_section_ints(value: &mut serde_json::Value) {
-    let Some(obj) = value.as_object_mut() else { return };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
     for key in [
         "maximumEnrollment",
         "enrollment",
@@ -263,12 +319,24 @@ fn is_subject_text(text: &str) -> bool {
 }
 
 fn is_course_number(text: &str) -> bool {
-    (3..=5).contains(&text.len()) && text.chars().next().is_some_and(|c| c.is_ascii_digit()) && text.chars().all(|c| c.is_ascii_alphanumeric())
+    (3..=5).contains(&text.len())
+        && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && text.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 pub fn catalog_lists(items: &[(String, String)], course: &CourseKey) -> bool {
-    let wanted = format!("{}{}", course.subject, course.number).chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
-    items.iter().any(|(code, _)| code.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase() == wanted)
+    let wanted = format!("{}{}", course.subject, course.number)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    items.iter().any(|(code, _)| {
+        code.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_uppercase()
+            == wanted
+    })
 }
 
 /// Attempts in `BannerClient.perform` before a retryable failure is given up.
@@ -306,7 +374,10 @@ pub fn session_pages(page_count: usize, parallelism: usize) -> Vec<Vec<usize>> {
 }
 
 fn jitter_seconds() -> f64 {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     f64::from(nanos % 501) / 1000.0
 }
 
@@ -319,7 +390,9 @@ enum Attempt {
 fn classify(result: Result<ureq::Response, ureq::Error>) -> Attempt {
     match result {
         Ok(response) => Attempt::Ready(Box::new(response)),
-        Err(ureq::Error::Status(code, _)) if !should_retry_status(code) => Attempt::Stop(format!("HTTP {code}")),
+        Err(ureq::Error::Status(code, _)) if !should_retry_status(code) => {
+            Attempt::Stop(format!("HTTP {code}"))
+        }
         Err(error) => Attempt::Retry(error.to_string()),
     }
 }
@@ -343,7 +416,11 @@ fn perform(build: impl Fn() -> Attempt) -> Result<ureq::Response, String> {
 }
 
 fn sections_of(value: &serde_json::Value) -> Result<Vec<crate::catalog::BannerSection>, String> {
-    let rows = value.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+    let rows = value
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut sections = Vec::new();
     for mut row in rows {
         coerce_section_ints(&mut row);
@@ -359,22 +436,77 @@ pub struct BannerClient {
 
 impl Default for BannerClient {
     fn default() -> Self {
-        Self { base: "https://nubanner.neu.edu".into() }
+        Self {
+            base: "https://nubanner.neu.edu".into(),
+        }
     }
+}
+
+/// Fall 2026 Computer Science, BSCS (Boston) page on catalog.northeastern.edu.
+pub const DEFAULT_CATALOG_PATH: &str =
+    "undergraduate/computer-information-science/computer-science/bscs/";
+
+/// Join a site origin and a catalog path. A missing slash used to produce
+/// `catalog.northeastern.eduundergraduate/...`, which does not resolve.
+pub fn join_url(base: &str, path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 impl BannerClient {
     pub fn get(&self, path: &str) -> Result<String, String> {
-        let url = if path.starts_with("http") { path.to_string() } else { format!("{}{}", self.base, path) };
-        perform(|| classify(ureq::get(&url).timeout(std::time::Duration::from_secs(20)).call()))?.into_string().map_err(|e| e.to_string())
+        let url = join_url(&self.base, path);
+        perform(|| {
+            classify(
+                ureq::get(&url)
+                    .timeout(std::time::Duration::from_secs(20))
+                    .call(),
+            )
+        })?
+        .into_string()
+        .map_err(|e| e.to_string())
     }
 
     /// Open a Banner search session and read current seats for one course.
     /// Falls back to the bundled snapshot when Banner is unreachable.
-    pub fn live_seats(&self, term: &str, subject: &str, number: &str) -> Result<Vec<LiveSeat>, String> {
+    pub fn live_seats(
+        &self,
+        term: &str,
+        subject: &str,
+        number: &str,
+    ) -> Result<Vec<LiveSeat>, String> {
         let cookie = self.open_session(term)?;
         let page = self.search_page(&cookie, term, Some(subject), Some(number), 0, 500)?;
-        parse_live_seats(&serde_json::to_string(&page).map_err(|e| e.to_string())?, subject, number)
+        parse_live_seats(
+            &serde_json::to_string(&page).map_err(|e| e.to_string())?,
+            subject,
+            number,
+        )
+    }
+
+    /// Current seats for each distinct subject and number. One failure fails the batch
+    /// so a watchlist check is not mixed with stale snapshot counts.
+    pub fn live_seats_for_keys(
+        &self,
+        term: &str,
+        keys: &[(String, String)],
+    ) -> Result<Vec<LiveSeat>, String> {
+        let mut all = Vec::new();
+        let mut seen = HashSet::new();
+        for (subject, number) in keys {
+            for seat in self.live_seats(term, subject, number)? {
+                if seen.insert(seat.crn.clone()) {
+                    all.push(seat);
+                }
+            }
+        }
+        Ok(all)
     }
 
     fn ssb(&self) -> String {
@@ -382,20 +514,34 @@ impl BannerClient {
             let base = self.base.trim_end_matches('/');
             format!("{base}/")
         } else {
-            format!("{}/StudentRegistrationSsb/ssb/", self.base.trim_end_matches('/'))
+            format!(
+                "{}/StudentRegistrationSsb/ssb/",
+                self.base.trim_end_matches('/')
+            )
         }
     }
 
     pub fn fetch_terms(&self, max: i32) -> Result<Vec<Term>, String> {
-        let url = format!("{}classSearch/getTerms?offset=1&max={max}&searchTerm=", self.ssb());
+        let url = format!(
+            "{}classSearch/getTerms?offset=1&max={max}&searchTerm=",
+            self.ssb()
+        );
         let body = self.get(&url)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&body).map_err(|e| e.to_string())?;
         Ok(rows
             .into_iter()
             .filter_map(|row| {
                 let code = row.get("code").and_then(|v| v.as_str())?.to_string();
-                let description = crate::html::decode_entities(row.get("description").and_then(|v| v.as_str()).unwrap_or(""));
-                Some(Term { code, banner_description: description })
+                let description = crate::html::decode_entities(
+                    row.get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+                Some(Term {
+                    code,
+                    banner_description: description,
+                })
             })
             .collect())
     }
@@ -406,7 +552,10 @@ impl BannerClient {
         let opened = perform(|| {
             classify(
                 ureq::post(&url)
-                    .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                    .set(
+                        "Content-Type",
+                        "application/x-www-form-urlencoded; charset=UTF-8",
+                    )
                     .timeout(std::time::Duration::from_secs(30))
                     .send_string(&body),
             )
@@ -419,10 +568,22 @@ impl BannerClient {
             .collect::<Vec<_>>()
             .join("; ");
         let _ = opened.into_string();
-        if cookie.is_empty() { Err("Banner did not start a search session".into()) } else { Ok(cookie) }
+        if cookie.is_empty() {
+            Err("Banner did not start a search session".into())
+        } else {
+            Ok(cookie)
+        }
     }
 
-    pub fn search_page(&self, cookie: &str, term: &str, subject: Option<&str>, number: Option<&str>, offset: i32, page_size: i32) -> Result<serde_json::Value, String> {
+    pub fn search_page(
+        &self,
+        cookie: &str,
+        term: &str,
+        subject: Option<&str>,
+        number: Option<&str>,
+        offset: i32,
+        page_size: i32,
+    ) -> Result<serde_json::Value, String> {
         let mut url = format!(
             "{}searchResults/searchResults?txt_term={term}&pageOffset={offset}&pageMaxSize={page_size}&sortColumn=subjectDescription&sortDirection=asc",
             self.ssb()
@@ -434,16 +595,31 @@ impl BannerClient {
             url.push_str(&format!("&txt_courseNumber={number}"));
         }
         let cookie = cookie.to_string();
-        let body = perform(|| classify(ureq::get(&url).set("Cookie", &cookie).timeout(std::time::Duration::from_secs(40)).call()))?.into_string().map_err(|e| e.to_string())?;
+        let body = perform(|| {
+            classify(
+                ureq::get(&url)
+                    .set("Cookie", &cookie)
+                    .timeout(std::time::Duration::from_secs(40))
+                    .call(),
+            )
+        })?
+        .into_string()
+        .map_err(|e| e.to_string())?;
         serde_json::from_str(&body).map_err(|e| e.to_string())
     }
 
     /// Every section in a term. A one-row probe reads `totalCount`, then up to
     /// `SECTION_PARALLELISM` sessions each walk their own pages (`page % sessions`).
-    pub fn fetch_all_sections(&self, term: &str) -> Result<Vec<crate::catalog::BannerSection>, String> {
+    pub fn fetch_all_sections(
+        &self,
+        term: &str,
+    ) -> Result<Vec<crate::catalog::BannerSection>, String> {
         let first = self.open_session(term)?;
         let probe = self.search_page(&first, term, None, None, 0, 1)?;
-        let total = probe.get("totalCount").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total = probe
+            .get("totalCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         if total <= 0 {
             return Ok(vec![]);
         }
@@ -461,17 +637,28 @@ impl BannerClient {
             for (cookie, pages) in cookies.into_iter().zip(slots) {
                 let client = self.clone();
                 let term = term.to_string();
-                joins.push(scope.spawn(move || -> Result<Vec<(usize, Vec<crate::catalog::BannerSection>)>, String> {
-                    let mut found = Vec::new();
-                    for page in pages {
-                        let value = client.search_page(&cookie, &term, None, None, (page as i64 * page_size) as i32, page_size as i32)?;
-                        found.push((page, sections_of(&value)?));
-                    }
-                    Ok(found)
-                }));
+                joins.push(scope.spawn(
+                    move || -> Result<Vec<(usize, Vec<crate::catalog::BannerSection>)>, String> {
+                        let mut found = Vec::new();
+                        for page in pages {
+                            let value = client.search_page(
+                                &cookie,
+                                &term,
+                                None,
+                                None,
+                                (page as i64 * page_size) as i32,
+                                page_size as i32,
+                            )?;
+                            found.push((page, sections_of(&value)?));
+                        }
+                        Ok(found)
+                    },
+                ));
             }
             for join in joins {
-                let part = join.join().map_err(|_| String::from("A section fetch stopped."))??;
+                let part = join
+                    .join()
+                    .map_err(|_| String::from("A section fetch stopped."))??;
                 for (page, sections) in part {
                     if page < by_page.len() {
                         by_page[page] = sections;
@@ -492,7 +679,11 @@ impl BannerClient {
         Ok(all)
     }
 
-    pub fn fetch_offered(&self, term: &str, courses: &[CourseKey]) -> Result<HashSet<CourseKey>, String> {
+    pub fn fetch_offered(
+        &self,
+        term: &str,
+        courses: &[CourseKey],
+    ) -> Result<HashSet<CourseKey>, String> {
         if courses.is_empty() {
             return Ok(HashSet::new());
         }
@@ -501,12 +692,24 @@ impl BannerClient {
         for (index, key) in courses.iter().enumerate() {
             if index > 0 {
                 let url = format!("{}classSearch/resetDataForm", self.ssb());
-                let _ = perform(|| classify(ureq::post(&url).set("Cookie", &cookie).timeout(std::time::Duration::from_secs(20)).call()));
+                let _ = perform(|| {
+                    classify(
+                        ureq::post(&url)
+                            .set("Cookie", &cookie)
+                            .timeout(std::time::Duration::from_secs(20))
+                            .call(),
+                    )
+                });
             }
-            let page = self.search_page(&cookie, term, Some(&key.subject), Some(&key.number), 0, 20)?;
+            let page =
+                self.search_page(&cookie, term, Some(&key.subject), Some(&key.number), 0, 20)?;
             let rows = page.get("data").and_then(|d| d.as_array());
             let hit = rows.is_some_and(|rows| {
-                rows.iter().any(|row| row.get("subject").and_then(|v| v.as_str()) == Some(key.subject.as_str()) && row.get("courseNumber").and_then(|v| v.as_str()) == Some(key.number.as_str()))
+                rows.iter().any(|row| {
+                    row.get("subject").and_then(|v| v.as_str()) == Some(key.subject.as_str())
+                        && row.get("courseNumber").and_then(|v| v.as_str())
+                            == Some(key.number.as_str())
+                })
             });
             if hit {
                 offered.insert(key.clone());
@@ -523,50 +726,98 @@ impl BannerClient {
             course.number
         );
         let body = self.get(&url)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&body).map_err(|e| e.to_string())?;
         let items: Vec<(String, String)> = rows
             .into_iter()
-            .filter_map(|row| Some((row.get("code")?.as_str()?.to_string(), row.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string())))
+            .filter_map(|row| {
+                Some((
+                    row.get("code")?.as_str()?.to_string(),
+                    row.get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
+            })
             .collect();
         Ok(catalog_lists(&items, course))
     }
 
     pub fn fetch_subjects(&self, term: &str) -> Result<Vec<Subject>, String> {
-        self.code_list(&format!("{}classSearch/get_subject?searchTerm=&term={term}&offset=1&max=900", self.ssb()))
-            .map(|rows| rows.into_iter().map(|(code, name)| Subject { code, name }).collect())
+        self.code_list(&format!(
+            "{}classSearch/get_subject?searchTerm=&term={term}&offset=1&max=900",
+            self.ssb()
+        ))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(code, name)| Subject { code, name })
+                .collect()
+        })
     }
 
     pub fn fetch_campuses(&self, term: &str) -> Result<Vec<Campus>, String> {
-        self.code_list(&format!("{}classSearch/get_campus?searchTerm=&term={term}&offset=1&max=200", self.ssb()))
-            .map(|rows| rows.into_iter().map(|(code, name)| Campus { code, name }).collect())
+        self.code_list(&format!(
+            "{}classSearch/get_campus?searchTerm=&term={term}&offset=1&max=200",
+            self.ssb()
+        ))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(code, name)| Campus { code, name })
+                .collect()
+        })
     }
 
     pub fn fetch_attributes(&self, term: &str) -> Result<Vec<AttributeInfo>, String> {
-        self.code_list(&format!("{}classSearch/get_attribute?searchTerm=&term={term}&offset=1&max=500", self.ssb()))
-            .map(|rows| rows.into_iter().map(|(code, name)| AttributeInfo { code, name }).collect())
+        self.code_list(&format!(
+            "{}classSearch/get_attribute?searchTerm=&term={term}&offset=1&max=500",
+            self.ssb()
+        ))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(code, name)| AttributeInfo { code, name })
+                .collect()
+        })
     }
 
     fn code_list(&self, url: &str) -> Result<Vec<(String, String)>, String> {
         let body = self.get(url)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&body).map_err(|e| e.to_string())?;
         Ok(rows
             .into_iter()
             .filter_map(|row| {
                 Some((
                     row.get("code")?.as_str()?.to_string(),
-                    crate::html::decode_entities(row.get("description").and_then(|v| v.as_str()).unwrap_or("")).trim().to_string(),
+                    crate::html::decode_entities(
+                        row.get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                    )
+                    .trim()
+                    .to_string(),
                 ))
             })
             .collect())
     }
 
-    fn post_course_form(&self, path: &str, term: &str, course: &CourseKey) -> Result<String, String> {
+    fn post_course_form(
+        &self,
+        path: &str,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
         let url = format!("{}{path}", self.ssb());
-        let body = format!("term={term}&subjectCode={}&courseNumber={}", course.subject, course.number);
+        let body = format!(
+            "term={term}&subjectCode={}&courseNumber={}",
+            course.subject, course.number
+        );
         perform(|| {
             classify(
                 ureq::post(&url)
-                    .set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                    .set(
+                        "Content-Type",
+                        "application/x-www-form-urlencoded; charset=UTF-8",
+                    )
                     .timeout(std::time::Duration::from_secs(25))
                     .send_string(&body),
             )
@@ -576,14 +827,27 @@ impl BannerClient {
     }
 
     /// Catalog entry for one course in one term. `None` when that catalog does not list it.
-    pub fn fetch_course_info(&self, course: &CourseKey, term: &str, subjects: &SubjectLookup, now: f64) -> Result<Option<crate::course_info::CourseInfo>, String> {
+    pub fn fetch_course_info(
+        &self,
+        course: &CourseKey,
+        term: &str,
+        subjects: &SubjectLookup,
+        now: f64,
+    ) -> Result<Option<crate::course_info::CourseInfo>, String> {
         if !self.catalog_lists_course(course, term)? {
             return Ok(None);
         }
-        let details_html = self.post_course_form("courseSearchResults/getCourseCatalogDetails", term, course)?;
-        let prereq_html = self.post_course_form("courseSearchResults/getPrerequisites", term, course)?;
-        let coreq_html = self.post_course_form("courseSearchResults/getCorequisites", term, course)?;
-        let exclusion_html = self.post_course_form("courseSearchResults/getCourseMutuallyExclusions", term, course)?;
+        let details_html =
+            self.post_course_form("courseSearchResults/getCourseCatalogDetails", term, course)?;
+        let prereq_html =
+            self.post_course_form("courseSearchResults/getPrerequisites", term, course)?;
+        let coreq_html =
+            self.post_course_form("courseSearchResults/getCorequisites", term, course)?;
+        let exclusion_html = self.post_course_form(
+            "courseSearchResults/getCourseMutuallyExclusions",
+            term,
+            course,
+        )?;
         let details = catalog_details(&details_html);
         Ok(Some(crate::course_info::CourseInfo {
             key: course.clone(),
@@ -604,7 +868,11 @@ impl crate::offering::OfferingSource for BannerClient {
     fn terms(&self) -> Result<Vec<Term>, String> {
         self.fetch_terms(120)
     }
-    fn offered_courses(&self, term: &str, courses: &[CourseKey]) -> Result<HashSet<CourseKey>, String> {
+    fn offered_courses(
+        &self,
+        term: &str,
+        courses: &[CourseKey],
+    ) -> Result<HashSet<CourseKey>, String> {
         self.fetch_offered(term, courses)
     }
 }
@@ -613,9 +881,16 @@ impl crate::course_info::CourseInfoSource for BannerClient {
     fn terms(&self) -> Result<Vec<Term>, String> {
         self.fetch_terms(120)
     }
-    fn catalog_entry(&self, key: &CourseKey, term: &str) -> Result<Option<crate::course_info::CourseInfo>, String> {
+    fn catalog_entry(
+        &self,
+        key: &CourseKey,
+        term: &str,
+    ) -> Result<Option<crate::course_info::CourseInfo>, String> {
         let subjects = self.fetch_subjects(term).unwrap_or_default();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
         self.fetch_course_info(key, term, &SubjectLookup::new(&subjects), now)
     }
 }
@@ -638,7 +913,11 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
         return Err("Banner did not return a section list".into());
     };
     for item in rows {
-        let crn = item.get("courseReferenceNumber").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let crn = item
+            .get("courseReferenceNumber")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if crn.is_empty() {
             continue;
         }
@@ -652,11 +931,80 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
             .and_then(|v| v.as_i64())
             .or_else(|| item.get("seatsAvailable").and_then(|v| v.as_i64()))
             .unwrap_or(0) as i32;
-        let waitlist_remaining = item.get("waitAvailable").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        let seat_capacity = item.get("maximumEnrollment").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        seats.push(LiveSeat { crn, seats_remaining, waitlist_remaining, seat_capacity });
+        let waitlist_remaining = item
+            .get("waitAvailable")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let seat_capacity = item
+            .get("maximumEnrollment")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        seats.push(LiveSeat {
+            crn,
+            seats_remaining,
+            waitlist_remaining,
+            seat_capacity,
+        });
     }
     Ok(seats)
+}
+
+/// Overlay a live seat response onto the snapshot sections a watchlist cares about.
+/// A watched CRN that Banner did not return is omitted, so the comparison can mark it missing.
+pub fn sections_with_live_seats(
+    snapshot: &[CourseSection],
+    watched: &[(String, CourseKey)],
+    seats: &[LiveSeat],
+) -> Vec<CourseSection> {
+    let by_crn: HashMap<&str, &LiveSeat> =
+        seats.iter().map(|seat| (seat.crn.as_str(), seat)).collect();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (crn, key) in watched {
+        let Some(seat) = by_crn.get(crn.as_str()) else {
+            continue;
+        };
+        let mut section = snapshot
+            .iter()
+            .find(|section| &section.crn == crn)
+            .cloned()
+            .unwrap_or_else(|| section_from_seat(crn, key, seat));
+        section.seats_remaining = seat.seats_remaining;
+        section.waitlist_remaining = seat.waitlist_remaining;
+        section.seat_capacity = seat.seat_capacity;
+        if seen.insert(section.crn.clone()) {
+            out.push(section);
+        }
+    }
+    out
+}
+
+fn section_from_seat(crn: &str, key: &CourseKey, seat: &LiveSeat) -> CourseSection {
+    CourseSection {
+        crn: crn.to_string(),
+        subject: key.subject.clone(),
+        number: key.number.clone(),
+        title: String::new(),
+        section_number: String::new(),
+        part_of_term: String::new(),
+        seat_capacity: seat.seat_capacity,
+        seats_remaining: seat.seats_remaining,
+        enrollment: 0,
+        waitlist_capacity: 0,
+        waitlist_count: 0,
+        waitlist_remaining: seat.waitlist_remaining,
+        class_type: String::new(),
+        honors: false,
+        campus: String::new(),
+        instruction_method: None,
+        meetings: Vec::new(),
+        instructors: None,
+        cross_list_crns: Vec::new(),
+        attributes: Vec::new(),
+        description: None,
+        prereqs: None,
+        coreqs: None,
+    }
 }
 
 /// `09/09/2026` becomes `2026-09-09`. An ISO date is kept. Empty stays absent.
@@ -667,17 +1015,35 @@ fn banner_slash_date(raw: &str) -> Option<String> {
     }
     let parts: Vec<&str> = raw.split('/').collect();
     if parts.len() == 3 && parts[0].len() <= 2 && parts[1].len() <= 2 && parts[2].len() == 4 {
-        return Some(format!("{:0>4}-{:0>2}-{:0>2}", parts[2], parts[0], parts[1]));
+        return Some(format!(
+            "{:0>4}-{:0>2}-{:0>2}",
+            parts[2], parts[0], parts[1]
+        ));
     }
     Some(raw.to_string())
 }
 
 /// Meeting from Banner's compact day string and HHMM times.
-pub fn meeting_from_banner(days: &str, start_hhmm: i32, end_hhmm: i32, building: &str, room: &str, start_date: &str, end_date: &str) -> Meeting {
+pub fn meeting_from_banner(
+    days: &str,
+    start_hhmm: i32,
+    end_hhmm: i32,
+    building: &str,
+    room: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Meeting {
     let mut set = DaySet(0);
     for ch in days.chars() {
         let bit = match ch {
-            'U' => 0, 'M' => 1, 'T' => 2, 'W' => 3, 'R' => 4, 'F' => 5, 'S' => 6, _ => continue,
+            'U' => 0,
+            'M' => 1,
+            'T' => 2,
+            'W' => 3,
+            'R' => 4,
+            'F' => 5,
+            'S' => 6,
+            _ => continue,
         };
         set.0 |= 1 << bit;
     }
@@ -685,9 +1051,17 @@ pub fn meeting_from_banner(days: &str, start_hhmm: i32, end_hhmm: i32, building:
         days: set,
         start: Some(minutes_from_hhmm(start_hhmm)),
         end: Some(minutes_from_hhmm(end_hhmm)),
-        building_code: if building.is_empty() { None } else { Some(building.into()) },
+        building_code: if building.is_empty() {
+            None
+        } else {
+            Some(building.into())
+        },
         building: None,
-        room: if room.is_empty() { None } else { Some(room.into()) },
+        room: if room.is_empty() {
+            None
+        } else {
+            Some(room.into())
+        },
         campus_code: None,
         kind: "Class".into(),
         start_date: banner_slash_date(start_date),
@@ -697,7 +1071,8 @@ pub fn meeting_from_banner(days: &str, start_hhmm: i32, end_hhmm: i32, building:
 
 #[cfg(test)]
 mod tests {
-    use super::parse_live_seats;
+    use super::{parse_live_seats, LiveSeat};
+    use crate::model::*;
 
     #[test]
     fn live_seat_json_keeps_exact_course() {
@@ -716,13 +1091,20 @@ mod tests {
     #[test]
     #[ignore = "contacts nubanner.neu.edu"]
     fn live_cs3000_when_banner_is_up() {
-        let seats = super::BannerClient::default().live_seats("202710", "CS", "3000").expect("banner");
+        let seats = super::BannerClient::default()
+            .live_seats("202710", "CS", "3000")
+            .expect("banner");
         assert!(!seats.is_empty(), "expected Fall 2026 CS 3000 sections");
     }
 
     #[test]
     fn null_data_is_an_empty_list() {
-        let seats = parse_live_seats(r#"{"success":true,"totalCount":0,"data":null}"#, "CS", "3000").unwrap();
+        let seats = parse_live_seats(
+            r#"{"success":true,"totalCount":0,"data":null}"#,
+            "CS",
+            "3000",
+        )
+        .unwrap();
         assert!(seats.is_empty());
     }
 
@@ -745,7 +1127,10 @@ mod tests {
     #[test]
     fn session_pages_assign_one_stream_per_cookie() {
         let pages = super::session_pages(10, 4);
-        assert_eq!(pages, vec![vec![0, 4, 8], vec![1, 5, 9], vec![2, 6], vec![3, 7]]);
+        assert_eq!(
+            pages,
+            vec![vec![0, 4, 8], vec![1, 5, 9], vec![2, 6], vec![3, 7]]
+        );
         assert_eq!(super::session_pages(2, 4).len(), 2);
         assert!(super::session_pages(0, 4).is_empty());
         assert_eq!(super::session_pages(3, 0), vec![vec![0, 1, 2]]);
@@ -759,5 +1144,108 @@ mod tests {
         assert!(!super::should_retry_status(404));
         assert!(!super::should_retry_status(400));
         assert!(!super::should_retry_status(200));
+    }
+
+    #[test]
+    fn catalog_urls_keep_a_single_slash() {
+        assert_eq!(
+            super::join_url("https://catalog.northeastern.edu", "undergraduate/computer-information-science/computer-science/bscs/"),
+            "https://catalog.northeastern.edu/undergraduate/computer-information-science/computer-science/bscs/"
+        );
+        assert_eq!(
+            super::join_url("https://catalog.northeastern.edu/", "/undergraduate/foo/"),
+            "https://catalog.northeastern.edu/undergraduate/foo/"
+        );
+        assert_eq!(
+            super::join_url("https://catalog.northeastern.edu", "https://example.edu/x"),
+            "https://example.edu/x"
+        );
+        assert!(!super::DEFAULT_CATALOG_PATH.contains("computer-science-bs"));
+        assert!(super::DEFAULT_CATALOG_PATH.ends_with("bscs/"));
+    }
+
+    #[test]
+    fn live_counts_replace_the_snapshot_and_drop_missing_crns() {
+        let snapshot = vec![section_shell("12726", 0, 40), section_shell("99999", 2, 30)];
+        let watched = vec![
+            (
+                "12726".into(),
+                CourseKey {
+                    subject: "CS".into(),
+                    number: "3000".into(),
+                },
+            ),
+            (
+                "99999".into(),
+                CourseKey {
+                    subject: "CS".into(),
+                    number: "3000".into(),
+                },
+            ),
+        ];
+        let seats = vec![LiveSeat {
+            crn: "12726".into(),
+            seats_remaining: 4,
+            waitlist_remaining: 1,
+            seat_capacity: 42,
+        }];
+        let updated = super::sections_with_live_seats(&snapshot, &watched, &seats);
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].crn, "12726");
+        assert_eq!(updated[0].seats_remaining, 4);
+        assert_eq!(updated[0].waitlist_remaining, 1);
+        assert_eq!(updated[0].seat_capacity, 42);
+        assert_eq!(updated[0].subject, "CS");
+    }
+
+    #[test]
+    #[ignore = "contacts catalog.northeastern.edu"]
+    fn live_bscs_page_parses_requirements() {
+        let client = super::BannerClient {
+            base: "https://catalog.northeastern.edu".into(),
+        };
+        let html = client.get(super::DEFAULT_CATALOG_PATH).expect("catalog");
+        let program = CatalogProgram {
+            title: "Computer Science, BSCS (Boston)".into(),
+            path: super::DEFAULT_CATALOG_PATH.into(),
+        };
+        let requirements = crate::program_parser::requirements_from_html(
+            &html,
+            CatalogYear::containing(2026, 10),
+            program,
+        )
+        .expect("requirements");
+        assert!(requirements
+            .sections
+            .iter()
+            .any(|section| !section.groups.is_empty()));
+    }
+
+    fn section_shell(crn: &str, seats: i32, capacity: i32) -> CourseSection {
+        CourseSection {
+            crn: crn.into(),
+            subject: "CS".into(),
+            number: "3000".into(),
+            title: String::new(),
+            section_number: "01".into(),
+            part_of_term: String::new(),
+            seat_capacity: capacity,
+            seats_remaining: seats,
+            enrollment: 0,
+            waitlist_capacity: 0,
+            waitlist_count: 0,
+            waitlist_remaining: 0,
+            class_type: "Lecture".into(),
+            honors: false,
+            campus: "Boston".into(),
+            instruction_method: None,
+            meetings: Vec::new(),
+            instructors: None,
+            cross_list_crns: Vec::new(),
+            attributes: Vec::new(),
+            description: None,
+            prereqs: None,
+            coreqs: None,
+        }
     }
 }

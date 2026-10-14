@@ -48,7 +48,11 @@ impl TermCatalog {
             }
         }
         for course in &mut self.courses {
-            course.postreqs = map.remove(&course.key()).unwrap_or_default().into_iter().collect();
+            course.postreqs = map
+                .remove(&course.key())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
         }
     }
 }
@@ -63,11 +67,15 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             let mut an = 0u64;
             let mut bn = 0u64;
             while i < ac.len() && ac[i].is_ascii_digit() {
-                an = an.saturating_mul(10).saturating_add((ac[i] as u8 - b'0') as u64);
+                an = an
+                    .saturating_mul(10)
+                    .saturating_add((ac[i] as u8 - b'0') as u64);
                 i += 1;
             }
             while j < bc.len() && bc[j].is_ascii_digit() {
-                bn = bn.saturating_mul(10).saturating_add((bc[j] as u8 - b'0') as u64);
+                bn = bn
+                    .saturating_mul(10)
+                    .saturating_add((bc[j] as u8 - b'0') as u64);
                 j += 1;
             }
             match an.cmp(&bn) {

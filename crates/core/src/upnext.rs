@@ -13,19 +13,34 @@ pub struct UpcomingClass {
     pub in_progress: bool,
 }
 
-pub fn occurrences(sections: &[CourseSection], weekday: i32, minutes: i32, iso: &str) -> Vec<UpcomingClass> {
+pub fn occurrences(
+    sections: &[CourseSection],
+    weekday: i32,
+    minutes: i32,
+    iso: &str,
+) -> Vec<UpcomingClass> {
     let mut items = Vec::new();
     for section in sections {
         for meeting in section.weekly_meetings() {
-            if !meeting.days.contains_day(weekday) { continue; }
-            let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
+            if !meeting.days.contains_day(weekday) {
+                continue;
+            }
+            let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+                continue;
+            };
             if let Some(s) = &meeting.start_date {
-                if iso < s.as_str() { continue; }
+                if iso < s.as_str() {
+                    continue;
+                }
             }
             if let Some(e) = &meeting.end_date {
-                if iso > e.as_str() { continue; }
+                if iso > e.as_str() {
+                    continue;
+                }
             }
-            if minutes >= end { continue; }
+            if minutes >= end {
+                continue;
+            }
             items.push(UpcomingClass {
                 crn: section.crn.clone(),
                 course: section.course_key(),
@@ -42,13 +57,24 @@ pub fn occurrences(sections: &[CourseSection], weekday: i32, minutes: i32, iso: 
 }
 
 pub fn up_next(items: &[UpcomingClass]) -> Option<&UpcomingClass> {
-    items.iter().find(|i| i.in_progress).or_else(|| items.first())
+    items
+        .iter()
+        .find(|i| i.in_progress)
+        .or_else(|| items.first())
 }
 
 pub fn summary(items: &[UpcomingClass]) -> String {
     match up_next(items) {
-        Some(item) if item.in_progress => format!("{} until {}", item.course, super::model::label_minutes(item.end, true)),
-        Some(item) => format!("{} at {}", item.course, super::model::label_minutes(item.start, true)),
+        Some(item) if item.in_progress => format!(
+            "{} until {}",
+            item.course,
+            super::model::label_minutes(item.end, true)
+        ),
+        Some(item) => format!(
+            "{} at {}",
+            item.course,
+            super::model::label_minutes(item.start, true)
+        ),
         None => "No more classes today".into(),
     }
 }
@@ -76,10 +102,14 @@ impl WidgetMeeting {
             return true;
         }
         if let Some(start) = &self.start_date {
-            if iso < start.as_str() { return false; }
+            if iso < start.as_str() {
+                return false;
+            }
         }
         if let Some(end) = &self.end_date {
-            if iso > end.as_str() { return false; }
+            if iso > end.as_str() {
+                return false;
+            }
         }
         true
     }
@@ -115,21 +145,37 @@ impl WidgetScheduleData {
         for day_offset in 0..14 {
             let day = start_of_today + day_offset as f64 * 86_400.0;
             if let Some(end) = self.classes_end {
-                if day > start_of_eastern_day(end) { break; }
+                if day > start_of_eastern_day(end) {
+                    break;
+                }
             }
             if let Some(start) = self.classes_start {
-                if day < start_of_eastern_day(start) { continue; }
+                if day < start_of_eastern_day(start) {
+                    continue;
+                }
             }
             let iso = eastern_iso_day(day);
             let weekday = eastern_weekday(day);
-            let mut todays: Vec<&WidgetMeeting> = self.meetings.iter().filter(|meeting| meeting.weekday == weekday && meeting.is_active(&iso)).collect();
+            let mut todays: Vec<&WidgetMeeting> = self
+                .meetings
+                .iter()
+                .filter(|meeting| meeting.weekday == weekday && meeting.is_active(&iso))
+                .collect();
             todays.sort_by_key(|meeting| meeting.start);
             for meeting in todays {
                 let start = day + f64::from(meeting.start) * 60.0;
                 let end = day + f64::from(meeting.end) * 60.0;
-                if end <= from { continue; }
-                results.push(WidgetOccurrence { meeting: meeting.clone(), start, end });
-                if results.len() >= limit { return results; }
+                if end <= from {
+                    continue;
+                }
+                results.push(WidgetOccurrence {
+                    meeting: meeting.clone(),
+                    start,
+                    end,
+                });
+                if results.len() >= limit {
+                    return results;
+                }
             }
         }
         results
@@ -138,20 +184,31 @@ impl WidgetScheduleData {
     pub fn classes_on(&self, date: f64) -> Vec<WidgetOccurrence> {
         let day = start_of_eastern_day(date);
         if let Some(start) = self.classes_start {
-            if day < start_of_eastern_day(start) { return Vec::new(); }
+            if day < start_of_eastern_day(start) {
+                return Vec::new();
+            }
         }
         if let Some(end) = self.classes_end {
-            if day > start_of_eastern_day(end) { return Vec::new(); }
+            if day > start_of_eastern_day(end) {
+                return Vec::new();
+            }
         }
         let iso = eastern_iso_day(day);
         let weekday = eastern_weekday(day);
-        let mut todays: Vec<&WidgetMeeting> = self.meetings.iter().filter(|meeting| meeting.weekday == weekday && meeting.is_active(&iso)).collect();
+        let mut todays: Vec<&WidgetMeeting> = self
+            .meetings
+            .iter()
+            .filter(|meeting| meeting.weekday == weekday && meeting.is_active(&iso))
+            .collect();
         todays.sort_by_key(|meeting| meeting.start);
-        todays.into_iter().map(|meeting| WidgetOccurrence {
-            start: day + f64::from(meeting.start) * 60.0,
-            end: day + f64::from(meeting.end) * 60.0,
-            meeting: meeting.clone(),
-        }).collect()
+        todays
+            .into_iter()
+            .map(|meeting| WidgetOccurrence {
+                start: day + f64::from(meeting.start) * 60.0,
+                end: day + f64::from(meeting.end) * 60.0,
+                meeting: meeting.clone(),
+            })
+            .collect()
     }
 }
 
@@ -185,7 +242,8 @@ fn eastern_parts(unix: f64) -> (i32, i32, i32, i32, i32) {
 
 pub fn eastern_to_unix(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> f64 {
     let offset = eastern_offset_hours(year, month, day, hour, minute);
-    (days_from_civil(year, month, day) * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 - offset * 3600) as f64
+    (days_from_civil(year, month, day) * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60
+        - offset * 3600) as f64
 }
 
 fn eastern_offset_hours(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> i64 {
@@ -193,7 +251,11 @@ fn eastern_offset_hours(year: i32, month: i32, day: i32, hour: i32, minute: i32)
     let spring = nth_weekday(year, 3, 0, 2);
     let fall = nth_weekday(year, 11, 0, 1);
     let dst = local >= (3, spring, 3, 0) && local < (11, fall, 2, 0);
-    if dst { -4 } else { -5 }
+    if dst {
+        -4
+    } else {
+        -5
+    }
 }
 
 fn nth_weekday(year: i32, month: i32, weekday: i32, n: i32) -> i32 {
@@ -219,7 +281,9 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
     year -= i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let yoe = (year - era * 400) as u64;
-    let doy = (153 * u64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + u64::from(day) - 1;
+    let doy = (153 * u64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5
+        + u64::from(day)
+        - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe as i64 - 719_468
 }

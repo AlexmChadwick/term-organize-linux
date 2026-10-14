@@ -19,26 +19,59 @@ pub struct ProfessorPage {
 }
 
 pub fn page(index: &CatalogIndex, name: &str) -> Option<ProfessorPage> {
-    let instructor = index.instructors.iter().find(|i| i.name.eq_ignore_ascii_case(name) || i.display_name.eq_ignore_ascii_case(name))?.clone();
+    let instructor = index
+        .instructors
+        .iter()
+        .find(|i| i.name.eq_ignore_ascii_case(name) || i.display_name.eq_ignore_ascii_case(name))?
+        .clone();
     let mut courses = Vec::new();
     for key in &instructor.course_keys {
-        let mut sections: Vec<CourseSection> = index.sections_for(key).into_iter().filter(|s| {
-            s.instructors.as_ref().is_some_and(|list| list.iter().any(|i| i.name == instructor.name))
-        }).collect();
-        sections.sort_by(|a, b| a.section_number.cmp(&b.section_number).then(a.crn.cmp(&b.crn)));
-        let title = index.course(key).map(|c| c.title.clone()).unwrap_or_default();
-        courses.push(ProfessorCourse { key: key.clone(), title, color_index: courses.len() as i32 % 10, sections });
+        let mut sections: Vec<CourseSection> = index
+            .sections_for(key)
+            .into_iter()
+            .filter(|s| {
+                s.instructors
+                    .as_ref()
+                    .is_some_and(|list| list.iter().any(|i| i.name == instructor.name))
+            })
+            .collect();
+        sections.sort_by(|a, b| {
+            a.section_number
+                .cmp(&b.section_number)
+                .then(a.crn.cmp(&b.crn))
+        });
+        let title = index
+            .course(key)
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        courses.push(ProfessorCourse {
+            key: key.clone(),
+            title,
+            color_index: courses.len() as i32 % 10,
+            sections,
+        });
     }
     courses.sort_by(|a, b| a.key.cmp(&b.key));
-    for (i, course) in courses.iter_mut().enumerate() { course.color_index = i as i32 % 10; }
-    Some(ProfessorPage { instructor, courses })
+    for (i, course) in courses.iter_mut().enumerate() {
+        course.color_index = i as i32 % 10;
+    }
+    Some(ProfessorPage {
+        instructor,
+        courses,
+    })
 }
 
 /// Sections still in the index, ordered by course then section number (`ProfessorPage.sections`).
 pub fn sections_of(summary: &InstructorSummary, index: &CatalogIndex) -> Vec<CourseSection> {
-    let mut sections: Vec<CourseSection> = summary.crns.iter().filter_map(|crn| index.section_crn(crn).cloned()).collect();
+    let mut sections: Vec<CourseSection> = summary
+        .crns
+        .iter()
+        .filter_map(|crn| index.section_crn(crn).cloned())
+        .collect();
     sections.sort_by(|left, right| {
-        left.course_key().cmp(&right.course_key()).then_with(|| crate::natural_cmp(&left.section_number, &right.section_number))
+        left.course_key()
+            .cmp(&right.course_key())
+            .then_with(|| crate::natural_cmp(&left.section_number, &right.section_number))
     });
     sections
 }
@@ -70,22 +103,45 @@ pub fn course_colors(keys: &[CourseKey]) -> HashMap<CourseKey, usize> {
 }
 
 pub fn section_note(key: &CourseKey, sections: &[CourseSection]) -> String {
-    let numbers: Vec<&str> = sections.iter().filter(|section| &section.course_key() == key).map(|section| section.section_number.as_str()).collect();
-    let label = if numbers.len() == 1 { "Section" } else { "Sections" };
+    let numbers: Vec<&str> = sections
+        .iter()
+        .filter(|section| &section.course_key() == key)
+        .map(|section| section.section_number.as_str())
+        .collect();
+    let label = if numbers.len() == 1 {
+        "Section"
+    } else {
+        "Sections"
+    };
     format!("{label} {}", numbers.join(", "))
 }
 
 pub fn summary_text(sections: &[CourseSection]) -> String {
-    let courses = sections.iter().map(|section| section.course_key()).collect::<HashSet<_>>().len();
-    format!("Teaches {} across {}", count_phrase(sections.len(), "section"), count_phrase(courses, "course"))
+    let courses = sections
+        .iter()
+        .map(|section| section.course_key())
+        .collect::<HashSet<_>>()
+        .len();
+    format!(
+        "Teaches {} across {}",
+        count_phrase(sections.len(), "section"),
+        count_phrase(courses, "course")
+    )
 }
 
 fn count_phrase(count: usize, noun: &str) -> String {
-    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 pub fn rate_my_professors_url(display_name: &str) -> String {
-    format!("https://www.ratemyprofessors.com/search/professors/696?q={}", percent_encode(display_name))
+    format!(
+        "https://www.ratemyprofessors.com/search/professors/696?q={}",
+        percent_encode(display_name)
+    )
 }
 
 fn percent_encode(text: &str) -> String {

@@ -1,4 +1,9 @@
-#![allow(clippy::too_many_arguments, clippy::type_complexity, clippy::manual_div_ceil, clippy::needless_range_loop)]
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::manual_div_ceil,
+    clippy::needless_range_loop
+)]
 //! On-device catalog, search, schedules, and degree audit for Term Organize.
 //!
 //! Unofficial. Not affiliated with, endorsed by, or sponsored by Northeastern University or Sandbox.
@@ -12,6 +17,7 @@ pub mod course_info;
 pub mod degree_audit;
 pub mod degree_format;
 pub mod editing;
+pub mod email;
 pub mod equivalences;
 pub mod html;
 pub mod index;

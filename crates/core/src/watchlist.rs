@@ -6,7 +6,10 @@ use crate::model::*;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AlertKind { Seats, Waitlist }
+pub enum AlertKind {
+    Seats,
+    Waitlist,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchlistAlert {
@@ -38,16 +41,29 @@ impl WatchlistAlert {
                 } else {
                     format!("{} seats", self.seats_remaining)
                 };
-                format!("{seats} in {} (CRN {}). Register soon!", self.section_name, self.crn)
+                format!(
+                    "{seats} in {} (CRN {}). Register soon!",
+                    self.section_name, self.crn
+                )
             }
             AlertKind::Waitlist => {
-                let spots = if self.waitlist_remaining == 1 { "1 waitlist spot".into() } else { format!("{} waitlist spots", self.waitlist_remaining) };
-                format!("{spots} open in {} (CRN {}). Join soon!", self.section_name, self.crn)
+                let spots = if self.waitlist_remaining == 1 {
+                    "1 waitlist spot".into()
+                } else {
+                    format!("{} waitlist spots", self.waitlist_remaining)
+                };
+                format!(
+                    "{spots} open in {} (CRN {}). Join soon!",
+                    self.section_name, self.crn
+                )
             }
         }
     }
     pub fn identifier(&self) -> String {
-        let kind = match self.kind { AlertKind::Seats => "seats", AlertKind::Waitlist => "waitlist" };
+        let kind = match self.kind {
+            AlertKind::Seats => "seats",
+            AlertKind::Waitlist => "waitlist",
+        };
         format!("watch-{kind}-{}-{}", self.term_code, self.crn)
     }
     pub fn url(&self) -> String {
@@ -88,7 +104,10 @@ impl WatchStatus {
 
     pub fn detail(self, item: &WatchItem) -> String {
         match self {
-            Self::Open if item.seat_capacity > 0 => format!("{} of {} open", item.last_seats_remaining, item.seat_capacity),
+            Self::Open if item.seat_capacity > 0 => format!(
+                "{} of {} open",
+                item.last_seats_remaining, item.seat_capacity
+            ),
             Self::Open => format!("{} open", item.last_seats_remaining),
             Self::Waitlist => {
                 let spots = item.last_waitlist_remaining;
@@ -126,17 +145,44 @@ pub fn ago(then: f64, now: f64) -> String {
         format!("{} hr ago", (seconds / 3_600.0) as i64)
     } else {
         let days = (seconds / 86_400.0) as i64;
-        if days == 1 { "yesterday".into() } else { format!("{days} days ago") }
+        if days == 1 {
+            "yesterday".into()
+        } else {
+            format!("{days} days ago")
+        }
     }
 }
 
+/// Status line for one watched section. This is the last Banner check stored on
+/// the item, not the seat count frozen in the catalog snapshot.
+pub fn row_line(item: &WatchItem, missing: bool, now: f64) -> String {
+    let status = WatchStatus::of(item, missing);
+    let when = match item.last_checked_at {
+        Some(then) => ago(then, now),
+        None => "not checked".into(),
+    };
+    format!("{} · {when}", status.detail(item))
+}
+
 pub fn section_name(section: &CourseSection) -> String {
-    let kind = if section.class_type.is_empty() { "Section" } else { section.class_type.as_str() };
-    if section.section_number.is_empty() { kind.to_string() } else { format!("{kind} {}", section.section_number) }
+    let kind = if section.class_type.is_empty() {
+        "Section"
+    } else {
+        section.class_type.as_str()
+    };
+    if section.section_number.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} {}", section.section_number)
+    }
 }
 
 /// `live` maps term code to the sections fetched for that term. Terms absent from the map are left alone.
-pub fn compare(items: &[WatchItem], live: &HashMap<String, Vec<CourseSection>>, checked_at: f64) -> Outcome {
+pub fn compare(
+    items: &[WatchItem],
+    live: &HashMap<String, Vec<CourseSection>>,
+    checked_at: f64,
+) -> Outcome {
     let mut next = Vec::new();
     let mut alerts = Vec::new();
     let mut missing = Vec::new();
@@ -158,10 +204,18 @@ pub fn compare(items: &[WatchItem], live: &HashMap<String, Vec<CourseSection>>, 
         let seats = section.seats_remaining;
         let wait = section.waitlist_remaining;
         let seat_alert = item.last_seats_remaining <= 0 && seats > 0;
-        let wait_alert = item.notify_on_waitlist && !seat_alert && seats <= 0 && item.last_waitlist_remaining <= 0 && wait > 0;
+        let wait_alert = item.notify_on_waitlist
+            && !seat_alert
+            && seats <= 0
+            && item.last_waitlist_remaining <= 0
+            && wait > 0;
         if seat_alert || wait_alert {
             alerts.push(WatchlistAlert {
-                kind: if seat_alert { AlertKind::Seats } else { AlertKind::Waitlist },
+                kind: if seat_alert {
+                    AlertKind::Seats
+                } else {
+                    AlertKind::Waitlist
+                },
                 term_code: item.term_code.clone(),
                 crn: item.crn.clone(),
                 course_key: item.course_key.clone(),
@@ -177,8 +231,56 @@ pub fn compare(items: &[WatchItem], live: &HashMap<String, Vec<CourseSection>>, 
         updated.last_waitlist_remaining = wait;
         updated.seat_capacity = section.seat_capacity;
         updated.last_checked_at = Some(checked_at);
-        if seat_alert || wait_alert { updated.last_notified_at = Some(checked_at); }
+        if seat_alert || wait_alert {
+            updated.last_notified_at = Some(checked_at);
+        }
         next.push(updated);
     }
-    Outcome { items: next, alerts, missing_ids: missing, checked_term_codes }
+    Outcome {
+        items: next,
+        alerts,
+        missing_ids: missing,
+        checked_term_codes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(seats: i32, capacity: i32, checked: Option<f64>) -> WatchItem {
+        WatchItem {
+            term_code: "202710".into(),
+            crn: "12726".into(),
+            course_key: CourseKey {
+                subject: "CS".into(),
+                number: "3000".into(),
+            },
+            course_title: "Algorithms and Data".into(),
+            section_label: "01".into(),
+            added_at: 0.0,
+            last_seats_remaining: seats,
+            last_waitlist_remaining: 0,
+            seat_capacity: capacity,
+            last_checked_at: checked,
+            notify_on_waitlist: false,
+            last_notified_at: None,
+        }
+    }
+
+    #[test]
+    fn row_line_uses_the_last_check_not_an_older_snapshot() {
+        assert_eq!(
+            row_line(&item(4, 42, Some(1_000.0)), false, 1_030.0),
+            "4 of 42 open · just now"
+        );
+        assert_eq!(
+            row_line(&item(0, 40, None), false, 1_000.0),
+            "Full · not checked"
+        );
+        assert_eq!(
+            row_line(&item(4, 42, Some(1_000.0)), true, 90_000.0),
+            "No longer listed · yesterday"
+        );
+    }
 }

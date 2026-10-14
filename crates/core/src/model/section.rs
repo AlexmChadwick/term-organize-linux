@@ -10,20 +10,36 @@ pub struct CourseKey {
 impl CourseKey {
     pub fn parse(raw: &str) -> Option<Self> {
         let cleaned = raw.to_ascii_uppercase().replace('-', " ");
-        let letters: String = cleaned.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let letters: String = cleaned
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
         let rest = cleaned[letters.len()..].trim();
-        if letters.is_empty() || rest.is_empty() || !rest.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if letters.is_empty() || rest.is_empty() || !rest.chars().all(|c| c.is_ascii_alphanumeric())
+        {
             return None;
         }
-        Some(Self { subject: letters, number: rest.to_string() })
+        Some(Self {
+            subject: letters,
+            number: rest.to_string(),
+        })
     }
 
     pub fn level(&self) -> Option<i32> {
-        self.number.chars().next().and_then(|c| c.to_digit(10)).map(|d| d as i32)
+        self.number
+            .chars()
+            .next()
+            .and_then(|c| c.to_digit(10))
+            .map(|d| d as i32)
     }
 
     pub fn numeric_value(&self) -> i32 {
-        self.number.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)
+        self.number
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
     }
 }
 
@@ -62,7 +78,15 @@ impl DaySet {
     pub const WEEKDAYS: Self = Self(0b0111110);
     pub const LETTERS: [&str; 7] = ["U", "M", "T", "W", "R", "F", "S"];
     pub const SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    pub const FULL: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    pub const FULL: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
 
     pub fn new(raw: u8) -> Self {
         Self(raw & 0x7f)
@@ -101,10 +125,17 @@ impl DaySet {
         self.0 & other.0 == self.0
     }
     pub fn compact_label(self) -> String {
-        self.indices().into_iter().map(|i| Self::LETTERS[i as usize]).collect()
+        self.indices()
+            .into_iter()
+            .map(|i| Self::LETTERS[i as usize])
+            .collect()
     }
     pub fn short_label(self) -> String {
-        self.indices().into_iter().map(|i| Self::SHORT[i as usize].to_string()).collect::<Vec<_>>().join(", ")
+        self.indices()
+            .into_iter()
+            .map(|i| Self::SHORT[i as usize].to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
     pub fn insert(&mut self, day: Self) {
         self.0 |= day.0;
@@ -183,21 +214,37 @@ impl Meeting {
         }
     }
     pub fn is_online(&self) -> bool {
-        let b = format!("{}{}", self.building.as_deref().unwrap_or(""), self.building_code.as_deref().unwrap_or(""));
+        let b = format!(
+            "{}{}",
+            self.building.as_deref().unwrap_or(""),
+            self.building_code.as_deref().unwrap_or("")
+        );
         b.to_ascii_lowercase().contains("online") || self.campus_code.as_deref() == Some("VTL")
     }
     pub fn overlaps(&self, other: &Meeting) -> bool {
-        let (Some(start), Some(end), Some(os), Some(oe)) = (self.start, self.end, other.start, other.end) else {
+        let (Some(start), Some(end), Some(os), Some(oe)) =
+            (self.start, self.end, other.start, other.end)
+        else {
             return false;
         };
         if self.days.intersection(other.days).is_empty() || !(start < oe && os < end) {
             return false;
         }
-        date_windows_overlap(self.start_date.as_deref(), self.end_date.as_deref(), other.start_date.as_deref(), other.end_date.as_deref())
+        date_windows_overlap(
+            self.start_date.as_deref(),
+            self.end_date.as_deref(),
+            other.start_date.as_deref(),
+            other.end_date.as_deref(),
+        )
     }
 }
 
-pub fn date_windows_overlap(a_start: Option<&str>, a_end: Option<&str>, b_start: Option<&str>, b_end: Option<&str>) -> bool {
+pub fn date_windows_overlap(
+    a_start: Option<&str>,
+    a_end: Option<&str>,
+    b_start: Option<&str>,
+    b_end: Option<&str>,
+) -> bool {
     let as_ = a_start.unwrap_or("0000-00-00");
     let ae = a_end.unwrap_or("9999-99-99");
     let bs = b_start.unwrap_or("0000-00-00");
@@ -211,12 +258,20 @@ pub fn label_minutes(minutes: i32, include_period: bool) -> String {
     let h12 = if h24 % 12 == 0 { 12 } else { h24 % 12 };
     let period = if h24 < 12 { "AM" } else { "PM" };
     let base = format!("{h12}:{m:02}");
-    if include_period { format!("{base} {period}") } else { base }
+    if include_period {
+        format!("{base} {period}")
+    } else {
+        base
+    }
 }
 
 pub fn range_label(start: i32, end: i32) -> String {
     let same = (start / 60 < 12) == (end / 60 < 12);
-    format!("{} – {}", label_minutes(start, !same), label_minutes(end, true))
+    format!(
+        "{} – {}",
+        label_minutes(start, !same),
+        label_minutes(end, true)
+    )
 }
 
 pub fn hour_axis_label(hour: i32) -> String {
@@ -235,6 +290,12 @@ pub fn hour_label(hour: i32) -> String {
 
 pub fn minutes_from_hhmm(value: i32) -> i32 {
     (value / 100) * 60 + value % 100
+}
+
+/// `1 seat · waitlist 0`, `4 seats · waitlist 2`.
+pub fn seat_wait_label(seats: i32, waitlist: i32) -> String {
+    let word = if seats == 1 { "seat" } else { "seats" };
+    format!("{seats} {word} · waitlist {waitlist}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +372,10 @@ pub struct CourseSection {
 
 impl CourseSection {
     pub fn course_key(&self) -> CourseKey {
-        CourseKey { subject: self.subject.clone(), number: self.number.clone() }
+        CourseKey {
+            subject: self.subject.clone(),
+            number: self.number.clone(),
+        }
     }
     pub fn is_open(&self) -> bool {
         self.seats_remaining > 0
@@ -321,35 +385,62 @@ impl CourseSection {
     }
     pub fn is_online(&self) -> bool {
         self.campus.to_ascii_lowercase().contains("online")
-            || self.instruction_method.as_deref().unwrap_or("").to_ascii_lowercase().contains("online")
+            || self
+                .instruction_method
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("online")
     }
     pub fn weekly_meetings(&self) -> Vec<&Meeting> {
-        self.meetings.iter().filter(|m| !m.is_final_exam() && m.has_time()).collect()
+        self.meetings
+            .iter()
+            .filter(|m| !m.is_final_exam() && m.has_time())
+            .collect()
     }
     pub fn final_exam(&self) -> Option<&Meeting> {
         self.meetings.iter().find(|m| m.is_final_exam())
     }
     pub fn meeting_days(&self) -> DaySet {
-        self.weekly_meetings().iter().fold(DaySet(0), |a, m| a.union(m.days))
+        self.weekly_meetings()
+            .iter()
+            .fold(DaySet(0), |a, m| a.union(m.days))
     }
     pub fn instructor_label(&self) -> String {
-        let Some(instructors) = &self.instructors else { return "Instructor unavailable".into() };
+        let Some(instructors) = &self.instructors else {
+            return "Instructor unavailable".into();
+        };
         if instructors.is_empty() {
             return "TBA".into();
         }
         let mut list = instructors.clone();
         list.sort_by_key(|instructor| std::cmp::Reverse(instructor.primary));
-        list.iter().map(|i| i.display_name()).collect::<Vec<_>>().join(", ")
+        list.iter()
+            .map(|i| i.display_name())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
     pub fn schedule_summary(&self) -> String {
         let weekly = self.weekly_meetings();
         if weekly.is_empty() {
-            return if self.is_online() { "Asynchronous / online".into() } else { "Times TBA".into() };
+            return if self.is_online() {
+                "Asynchronous / online".into()
+            } else {
+                "Times TBA".into()
+            };
         }
-        weekly.iter().map(|m| format!("{} {}", m.days.compact_label(), m.time_label())).collect::<Vec<_>>().join(" · ")
+        weekly
+            .iter()
+            .map(|m| format!("{} {}", m.days.compact_label(), m.time_label()))
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
     pub fn seats_label(&self) -> String {
-        format!("{} of {} seats", self.seats_remaining.max(0), self.seat_capacity)
+        format!(
+            "{} of {} seats",
+            self.seats_remaining.max(0),
+            self.seat_capacity
+        )
     }
     pub fn conflicts_with(&self, other: &CourseSection) -> bool {
         let mine: Vec<&Meeting> = self.weekly_meetings();
@@ -358,5 +449,17 @@ impl CourseSection {
     }
     pub fn has_no_campus(&self) -> bool {
         self.campus.to_ascii_lowercase().contains("no campus")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seat_wait_label_is_singular_for_one_seat() {
+        assert_eq!(seat_wait_label(1, 0), "1 seat · waitlist 0");
+        assert_eq!(seat_wait_label(0, 2), "0 seats · waitlist 2");
+        assert_eq!(seat_wait_label(4, 1), "4 seats · waitlist 1");
     }
 }

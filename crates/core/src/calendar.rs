@@ -6,7 +6,10 @@ use crate::model::{Season, Term};
 
 /// Inclusive start and end, as seconds since 1970.
 pub fn approximate_window(term_code: &str) -> Option<(f64, f64)> {
-    let term = Term { code: term_code.to_string(), banner_description: String::new() };
+    let term = Term {
+        code: term_code.to_string(),
+        banner_description: String::new(),
+    };
     if term.code.len() != 6 {
         return None;
     }
@@ -26,7 +29,11 @@ pub fn approximate_window(term_code: &str) -> Option<(f64, f64)> {
 
 fn unix_midnight_new_york(year: i32, month: u32, day: u32) -> Option<f64> {
     let utc = civil_to_unix(year, month, day)?;
-    let offset = if is_us_dst(year, month, day) { 4 * 3600 } else { 5 * 3600 };
+    let offset = if is_us_dst(year, month, day) {
+        4 * 3600
+    } else {
+        5 * 3600
+    };
     Some((utc + offset) as f64)
 }
 

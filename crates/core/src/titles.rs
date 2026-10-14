@@ -24,7 +24,9 @@ impl Title {
                 continue;
             }
             let singular = singular(&raw);
-            let word = synonym(singular.as_str()).unwrap_or(singular.as_str()).to_string();
+            let word = synonym(singular.as_str())
+                .unwrap_or(singular.as_str())
+                .to_string();
             if filler(&word) {
                 last = None;
                 continue;
@@ -39,7 +41,12 @@ impl Title {
         } else {
             None
         };
-        Self { words, parts, qualifiers, cut_off_word }
+        Self {
+            words,
+            parts,
+            qualifiers,
+            cut_off_word,
+        }
     }
 
     pub fn is_distinctive(&self) -> bool {
@@ -71,7 +78,9 @@ pub fn similarity_titles(a: &Title, b: &Title, minimum: f64) -> Option<f64> {
     if shared == 0 {
         return None;
     }
-    if a_words.iter().all(|w| format_set().contains(w)) || b_words.iter().all(|w| format_set().contains(w)) {
+    if a_words.iter().all(|w| format_set().contains(w))
+        || b_words.iter().all(|w| format_set().contains(w))
+    {
         return None;
     }
     let union = a_words.union(&b_words).count();
@@ -80,15 +89,24 @@ pub fn similarity_titles(a: &Title, b: &Title, minimum: f64) -> Option<f64> {
         return Some(score);
     }
     let contained = shared == a_words.len() || shared == b_words.len();
-    if contained { Some(minimum) } else { None }
+    if contained {
+        Some(minimum)
+    } else {
+        None
+    }
 }
 
 fn completing(title: &Title, other: &BTreeSet<String>) -> BTreeSet<String> {
-    let Some(cut) = &title.cut_off_word else { return title.words.clone() };
+    let Some(cut) = &title.cut_off_word else {
+        return title.words.clone();
+    };
     if other.contains(cut) {
         return title.words.clone();
     }
-    let Some(full) = other.iter().find(|w| w.starts_with(cut.as_str()) && w.len() > cut.len()) else {
+    let Some(full) = other
+        .iter()
+        .find(|w| w.starts_with(cut.as_str()) && w.len() > cut.len())
+    else {
         return title.words.clone();
     };
     let mut words = title.words.clone();
@@ -158,7 +176,11 @@ fn singular(word: &str) -> String {
     if word.ends_with("sses") {
         return word[..word.len() - 2].to_string();
     }
-    if word.ends_with('s') && !word.ends_with("ss") && !word.ends_with("us") && !word.ends_with("is") {
+    if word.ends_with('s')
+        && !word.ends_with("ss")
+        && !word.ends_with("us")
+        && !word.ends_with("is")
+    {
         return word[..word.len() - 1].to_string();
     }
     word.to_string()
@@ -174,19 +196,73 @@ fn synonym(word: &str) -> Option<&str> {
 fn filler(word: &str) -> bool {
     matches!(
         word,
-        "a" | "an" | "and" | "as" | "at" | "by" | "for" | "from" | "in" | "into" | "of" | "on" | "or" | "the" | "to" | "with"
-            | "principle" | "introduction" | "introductory" | "intro" | "fundamental" | "topic" | "prncple" | "prncpl" | "intr" | "introd"
+        "a" | "an"
+            | "and"
+            | "as"
+            | "at"
+            | "by"
+            | "for"
+            | "from"
+            | "in"
+            | "into"
+            | "of"
+            | "on"
+            | "or"
+            | "the"
+            | "to"
+            | "with"
+            | "principle"
+            | "introduction"
+            | "introductory"
+            | "intro"
+            | "fundamental"
+            | "topic"
+            | "prncple"
+            | "prncpl"
+            | "intr"
+            | "introd"
     )
 }
 
 fn qualifier_set() -> BTreeSet<String> {
-    ["lab", "recitation", "advanced", "intermediate", "elementary"].into_iter().map(str::to_string).collect()
+    [
+        "lab",
+        "recitation",
+        "advanced",
+        "intermediate",
+        "elementary",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn format_set() -> BTreeSet<String> {
     [
-        "special", "directed", "independent", "study", "research", "thesis", "dissertation", "seminar", "project", "practicum", "capstone",
-        "continuation", "experience", "internship", "co", "op", "work", "term", "workshop", "lab", "reading", "tutorial", "residency", "preparation",
+        "special",
+        "directed",
+        "independent",
+        "study",
+        "research",
+        "thesis",
+        "dissertation",
+        "seminar",
+        "project",
+        "practicum",
+        "capstone",
+        "continuation",
+        "experience",
+        "internship",
+        "co",
+        "op",
+        "work",
+        "term",
+        "workshop",
+        "lab",
+        "reading",
+        "tutorial",
+        "residency",
+        "preparation",
     ]
     .into_iter()
     .map(str::to_string)

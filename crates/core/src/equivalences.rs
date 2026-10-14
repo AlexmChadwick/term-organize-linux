@@ -12,7 +12,9 @@ pub struct CourseEquivalences {
 }
 
 impl CourseEquivalences {
-    pub fn none() -> Self { Self::default() }
+    pub fn none() -> Self {
+        Self::default()
+    }
     pub fn from_groups(input: &[Vec<CourseKey>]) -> Self {
         let mut parent: BTreeMap<CourseKey, CourseKey> = BTreeMap::new();
         fn add(parent: &mut BTreeMap<CourseKey, CourseKey>, key: CourseKey) {
@@ -28,7 +30,9 @@ impl CourseEquivalences {
         fn union(parent: &mut BTreeMap<CourseKey, CourseKey>, a: &CourseKey, b: &CourseKey) {
             let ra = find(parent, a);
             let rb = find(parent, b);
-            if ra != rb { parent.insert(rb, ra); }
+            if ra != rb {
+                parent.insert(rb, ra);
+            }
         }
         for group in input {
             if let Some(first) = group.first() {
@@ -46,28 +50,58 @@ impl CourseEquivalences {
             let root = find(&parent, &key);
             buckets.entry(root).or_default().push(key);
         }
-        let mut built: Vec<Vec<CourseKey>> = buckets.into_values().filter(|g| g.len() > 1).map(|mut g| { g.sort(); g }).collect();
+        let mut built: Vec<Vec<CourseKey>> = buckets
+            .into_values()
+            .filter(|g| g.len() > 1)
+            .map(|mut g| {
+                g.sort();
+                g
+            })
+            .collect();
         built.sort_by(|a, b| a[0].cmp(&b[0]));
         let mut index = BTreeMap::new();
         for (i, group) in built.iter().enumerate() {
-            for key in group { index.insert(key.clone(), i); }
+            for key in group {
+                index.insert(key.clone(), i);
+            }
         }
-        Self { groups: built, index }
+        Self {
+            groups: built,
+            index,
+        }
     }
     pub fn from_pairs(pairs: &[(CourseKey, CourseKey)]) -> Self {
-        Self::from_groups(&pairs.iter().map(|(a, b)| vec![a.clone(), b.clone()]).collect::<Vec<_>>())
+        Self::from_groups(
+            &pairs
+                .iter()
+                .map(|(a, b)| vec![a.clone(), b.clone()])
+                .collect::<Vec<_>>(),
+        )
     }
     pub fn from_declarations(items: &[CourseEquivalence]) -> Self {
-        Self::from_pairs(&items.iter().map(|e| (e.course.clone(), e.counts_as.clone())).collect::<Vec<_>>())
+        Self::from_pairs(
+            &items
+                .iter()
+                .map(|e| (e.course.clone(), e.counts_as.clone()))
+                .collect::<Vec<_>>(),
+        )
     }
-    pub fn is_empty(&self) -> bool { self.groups.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
     /// Every course that has at least one equivalent.
     pub fn courses(&self) -> BTreeSet<CourseKey> {
         self.index.keys().cloned().collect()
     }
     pub fn equivalents(&self, key: &CourseKey) -> BTreeSet<CourseKey> {
-        let Some(i) = self.index.get(key) else { return BTreeSet::new() };
-        self.groups[*i].iter().filter(|k| *k != key).cloned().collect()
+        let Some(i) = self.index.get(key) else {
+            return BTreeSet::new();
+        };
+        self.groups[*i]
+            .iter()
+            .filter(|k| *k != key)
+            .cloned()
+            .collect()
     }
     pub fn group_of(&self, key: &CourseKey) -> Vec<CourseKey> {
         if let Some(i) = self.index.get(key) {
@@ -77,7 +111,11 @@ impl CourseEquivalences {
         }
     }
     pub fn are_equivalent(&self, a: &CourseKey, b: &CourseKey) -> bool {
-        a == b || self.index.get(a).is_some_and(|i| self.index.get(b) == Some(i))
+        a == b
+            || self
+                .index
+                .get(a)
+                .is_some_and(|i| self.index.get(b) == Some(i))
     }
     pub fn expand(&self, taken: &HashSet<CourseKey>) -> HashSet<CourseKey> {
         let mut out = taken.clone();
@@ -87,8 +125,12 @@ impl CourseEquivalences {
         out
     }
     pub fn merging(&self, other: &CourseEquivalences) -> Self {
-        if other.is_empty() { return self.clone(); }
-        if self.is_empty() { return other.clone(); }
+        if other.is_empty() {
+            return self.clone();
+        }
+        if self.is_empty() {
+            return other.clone();
+        }
         let mut groups = self.groups.clone();
         groups.extend(other.groups.clone());
         Self::from_groups(&groups)
@@ -99,7 +141,11 @@ impl CourseEquivalences {
     }
     /// The taken course that satisfies `required`, preferring `required` itself.
     /// When several equivalents were taken, the lowest-numbered one is returned.
-    pub fn satisfier<'a>(&self, required: &CourseKey, taken: &'a HashSet<CourseKey>) -> Option<&'a CourseKey> {
+    pub fn satisfier<'a>(
+        &self,
+        required: &CourseKey,
+        taken: &'a HashSet<CourseKey>,
+    ) -> Option<&'a CourseKey> {
         if taken.contains(required) {
             return taken.get(required);
         }
@@ -139,11 +185,24 @@ impl<'de> Deserialize<'de> for CourseEquivalences {
 
 /// Declares that taking `course` counts as `counts_as`. Does nothing, and returns false, when
 /// the courses are the same or the plan already declares them equivalent.
-pub fn declare_equivalence(plan: &mut DegreePlan, course: CourseKey, counts_as: CourseKey, note: &str) -> bool {
-    if course == counts_as || CourseEquivalences::from_declarations(&plan.course_equivalences).are_equivalent(&course, &counts_as) {
+pub fn declare_equivalence(
+    plan: &mut DegreePlan,
+    course: CourseKey,
+    counts_as: CourseKey,
+    note: &str,
+) -> bool {
+    if course == counts_as
+        || CourseEquivalences::from_declarations(&plan.course_equivalences)
+            .are_equivalent(&course, &counts_as)
+    {
         return false;
     }
-    plan.course_equivalences.push(CourseEquivalence { id: Uuid::new_v4(), course, counts_as, note: note.to_string() });
+    plan.course_equivalences.push(CourseEquivalence {
+        id: Uuid::new_v4(),
+        course,
+        counts_as,
+        note: note.to_string(),
+    });
     true
 }
 
@@ -153,7 +212,11 @@ pub fn remove_equivalence(plan: &mut DegreePlan, id: Uuid) {
 
 /// For each course a requisite names that was not taken itself but is covered by an equivalent
 /// that was, the equivalent: CS 2100 → CS 2510 for "Completed via CS 2510".
-pub fn covering_equivalents(requisite: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences) -> BTreeMap<CourseKey, CourseKey> {
+pub fn covering_equivalents(
+    requisite: &Requisite,
+    taken: &HashSet<CourseKey>,
+    equivalences: &CourseEquivalences,
+) -> BTreeMap<CourseKey, CourseKey> {
     let mut covering = BTreeMap::new();
     for key in requisite.referenced_courses() {
         if taken.contains(&key) {
@@ -166,7 +229,12 @@ pub fn covering_equivalents(requisite: &Requisite, taken: &HashSet<CourseKey>, e
     covering
 }
 
-pub fn requisite_satisfied(req: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences, assume_tests: bool) -> bool {
+pub fn requisite_satisfied(
+    req: &Requisite,
+    taken: &HashSet<CourseKey>,
+    equivalences: &CourseEquivalences,
+    assume_tests: bool,
+) -> bool {
     let expanded = equivalences.expand(taken);
     req.is_satisfied(&expanded, assume_tests)
 }
@@ -174,11 +242,26 @@ pub fn requisite_satisfied(req: &Requisite, taken: &HashSet<CourseKey>, equivale
 /// Same number and the same title, not special topics, not the same subject.
 /// A cross-list is an exact title match after collapsing whitespace, which is how
 /// `CourseEquivalences(crossListedIn:)` decides two sections are one course.
-pub fn cross_list_equivalent(a_subject: &str, a_number: &str, a_title: &str, a_topics: bool, b_subject: &str, b_number: &str, b_title: &str, b_topics: bool) -> bool {
+pub fn cross_list_equivalent(
+    a_subject: &str,
+    a_number: &str,
+    a_title: &str,
+    a_topics: bool,
+    b_subject: &str,
+    b_number: &str,
+    b_title: &str,
+    b_topics: bool,
+) -> bool {
     if a_topics || b_topics || a_number != b_number || a_subject == b_subject {
         return false;
     }
-    let norm = |title: &str| title.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let norm = |title: &str| {
+        title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase()
+    };
     let (a, b) = (norm(a_title), norm(b_title));
     !a.is_empty() && a == b
 }
@@ -196,21 +279,44 @@ impl CourseEquivalences {
                 continue;
             }
             let key = section.course_key();
-            if index.course(&key).is_some_and(|course| course.special_topics) {
+            if index
+                .course(&key)
+                .is_some_and(|course| course.special_topics)
+            {
                 continue;
             }
             for crn in &section.cross_list_crns {
-                let Some(other) = index.section_crn(crn) else { continue };
+                let Some(other) = index.section_crn(crn) else {
+                    continue;
+                };
                 let other_key = other.course_key();
                 if other_key.number != key.number || other_key.subject == key.subject {
                     continue;
                 }
-                if index.course(&other_key).is_some_and(|course| course.special_topics) {
+                if index
+                    .course(&other_key)
+                    .is_some_and(|course| course.special_topics)
+                {
                     continue;
                 }
-                let title = index.course(&key).map(|c| c.title.as_str()).unwrap_or(section.title.as_str());
-                let other_title = index.course(&other_key).map(|c| c.title.as_str()).unwrap_or(other.title.as_str());
-                if cross_list_equivalent(&key.subject, &key.number, title, false, &other_key.subject, &other_key.number, other_title, false) {
+                let title = index
+                    .course(&key)
+                    .map(|c| c.title.as_str())
+                    .unwrap_or(section.title.as_str());
+                let other_title = index
+                    .course(&other_key)
+                    .map(|c| c.title.as_str())
+                    .unwrap_or(other.title.as_str());
+                if cross_list_equivalent(
+                    &key.subject,
+                    &key.number,
+                    title,
+                    false,
+                    &other_key.subject,
+                    &other_key.number,
+                    other_title,
+                    false,
+                ) {
                     pairs.push((key.clone(), other_key));
                 }
             }

@@ -11,9 +11,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - name: System libraries
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config xvfb
+      - name: Format
+        run: cargo fmt --all -- --check
       - name: Tests
         run: cargo test --workspace
       - name: Clippy

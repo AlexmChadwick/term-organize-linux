@@ -20,7 +20,13 @@ impl ScheduleSlotMask {
         Self::default()
     }
     pub fn from_section(section: &CourseSection) -> Self {
-        Self::from_meetings(&section.weekly_meetings().into_iter().cloned().collect::<Vec<_>>())
+        Self::from_meetings(
+            &section
+                .weekly_meetings()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     }
     pub fn from_meetings(meetings: &[Meeting]) -> Self {
         let mut mask = Self::new();
@@ -30,7 +36,9 @@ impl ScheduleSlotMask {
         mask
     }
     pub fn insert(&mut self, meeting: &Meeting) {
-        let (Some(start), Some(end)) = (meeting.start, meeting.end) else { return };
+        let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+            return;
+        };
         for day in meeting.days.indices() {
             self.insert_span(day, start, end);
         }
@@ -40,7 +48,8 @@ impl ScheduleSlotMask {
             return;
         }
         let first = (start / MINUTES_PER_SLOT).max(0);
-        let last = (SLOTS_PER_DAY).min(((end + MINUTES_PER_SLOT - 1) / MINUTES_PER_SLOT).max(first + 1));
+        let last =
+            (SLOTS_PER_DAY).min(((end + MINUTES_PER_SLOT - 1) / MINUTES_PER_SLOT).max(first + 1));
         if first >= last {
             return;
         }
@@ -112,8 +121,22 @@ pub enum FilterReason {
 
 impl FilterReason {
     pub const ALL: [FilterReason; 16] = [
-        Self::ExcludedByUser, Self::StartsTooEarly, Self::EndsTooLate, Self::FreeDay, Self::Honors, Self::Online, Self::Seats, Self::Campus,
-        Self::BlockedTime, Self::PrefStartsTooEarly, Self::PrefEndsTooLate, Self::PrefDayOff, Self::PrefFormat, Self::PrefSeats, Self::PrefCampus, Self::PrefWorkload,
+        Self::ExcludedByUser,
+        Self::StartsTooEarly,
+        Self::EndsTooLate,
+        Self::FreeDay,
+        Self::Honors,
+        Self::Online,
+        Self::Seats,
+        Self::Campus,
+        Self::BlockedTime,
+        Self::PrefStartsTooEarly,
+        Self::PrefEndsTooLate,
+        Self::PrefDayOff,
+        Self::PrefFormat,
+        Self::PrefSeats,
+        Self::PrefCampus,
+        Self::PrefWorkload,
     ];
     pub fn bit(self) -> u32 {
         1 << (self as u32)
@@ -134,7 +157,14 @@ impl ScheduleCourseInput {
     pub fn new(key: CourseKey, required: bool, sections: Vec<CourseSection>) -> Self {
         let credits = sections.first().map(|s| s.course_key()).map(|_| 0);
         let _ = credits;
-        Self { key, is_required: required, sections, excluded_crns: HashSet::new(), min_credits: 0, max_credits: 0 }
+        Self {
+            key,
+            is_required: required,
+            sections,
+            excluded_crns: HashSet::new(),
+            min_credits: 0,
+            max_credits: 0,
+        }
     }
 }
 
@@ -198,22 +228,61 @@ impl GeneratedSchedule {
             sections.to_vec(),
             raw.campus_days,
             raw.class_days,
-            if raw.earliest == i32::MAX { None } else { Some(raw.earliest) },
-            if raw.class_days == 0 { None } else { Some(raw.latest) },
+            if raw.earliest == i32::MAX {
+                None
+            } else {
+                Some(raw.earliest)
+            },
+            if raw.class_days == 0 {
+                None
+            } else {
+                Some(raw.latest)
+            },
             raw.gap_minutes,
             seats_floor,
             total_seats,
             full,
             weights.score(&raw, full, seats_floor) + points,
-            if preferences.is_default() { vec![] } else { reasons_for(sections, preferences) },
+            if preferences.is_default() {
+                vec![]
+            } else {
+                reasons_for(sections, preferences)
+            },
         )
     }
-    fn assemble(sections: Vec<CourseSection>, days_on_campus: i32, class_days: i32, earliest_start: Option<i32>, latest_end: Option<i32>, total_gap_minutes: i32, min_seats: i32, total_seats: i32, full_sections: i32, score: f64, reasons: Vec<ScheduleReason>) -> Self {
+    fn assemble(
+        sections: Vec<CourseSection>,
+        days_on_campus: i32,
+        class_days: i32,
+        earliest_start: Option<i32>,
+        latest_end: Option<i32>,
+        total_gap_minutes: i32,
+        min_seats: i32,
+        total_seats: i32,
+        full_sections: i32,
+        score: f64,
+        reasons: Vec<ScheduleReason>,
+    ) -> Self {
         let crns: Vec<String> = sections.iter().map(|s| s.crn.clone()).collect();
         let mut sorted_crns = crns.clone();
         sorted_crns.sort();
         let id = sorted_crns.join("-");
-        Self { crns, sections, days_on_campus, class_days, earliest_start, latest_end, total_gap_minutes, min_seats, total_seats, full_sections, score, reasons, sorted_crns, id }
+        Self {
+            crns,
+            sections,
+            days_on_campus,
+            class_days,
+            earliest_start,
+            latest_end,
+            total_gap_minutes,
+            min_seats,
+            total_seats,
+            full_sections,
+            score,
+            reasons,
+            sorted_crns,
+            id,
+        }
     }
 }
 
@@ -267,7 +336,10 @@ impl ScheduleDiagnostics {
         self.courses.is_empty()
     }
     pub fn blocked_required(&self) -> Vec<&CourseReport> {
-        self.courses.iter().filter(|c| c.is_required && c.is_blocked()).collect()
+        self.courses
+            .iter()
+            .filter(|c| c.is_required && c.is_blocked())
+            .collect()
     }
 }
 
@@ -300,17 +372,41 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_results: 5_000, max_exhaustive_leaves: 2_500_000, max_nodes: 12_000_000, time_budget: 0.9, sample_leaves: 150_000, sample_time_budget: 0.35, allow_sampling: true }
+        Self {
+            max_results: 5_000,
+            max_exhaustive_leaves: 2_500_000,
+            max_nodes: 12_000_000,
+            time_budget: 0.9,
+            sample_leaves: 150_000,
+            sample_time_budget: 0.35,
+            allow_sampling: true,
+        }
     }
 }
 
 impl Limits {
     pub fn probe() -> Self {
-        Self { max_results: 1, max_exhaustive_leaves: 300, max_nodes: 300_000, time_budget: 0.25, sample_leaves: 0, sample_time_budget: 0.0, allow_sampling: false }
+        Self {
+            max_results: 1,
+            max_exhaustive_leaves: 300,
+            max_nodes: 300_000,
+            time_budget: 0.25,
+            sample_leaves: 0,
+            sample_time_budget: 0.0,
+            allow_sampling: false,
+        }
     }
     /// Cheap existence checks: a thousand leaves is proof enough, and sampling stays off.
     pub fn blocker_probe() -> Self {
-        Self { max_results: 1, max_exhaustive_leaves: 1_000, max_nodes: 250_000, time_budget: 0.15, sample_leaves: 0, sample_time_budget: 0.0, allow_sampling: false }
+        Self {
+            max_results: 1,
+            max_exhaustive_leaves: 1_000,
+            max_nodes: 250_000,
+            time_budget: 0.15,
+            sample_leaves: 0,
+            sample_time_budget: 0.0,
+            allow_sampling: false,
+        }
     }
 }
 
@@ -335,7 +431,9 @@ impl PreferenceRelaxation {
             Self::SoftenEarliestStart => "Allow earlier classes if needed".into(),
             Self::SoftenLatestEnd => "Allow later classes if needed".into(),
             Self::SoftenDaysOff => "Allow classes on your days off if needed".into(),
-            Self::SoftenBlockedTime { label, .. } => format!("Allow classes during “{label}” if needed"),
+            Self::SoftenBlockedTime { label, .. } => {
+                format!("Allow classes during “{label}” if needed")
+            }
             Self::SoftenFormat => "Allow other formats if needed".into(),
             Self::SoftenCampus => "Allow other campuses if needed".into(),
             Self::AllowFullSections => "Include full sections".into(),
@@ -374,10 +472,16 @@ impl PreferenceRelaxation {
     }
     pub fn available(p: &SchedulePreferences) -> Vec<Self> {
         let mut result = vec![];
-        if p.earliest_start.as_ref().is_some_and(|l| l.strength == PreferenceStrength::Required) {
+        if p.earliest_start
+            .as_ref()
+            .is_some_and(|l| l.strength == PreferenceStrength::Required)
+        {
             result.push(Self::SoftenEarliestStart);
         }
-        if p.latest_end.as_ref().is_some_and(|l| l.strength == PreferenceStrength::Required) {
+        if p.latest_end
+            .as_ref()
+            .is_some_and(|l| l.strength == PreferenceStrength::Required)
+        {
             result.push(Self::SoftenLatestEnd);
         }
         if !p.days_off.is_empty() && p.days_off_strength == PreferenceStrength::Required {
@@ -385,10 +489,15 @@ impl PreferenceRelaxation {
         }
         for block in p.active_blocked_times() {
             if block.strength == PreferenceStrength::Required {
-                result.push(Self::SoftenBlockedTime { id: block.id, label: block.label.clone() });
+                result.push(Self::SoftenBlockedTime {
+                    id: block.id,
+                    label: block.label.clone(),
+                });
             }
         }
-        if p.format != FormatPreference::NoPreference && p.format_strength == PreferenceStrength::Required {
+        if p.format != FormatPreference::NoPreference
+            && p.format_strength == PreferenceStrength::Required
+        {
             result.push(Self::SoftenFormat);
         }
         if p.campus.is_some() && p.campus_strength == PreferenceStrength::Required {
@@ -403,7 +512,9 @@ impl PreferenceRelaxation {
         if p.max_minutes_per_day.is_some() {
             result.push(Self::ClearMaxMinutesPerDay);
         }
-        if p.breaks == BreakPreference::AtLeast && p.minimum_break_strength == PreferenceStrength::Required {
+        if p.breaks == BreakPreference::AtLeast
+            && p.minimum_break_strength == PreferenceStrength::Required
+        {
             result.push(Self::SoftenMinimumBreak);
         }
         if p.credit_target.is_some() {
@@ -488,7 +599,9 @@ struct BuildingTable {
 
 impl BuildingTable {
     fn id_for(&mut self, meeting: &Meeting) -> u16 {
-        let Some(code) = meeting.building_code.as_ref().or(meeting.building.as_ref()) else { return 0 };
+        let Some(code) = meeting.building_code.as_ref().or(meeting.building.as_ref()) else {
+            return 0;
+        };
         if code.is_empty() {
             return 0;
         }
@@ -505,11 +618,23 @@ fn intervals_for(section: &CourseSection, buildings: &mut BuildingTable) -> Vec<
     let mut result = vec![];
     let mut seen = HashSet::new();
     for meeting in section.weekly_meetings() {
-        let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
+        let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+            continue;
+        };
         let in_person = !(section.is_online() || meeting.is_online());
-        let place = if in_person { buildings.id_for(meeting) } else { 0 };
+        let place = if in_person {
+            buildings.id_for(meeting)
+        } else {
+            0
+        };
         for day in meeting.days.indices() {
-            let interval = Interval { day: day as u8, in_person, start, end, building: place };
+            let interval = Interval {
+                day: day as u8,
+                in_person,
+                start,
+                end,
+                building: place,
+            };
             if seen.insert(interval) {
                 result.push(interval);
             }
@@ -542,7 +667,19 @@ pub struct Measure {
 
 impl Default for Measure {
     fn default() -> Self {
-        Self { class_days: 0, campus_days: 0, earliest: i32::MAX, latest: i32::MIN, gap_minutes: 0, class_day_mask: 0, max_day_minutes: 0, total_minutes: 0, back_to_back: 0, tight_transitions: 0, lunch_misses: 0 }
+        Self {
+            class_days: 0,
+            campus_days: 0,
+            earliest: i32::MAX,
+            latest: i32::MIN,
+            gap_minutes: 0,
+            class_day_mask: 0,
+            max_day_minutes: 0,
+            total_minutes: 0,
+            back_to_back: 0,
+            tight_transitions: 0,
+            lunch_misses: 0,
+        }
     }
 }
 
@@ -579,7 +716,14 @@ pub(crate) fn measure(intervals: &[Interval], options: &MeasureOptions) -> Measu
                 if options.back_to_back_below > 0 && gap < options.back_to_back_below {
                     result.back_to_back += 1;
                 }
-                if options.travel_minutes > 0 && gap < options.travel_minutes && previous.in_person && current.in_person && (previous.building == 0 || current.building == 0 || previous.building != current.building) {
+                if options.travel_minutes > 0
+                    && gap < options.travel_minutes
+                    && previous.in_person
+                    && current.in_person
+                    && (previous.building == 0
+                        || current.building == 0
+                        || previous.building != current.building)
+                {
                     result.tight_transitions += 1;
                 }
             }
@@ -644,7 +788,22 @@ pub struct Weights {
 
 impl Default for Weights {
     fn default() -> Self {
-        Self { base: 100.0, per_campus_day: 8.0, per_online_day: 2.0, gap_divisor: 10.0, comfort_hours: true, per_full_section: 6.0, low_seats_penalty: 2.0, per_class_day_bonus: 0.0, per_imbalance_minute: 0.0, per_day_off_missed: 0.0, days_off: DaySet(0), per_back_to_back: 0.0, per_tight_transition: 0.0, per_lunch_miss: 0.0 }
+        Self {
+            base: 100.0,
+            per_campus_day: 8.0,
+            per_online_day: 2.0,
+            gap_divisor: 10.0,
+            comfort_hours: true,
+            per_full_section: 6.0,
+            low_seats_penalty: 2.0,
+            per_class_day_bonus: 0.0,
+            per_imbalance_minute: 0.0,
+            per_day_off_missed: 0.0,
+            days_off: DaySet(0),
+            per_back_to_back: 0.0,
+            per_tight_transition: 0.0,
+            per_lunch_miss: 0.0,
+        }
     }
 }
 
@@ -719,7 +878,8 @@ impl Weights {
             score -= self.per_imbalance_minute * (m.max_day_minutes as f64 - average).max(0.0);
         }
         if self.per_day_off_missed != 0.0 {
-            score -= self.per_day_off_missed * (m.class_day_mask & self.days_off.0).count_ones() as f64;
+            score -=
+                self.per_day_off_missed * (m.class_day_mask & self.days_off.0).count_ones() as f64;
         }
         if self.per_back_to_back != 0.0 {
             score -= self.per_back_to_back * m.back_to_back as f64;
@@ -767,14 +927,22 @@ pub fn has_no_campus(section: &CourseSection) -> bool {
     section.campus.to_ascii_lowercase().contains("no campus")
 }
 
-pub fn rejection_reasons(section: &CourseSection, filters: &ScheduleFilters, preferences: &SchedulePreferences, excluded: &HashSet<String>) -> u32 {
+pub fn rejection_reasons(
+    section: &CourseSection,
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    excluded: &HashSet<String>,
+) -> u32 {
     let mut reasons = 0u32;
     if excluded.contains(&section.crn) {
         reasons |= FilterReason::ExcludedByUser.bit();
     }
     let weekly = section.weekly_meetings();
     if let Some(earliest) = filters.earliest_start {
-        if weekly.iter().any(|m| m.start.unwrap_or(i32::MAX) < earliest) {
+        if weekly
+            .iter()
+            .any(|m| m.start.unwrap_or(i32::MAX) < earliest)
+        {
             reasons |= FilterReason::StartsTooEarly.bit();
         }
     }
@@ -783,7 +951,11 @@ pub fn rejection_reasons(section: &CourseSection, filters: &ScheduleFilters, pre
             reasons |= FilterReason::EndsTooLate.bit();
         }
     }
-    if !filters.free_days.is_empty() && weekly.iter().any(|m| !m.days.is_disjoint(filters.free_days)) {
+    if !filters.free_days.is_empty()
+        && weekly
+            .iter()
+            .any(|m| !m.days.is_disjoint(filters.free_days))
+    {
         reasons |= FilterReason::FreeDay.bit();
     }
     if !filters.include_honors && section.honors {
@@ -813,29 +985,51 @@ fn preference_rejections(section: &CourseSection, p: &SchedulePreferences) -> u3
     let mut reasons = 0u32;
     let weekly = section.weekly_meetings();
     if let Some(limit) = &p.earliest_start {
-        if limit.strength == PreferenceStrength::Required && weekly.iter().any(|m| m.start.unwrap_or(i32::MAX) < limit.minutes) {
+        if limit.strength == PreferenceStrength::Required
+            && weekly
+                .iter()
+                .any(|m| m.start.unwrap_or(i32::MAX) < limit.minutes)
+        {
             reasons |= FilterReason::PrefStartsTooEarly.bit();
         }
     }
     if let Some(limit) = &p.latest_end {
-        if limit.strength == PreferenceStrength::Required && weekly.iter().any(|m| m.end.unwrap_or(0) > limit.minutes) {
+        if limit.strength == PreferenceStrength::Required
+            && weekly.iter().any(|m| m.end.unwrap_or(0) > limit.minutes)
+        {
             reasons |= FilterReason::PrefEndsTooLate.bit();
         }
     }
-    if p.days_off_strength == PreferenceStrength::Required && !p.days_off.is_empty() && weekly.iter().any(|m| !m.days.is_disjoint(p.days_off)) {
+    if p.days_off_strength == PreferenceStrength::Required
+        && !p.days_off.is_empty()
+        && weekly.iter().any(|m| !m.days.is_disjoint(p.days_off))
+    {
         reasons |= FilterReason::PrefDayOff.bit();
     }
     for block in p.active_blocked_times() {
-        if block.strength == PreferenceStrength::Required && weekly.iter().any(|m| m.start.zip(m.end).is_some_and(|(s, e)| block.overlaps(m.days, s, e))) {
+        if block.strength == PreferenceStrength::Required
+            && weekly.iter().any(|m| {
+                m.start
+                    .zip(m.end)
+                    .is_some_and(|(s, e)| block.overlaps(m.days, s, e))
+            })
+        {
             reasons |= FilterReason::BlockedTime.bit();
             break;
         }
     }
-    if p.format != FormatPreference::NoPreference && p.format_strength == PreferenceStrength::Required && SchedulePreferences::format_of(section).mismatch(p.format) > 0.0 {
+    if p.format != FormatPreference::NoPreference
+        && p.format_strength == PreferenceStrength::Required
+        && SchedulePreferences::format_of(section).mismatch(p.format) > 0.0
+    {
         reasons |= FilterReason::PrefFormat.bit();
     }
     if let Some(campus) = &p.campus {
-        if p.campus_strength == PreferenceStrength::Required && !section.is_online() && !has_no_campus(section) && &section.campus != campus {
+        if p.campus_strength == PreferenceStrength::Required
+            && !section.is_online()
+            && !has_no_campus(section)
+            && &section.campus != campus
+        {
             reasons |= FilterReason::PrefCampus.bit();
         }
     }
@@ -864,22 +1058,43 @@ fn preference_rejections(section: &CourseSection, p: &SchedulePreferences) -> u3
     reasons
 }
 
-pub fn too_close(a: &CourseSection, a_meetings: &[Meeting], b: &CourseSection, b_meetings: &[Meeting], minutes: i32) -> bool {
+pub fn too_close(
+    a: &CourseSection,
+    a_meetings: &[Meeting],
+    b: &CourseSection,
+    b_meetings: &[Meeting],
+    minutes: i32,
+) -> bool {
     if minutes <= 0 || a.is_online() || b.is_online() {
         return false;
     }
     for x in a_meetings.iter().filter(|m| !m.is_online()) {
-        let (Some(xs), Some(xe)) = (x.start, x.end) else { continue };
+        let (Some(xs), Some(xe)) = (x.start, x.end) else {
+            continue;
+        };
         for y in b_meetings.iter().filter(|m| !m.is_online()) {
-            let (Some(ys), Some(ye)) = (y.start, y.end) else { continue };
+            let (Some(ys), Some(ye)) = (y.start, y.end) else {
+                continue;
+            };
             if x.days.is_disjoint(y.days) {
                 continue;
             }
-            let gap = if ys >= xe { ys - xe } else if xs >= ye { xs - ye } else { -1 };
+            let gap = if ys >= xe {
+                ys - xe
+            } else if xs >= ye {
+                xs - ye
+            } else {
+                -1
+            };
             if gap < 0 || gap >= minutes {
                 continue;
             }
-            if !date_windows_overlap(x.start_date.as_deref(), x.end_date.as_deref(), y.start_date.as_deref(), y.end_date.as_deref()) {
+            if !date_windows_overlap(
+                x.start_date.as_deref(),
+                x.end_date.as_deref(),
+                y.start_date.as_deref(),
+                y.end_date.as_deref(),
+            ) {
                 continue;
             }
             let bx = x.building_code.as_ref().or(x.building.as_ref());
@@ -906,7 +1121,11 @@ fn section_score(section: &CourseSection, intervals: &[Interval], p: &SchedulePr
                 if minutes <= 0 {
                     continue;
                 }
-                let per_hour = if preference == TimePreference::Prefer { PREFERRED_BAND_PER_HOUR } else { AVOIDED_BAND_PER_HOUR };
+                let per_hour = if preference == TimePreference::Prefer {
+                    PREFERRED_BAND_PER_HOUR
+                } else {
+                    AVOIDED_BAND_PER_HOUR
+                };
                 score += per_hour * minutes as f64 / 60.0;
             }
         }
@@ -934,7 +1153,11 @@ fn section_score(section: &CourseSection, intervals: &[Interval], p: &SchedulePr
             continue;
         }
         for interval in intervals {
-            if block.overlaps(DaySet::from_indices([interval.day as i32]), interval.start, interval.end) {
+            if block.overlaps(
+                DaySet::from_indices([interval.day as i32]),
+                interval.start,
+                interval.end,
+            ) {
                 score -= SOFT_BLOCKED;
             }
         }
@@ -943,17 +1166,31 @@ fn section_score(section: &CourseSection, intervals: &[Interval], p: &SchedulePr
         score -= FORMAT_MISMATCH * SchedulePreferences::format_of(section).mismatch(p.format);
     }
     if let Some(campus) = &p.campus {
-        if p.campus_strength == PreferenceStrength::Preferred && !section.is_online() && !has_no_campus(section) && &section.campus != campus {
+        if p.campus_strength == PreferenceStrength::Preferred
+            && !section.is_online()
+            && !has_no_campus(section)
+            && &section.campus != campus
+        {
             score -= CAMPUS_MISMATCH;
         }
     }
     if !p.preferred_instructors.is_empty() || !p.avoided_instructors.is_empty() {
-        let names: HashSet<String> = section.instructors.as_ref().map(|list| list.iter().map(|i| i.name.to_ascii_lowercase()).collect()).unwrap_or_default();
+        let names: HashSet<String> = section
+            .instructors
+            .as_ref()
+            .map(|list| list.iter().map(|i| i.name.to_ascii_lowercase()).collect())
+            .unwrap_or_default();
         if !names.is_empty() {
-            if p.preferred_instructors.iter().any(|n| names.contains(&n.to_ascii_lowercase())) {
+            if p.preferred_instructors
+                .iter()
+                .any(|n| names.contains(&n.to_ascii_lowercase()))
+            {
                 score += PREFERRED_INSTRUCTOR;
             }
-            if p.avoided_instructors.iter().any(|n| names.contains(&n.to_ascii_lowercase())) {
+            if p.avoided_instructors
+                .iter()
+                .any(|n| names.contains(&n.to_ascii_lowercase()))
+            {
                 score += AVOIDED_INSTRUCTOR;
             }
         }
@@ -969,7 +1206,12 @@ pub fn reasons_for(sections: &[CourseSection], p: &SchedulePreferences) -> Vec<S
     preference_reasons(sections, p, 4, 2)
 }
 
-pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, max_benefits: usize, max_caveats: usize) -> Vec<ScheduleReason> {
+pub fn preference_reasons(
+    sections: &[CourseSection],
+    p: &SchedulePreferences,
+    max_benefits: usize,
+    max_caveats: usize,
+) -> Vec<ScheduleReason> {
     if p.is_default() || sections.is_empty() {
         return vec![];
     }
@@ -990,8 +1232,20 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
     let has_classes = measure.class_days > 0;
     let mut good = vec![];
     let mut bad = vec![];
-    let pro = |good: &mut Vec<ScheduleReason>, text: String, symbol: &str| good.push(ScheduleReason { benefit: true, text, symbol: symbol.into() });
-    let con = |bad: &mut Vec<ScheduleReason>, text: String, symbol: &str| bad.push(ScheduleReason { benefit: false, text, symbol: symbol.into() });
+    let pro = |good: &mut Vec<ScheduleReason>, text: String, symbol: &str| {
+        good.push(ScheduleReason {
+            benefit: true,
+            text,
+            symbol: symbol.into(),
+        })
+    };
+    let con = |bad: &mut Vec<ScheduleReason>, text: String, symbol: &str| {
+        bad.push(ScheduleReason {
+            benefit: false,
+            text,
+            symbol: symbol.into(),
+        })
+    };
     if has_classes && !p.days_off.is_empty() {
         let used = DaySet(measure.class_day_mask & p.days_off.0);
         let free = DaySet(p.days_off.0 & !used.0);
@@ -999,23 +1253,48 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
             pro(&mut good, days_off_phrase(free), "calendar.badge.minus");
         }
         if !used.is_empty() && p.days_off_strength == PreferenceStrength::Preferred {
-            let names = used.indices().into_iter().map(|i| DaySet::SHORT[i as usize]).collect::<Vec<_>>().join(", ");
-            con(&mut bad, format!("Class on {names}"), "calendar.badge.exclamationmark");
+            let names = used
+                .indices()
+                .into_iter()
+                .map(|i| DaySet::SHORT[i as usize])
+                .collect::<Vec<_>>()
+                .join(", ");
+            con(
+                &mut bad,
+                format!("Class on {names}"),
+                "calendar.badge.exclamationmark",
+            );
         }
     }
     if has_classes {
         if let Some(limit) = &p.earliest_start {
             if measure.earliest >= limit.minutes {
-                pro(&mut good, format!("No classes before {}", short_time(limit.minutes)), "sunrise");
+                pro(
+                    &mut good,
+                    format!("No classes before {}", short_time(limit.minutes)),
+                    "sunrise",
+                );
             } else if limit.strength == PreferenceStrength::Preferred {
-                con(&mut bad, format!("Starts {}", label_minutes(measure.earliest, true)), "sunrise");
+                con(
+                    &mut bad,
+                    format!("Starts {}", label_minutes(measure.earliest, true)),
+                    "sunrise",
+                );
             }
         }
         if let Some(limit) = &p.latest_end {
             if measure.latest <= limit.minutes {
-                pro(&mut good, format!("Done by {}", short_time(limit.minutes)), "sunset");
+                pro(
+                    &mut good,
+                    format!("Done by {}", short_time(limit.minutes)),
+                    "sunset",
+                );
             } else if limit.strength == PreferenceStrength::Preferred {
-                con(&mut bad, format!("Ends {}", label_minutes(measure.latest, true)), "sunset");
+                con(
+                    &mut bad,
+                    format!("Ends {}", label_minutes(measure.latest, true)),
+                    "sunset",
+                );
             }
         }
     }
@@ -1023,23 +1302,48 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
         match p.day_layout {
             DayLayout::NoPreference => {}
             DayLayout::FewerDays => {
-                let days = if measure.campus_days > 0 { measure.campus_days } else { measure.class_days };
+                let days = if measure.campus_days > 0 {
+                    measure.campus_days
+                } else {
+                    measure.class_days
+                };
                 if days <= 3 {
-                    pro(&mut good, if days == 1 { "1 day on campus".into() } else { format!("{days} days on campus") }, "calendar");
+                    pro(
+                        &mut good,
+                        if days == 1 {
+                            "1 day on campus".into()
+                        } else {
+                            format!("{days} days on campus")
+                        },
+                        "calendar",
+                    );
                 }
             }
             DayLayout::SpreadOut => {
                 if measure.class_days >= 4 {
-                    pro(&mut good, format!("Spread over {} days", measure.class_days), "calendar");
+                    pro(
+                        &mut good,
+                        format!("Spread over {} days", measure.class_days),
+                        "calendar",
+                    );
                 }
             }
         }
         if p.gaps == GapPreference::Compact && measure.gap_minutes <= 30 {
-            pro(&mut good, "Short gaps".into(), "rectangle.compress.vertical");
+            pro(
+                &mut good,
+                "Short gaps".into(),
+                "rectangle.compress.vertical",
+            );
         }
     }
     if has_classes && measure.total_minutes > 0 {
-        let minutes_in = |bands: &[TimeBand]| intervals.iter().map(|i| bands.iter().map(|b| b.overlap(i.start, i.end)).sum::<i32>()).sum::<i32>();
+        let minutes_in = |bands: &[TimeBand]| {
+            intervals
+                .iter()
+                .map(|i| bands.iter().map(|b| b.overlap(i.start, i.end)).sum::<i32>())
+                .sum::<i32>()
+        };
         let preferred = p.preferred_bands();
         if !preferred.is_empty() {
             let share = minutes_in(&preferred) as f64 / measure.total_minutes as f64;
@@ -1077,12 +1381,24 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
                 if measure.back_to_back == 0 {
                     pro(&mut good, "No back-to-back classes".into(), "figure.walk");
                 } else {
-                    con(&mut bad, if measure.back_to_back == 1 { "1 back-to-back".into() } else { format!("{} back-to-back", measure.back_to_back) }, "figure.walk");
+                    con(
+                        &mut bad,
+                        if measure.back_to_back == 1 {
+                            "1 back-to-back".into()
+                        } else {
+                            format!("{} back-to-back", measure.back_to_back)
+                        },
+                        "figure.walk",
+                    );
                 }
             }
             BreakPreference::AtLeast => {
                 if measure.tight_transitions == 0 {
-                    pro(&mut good, "Time to walk between classes".into(), "figure.walk");
+                    pro(
+                        &mut good,
+                        "Time to walk between classes".into(),
+                        "figure.walk",
+                    );
                 } else {
                     con(&mut bad, "Tight between buildings".into(), "figure.walk");
                 }
@@ -1095,7 +1411,9 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
             let mut result = vec![];
             for section in sections {
                 for instructor in section.instructors.as_ref().into_iter().flatten() {
-                    if set.contains(&instructor.name.to_ascii_lowercase()) && !result.contains(&instructor.display_name()) {
+                    if set.contains(&instructor.name.to_ascii_lowercase())
+                        && !result.contains(&instructor.display_name())
+                    {
                         result.push(instructor.display_name());
                     }
                 }
@@ -1106,31 +1424,68 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
         if liked.len() == 1 {
             pro(&mut good, format!("With {}", liked[0]), "person.fill");
         } else if liked.len() > 1 {
-            pro(&mut good, format!("With {} preferred instructors", liked.len()), "person.2.fill");
+            pro(
+                &mut good,
+                format!("With {} preferred instructors", liked.len()),
+                "person.2.fill",
+            );
         }
         let disliked = names(&p.avoided_instructors);
         if let Some(first) = disliked.first() {
-            con(&mut bad, if disliked.len() == 1 { format!("With {first}") } else { format!("With {} avoided instructors", disliked.len()) }, "person.fill.xmark");
+            con(
+                &mut bad,
+                if disliked.len() == 1 {
+                    format!("With {first}")
+                } else {
+                    format!("With {} avoided instructors", disliked.len())
+                },
+                "person.fill.xmark",
+            );
         }
     }
     if p.format != FormatPreference::NoPreference {
-        let formats: Vec<SectionFormat> = sections.iter().map(SchedulePreferences::format_of).collect();
-        let deliveries: Vec<_> = formats.into_iter().filter(|f| !matches!(f, SectionFormat::Other)).collect();
+        let formats: Vec<SectionFormat> = sections
+            .iter()
+            .map(SchedulePreferences::format_of)
+            .collect();
+        let deliveries: Vec<_> = formats
+            .into_iter()
+            .filter(|f| !matches!(f, SectionFormat::Other))
+            .collect();
         if !deliveries.is_empty() {
             if deliveries.iter().all(|f| f.mismatch(p.format) == 0.0) {
-                pro(&mut good, format!("All {}", p.format.title().to_ascii_lowercase()), if p.format == FormatPreference::Online { "wifi" } else { "building.2" });
+                pro(
+                    &mut good,
+                    format!("All {}", p.format.title().to_ascii_lowercase()),
+                    if p.format == FormatPreference::Online {
+                        "wifi"
+                    } else {
+                        "building.2"
+                    },
+                );
             } else if p.format_strength == PreferenceStrength::Preferred {
-                con(&mut bad, format!("Not all {}", p.format.title().to_ascii_lowercase()), "wifi");
+                con(
+                    &mut bad,
+                    format!("Not all {}", p.format.title().to_ascii_lowercase()),
+                    "wifi",
+                );
             }
         }
     }
     if let Some(campus) = &p.campus {
-        let on_campus: Vec<_> = sections.iter().filter(|s| !s.is_online() && !has_no_campus(s)).collect();
+        let on_campus: Vec<_> = sections
+            .iter()
+            .filter(|s| !s.is_online() && !has_no_campus(s))
+            .collect();
         if !on_campus.is_empty() {
             if on_campus.iter().all(|s| &s.campus == campus) {
                 pro(&mut good, format!("{campus} campus"), "mappin.and.ellipse");
             } else if p.campus_strength == PreferenceStrength::Preferred {
-                con(&mut bad, "Includes another campus".into(), "mappin.and.ellipse");
+                con(
+                    &mut bad,
+                    "Includes another campus".into(),
+                    "mappin.and.ellipse",
+                );
             }
         }
     }
@@ -1142,7 +1497,15 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
             if waitlisted == 0 {
                 pro(&mut good, "All sections open".into(), "chair.lounge");
             } else {
-                con(&mut bad, if waitlisted == 1 { "1 waitlisted section".into() } else { format!("{waitlisted} waitlisted sections") }, "chair.lounge");
+                con(
+                    &mut bad,
+                    if waitlisted == 1 {
+                        "1 waitlisted section".into()
+                    } else {
+                        format!("{waitlisted} waitlisted sections")
+                    },
+                    "chair.lounge",
+                );
             }
         }
     }
@@ -1150,14 +1513,23 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
         if block.strength != PreferenceStrength::Preferred {
             continue;
         }
-        let touches = intervals.iter().any(|i| block.overlaps(DaySet::from_indices([i.day as i32]), i.start, i.end));
+        let touches = intervals
+            .iter()
+            .any(|i| block.overlaps(DaySet::from_indices([i.day as i32]), i.start, i.end));
         if touches {
-            con(&mut bad, format!("Overlaps {}", block.label), "calendar.badge.exclamationmark");
+            con(
+                &mut bad,
+                format!("Overlaps {}", block.label),
+                "calendar.badge.exclamationmark",
+            );
         }
     }
     fn unique(reasons: Vec<ScheduleReason>) -> Vec<ScheduleReason> {
         let mut seen = HashSet::new();
-        reasons.into_iter().filter(|r| seen.insert(r.id())).collect()
+        reasons
+            .into_iter()
+            .filter(|r| seen.insert(r.id()))
+            .collect()
     }
     let mut out = unique(good);
     out.truncate(max_benefits);
@@ -1167,14 +1539,26 @@ pub fn preference_reasons(sections: &[CourseSection], p: &SchedulePreferences, m
     out
 }
 
-pub fn generate(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, sort: ScheduleSort, limits: &Limits) -> GenerationResult {
+pub fn generate(
+    courses: &[ScheduleCourseInput],
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    sort: ScheduleSort,
+    limits: &Limits,
+) -> GenerationResult {
     let started = Instant::now();
     let mut result = run(courses, filters, &preferences.normalized(), sort, limits);
     result.elapsed = started.elapsed().as_secs_f64();
     result
 }
 
-fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, sort: ScheduleSort, limits: &Limits) -> GenerationResult {
+fn run(
+    courses: &[ScheduleCourseInput],
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    sort: ScheduleSort,
+    limits: &Limits,
+) -> GenerationResult {
     let has_preferences = !preferences.is_default();
     let mut kept = vec![];
     let mut reports = vec![];
@@ -1193,16 +1577,45 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
                 }
             }
         }
-        reports.push(CourseReport { key: course.key.clone(), is_required: course.is_required, total_sections: course.sections.len(), remaining_sections: remaining.len(), rejections });
+        reports.push(CourseReport {
+            key: course.key.clone(),
+            is_required: course.is_required,
+            total_sections: course.sections.len(),
+            remaining_sections: remaining.len(),
+            rejections,
+        });
         kept.push(remaining);
     }
-    let mut diagnostics = ScheduleDiagnostics { filters: filters.clone(), preferences: preferences.clone(), courses: reports, conflicting_pairs: vec![], count_problem: None };
-    let mut empty = GenerationResult { schedules: vec![], total_found: 0, is_exhaustive: true, was_cancelled: false, diagnostics: diagnostics.clone(), elapsed: 0.0 };
+    let mut diagnostics = ScheduleDiagnostics {
+        filters: filters.clone(),
+        preferences: preferences.clone(),
+        courses: reports,
+        conflicting_pairs: vec![],
+        count_problem: None,
+    };
+    let mut empty = GenerationResult {
+        schedules: vec![],
+        total_found: 0,
+        is_exhaustive: true,
+        was_cancelled: false,
+        diagnostics: diagnostics.clone(),
+        elapsed: 0.0,
+    };
     if courses.is_empty() {
         return empty;
     }
-    let required: Vec<usize> = courses.iter().enumerate().filter(|(_, c)| c.is_required).map(|(i, _)| i).collect();
-    let optional: Vec<usize> = courses.iter().enumerate().filter(|(i, c)| !c.is_required && !kept[*i].is_empty()).map(|(i, _)| i).collect();
+    let required: Vec<usize> = courses
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_required)
+        .map(|(i, _)| i)
+        .collect();
+    let optional: Vec<usize> = courses
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| !c.is_required && !kept[*i].is_empty())
+        .map(|(i, _)| i)
+        .collect();
     if required.iter().any(|i| kept[*i].is_empty()) {
         empty.diagnostics = diagnostics;
         return empty;
@@ -1210,27 +1623,46 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
     let target = filters.course_count.filter(|n| *n > 0);
     if let Some(target) = target {
         if required.len() as i32 > target {
-            diagnostics.count_problem = Some(CountProblem::TooManyRequired { required: required.len() as i32, wanted: target });
+            diagnostics.count_problem = Some(CountProblem::TooManyRequired {
+                required: required.len() as i32,
+                wanted: target,
+            });
             empty.diagnostics = diagnostics;
             return empty;
         }
         if ((required.len() + optional.len()) as i32) < target {
-            diagnostics.count_problem = Some(CountProblem::TooFewCourses { available: (required.len() + optional.len()) as i32, wanted: target });
+            diagnostics.count_problem = Some(CountProblem::TooFewCourses {
+                available: (required.len() + optional.len()) as i32,
+                wanted: target,
+            });
             empty.diagnostics = diagnostics;
             return empty;
         }
     }
-    let credit_window = preferences.credit_target.as_ref().map(|t| (t.lower, t.upper));
+    let credit_window = preferences
+        .credit_target
+        .as_ref()
+        .map(|t| (t.lower, t.upper));
     if let Some((lower, upper)) = credit_window {
         let required_credits: i32 = required.iter().map(|i| courses[*i].min_credits).sum();
         if required_credits > upper {
-            diagnostics.count_problem = Some(CountProblem::CreditsOverTarget { required: required_credits, limit: upper });
+            diagnostics.count_problem = Some(CountProblem::CreditsOverTarget {
+                required: required_credits,
+                limit: upper,
+            });
             empty.diagnostics = diagnostics;
             return empty;
         }
-        let available: i32 = required.iter().chain(optional.iter()).map(|i| courses[*i].max_credits).sum();
+        let available: i32 = required
+            .iter()
+            .chain(optional.iter())
+            .map(|i| courses[*i].max_credits)
+            .sum();
         if available < lower {
-            diagnostics.count_problem = Some(CountProblem::CreditsUnderTarget { available, wanted: lower });
+            diagnostics.count_problem = Some(CountProblem::CreditsUnderTarget {
+                available,
+                wanted: lower,
+            });
             empty.diagnostics = diagnostics;
             return empty;
         }
@@ -1262,11 +1694,19 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
         let mut candidates = vec![];
         for (offset, section) in kept[*course_index].iter().enumerate() {
             let own = intervals_for(section, &mut buildings);
-            let score = if has_preferences { section_score(section, &own, preferences) } else { 0.0 };
+            let score = if has_preferences {
+                section_score(section, &own, preferences)
+            } else {
+                0.0
+            };
             candidates.push((offset, section, own, score));
         }
         if has_preferences {
-            candidates.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+            candidates.sort_by(|a, b| {
+                b.3.partial_cmp(&a.3)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.0.cmp(&b.0))
+            });
         }
         for (_, section, own, score) in candidates {
             sections.push(section.clone());
@@ -1285,12 +1725,27 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
             intervals.extend(own);
             points.push(score);
         }
-        slots.push(Slot { course_index: *course_index, is_required: courses[*course_index].is_required, start: first, size: sections.len() - first });
+        slots.push(Slot {
+            course_index: *course_index,
+            is_required: courses[*course_index].is_required,
+            start: first,
+            size: sections.len() - first,
+        });
         slot_min.push(courses[*course_index].min_credits);
-        slot_max.push(courses[*course_index].min_credits.max(courses[*course_index].max_credits));
+        slot_max.push(
+            courses[*course_index]
+                .min_credits
+                .max(courses[*course_index].max_credits),
+        );
     }
     interval_start.push(intervals.len());
-    let travel = if preferences.breaks == BreakPreference::AtLeast && preferences.minimum_break_strength == PreferenceStrength::Required { preferences.minimum_break_minutes } else { 0 };
+    let travel = if preferences.breaks == BreakPreference::AtLeast
+        && preferences.minimum_break_strength == PreferenceStrength::Required
+    {
+        preferences.minimum_break_minutes
+    } else {
+        0
+    };
     let rules = SearchRules {
         max_classes: preferences.max_classes_per_day.unwrap_or(i32::MAX),
         max_minutes: preferences.max_minutes_per_day.unwrap_or(i32::MAX),
@@ -1305,9 +1760,23 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
     let options = measure_options(preferences);
     let seed = fnv_seed(&sections);
     let mut search = Search::new(slots, masks, weekly, sections, rules, target, limits, seed);
-    search.run_exhaustive(&intervals, &interval_start, &points, &weights, &options, sort);
+    search.run_exhaustive(
+        &intervals,
+        &interval_start,
+        &points,
+        &weights,
+        &options,
+        sort,
+    );
     if search.hit_limit && limits.allow_sampling && limits.sample_leaves > 0 {
-        search.run_sampled(&intervals, &interval_start, &points, &weights, &options, sort);
+        search.run_sampled(
+            &intervals,
+            &interval_start,
+            &points,
+            &weights,
+            &options,
+            sort,
+        );
     }
     let exhaustive = !search.hit_limit;
     let total = search.leaf_count;
@@ -1320,7 +1789,14 @@ fn run(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: 
         return empty;
     }
     let schedules = search.materialize(has_preferences, preferences);
-    GenerationResult { schedules, total_found: total, is_exhaustive: exhaustive, was_cancelled: false, diagnostics, elapsed: 0.0 }
+    GenerationResult {
+        schedules,
+        total_found: total,
+        is_exhaustive: exhaustive,
+        was_cancelled: false,
+        diagnostics,
+        elapsed: 0.0,
+    }
 }
 
 struct Slot {
@@ -1374,7 +1850,16 @@ struct Search {
 }
 
 impl Search {
-    fn new(slots: Vec<Slot>, masks: Vec<ScheduleSlotMask>, weekly: Vec<Vec<Meeting>>, sections: Vec<CourseSection>, rules: SearchRules, target: Option<i32>, limits: &Limits, seed: u64) -> Self {
+    fn new(
+        slots: Vec<Slot>,
+        masks: Vec<ScheduleSlotMask>,
+        weekly: Vec<Vec<Meeting>>,
+        sections: Vec<CourseSection>,
+        rules: SearchRules,
+        target: Option<i32>,
+        limits: &Limits,
+        seed: u64,
+    ) -> Self {
         let slot_count = slots.len();
         let mut compat = vec![vec![Vec::new(); slot_count]; masks.len()];
         let mut slot_of = vec![0usize; masks.len()];
@@ -1395,7 +1880,15 @@ impl Search {
                     if masks[g].conflicts(masks[h]) && meetings_conflict(&weekly[g], &weekly[h]) {
                         continue;
                     }
-                    if rules.travel > 0 && too_close(&sections[g], &weekly[g], &sections[h], &weekly[h], rules.travel) {
+                    if rules.travel > 0
+                        && too_close(
+                            &sections[g],
+                            &weekly[g],
+                            &sections[h],
+                            &weekly[h],
+                            rules.travel,
+                        )
+                    {
                         continue;
                     }
                     bits[j / 64] |= 1u64 << (j % 64);
@@ -1403,7 +1896,22 @@ impl Search {
                 compat[g][s] = bits;
             }
         }
-        Self { slots, masks, weekly, sections, compat, rules, target, limits: limits.clone(), seed, sort: ScheduleSort::Best, leaf_count: 0, hit_limit: false, collector: vec![], seq: 0 }
+        Self {
+            slots,
+            masks,
+            weekly,
+            sections,
+            compat,
+            rules,
+            target,
+            limits: limits.clone(),
+            seed,
+            sort: ScheduleSort::Best,
+            leaf_count: 0,
+            hit_limit: false,
+            collector: vec![],
+            seq: 0,
+        }
     }
 
     fn conflicting_pairs(&self, courses: &[ScheduleCourseInput]) -> Vec<ConflictPair> {
@@ -1414,8 +1922,16 @@ impl Search {
                     continue;
                 }
                 if !self.has_compatible(a, b) {
-                    let reason = if self.rules.travel > 0 && self.has_overlap_free(a, b) { ConflictReason::TravelTime } else { ConflictReason::Overlap };
-                    pairs.push(ConflictPair { first: courses[self.slots[a].course_index].key.clone(), second: courses[self.slots[b].course_index].key.clone(), reason });
+                    let reason = if self.rules.travel > 0 && self.has_overlap_free(a, b) {
+                        ConflictReason::TravelTime
+                    } else {
+                        ConflictReason::Overlap
+                    };
+                    pairs.push(ConflictPair {
+                        first: courses[self.slots[a].course_index].key.clone(),
+                        second: courses[self.slots[b].course_index].key.clone(),
+                        reason,
+                    });
                 }
             }
         }
@@ -1440,7 +1956,9 @@ impl Search {
             for j in 0..self.slots[b].size {
                 let g = self.slots[a].start + i;
                 let h = self.slots[b].start + j;
-                if !(self.masks[g].conflicts(self.masks[h]) && meetings_conflict(&self.weekly[g], &self.weekly[h])) {
+                if !(self.masks[g].conflicts(self.masks[h])
+                    && meetings_conflict(&self.weekly[g], &self.weekly[h]))
+                {
                     return true;
                 }
             }
@@ -1448,13 +1966,22 @@ impl Search {
         false
     }
 
-    fn run_exhaustive(&mut self, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort) {
+    fn run_exhaustive(
+        &mut self,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+    ) {
         self.sort = sort;
         self.leaf_count = 0;
         self.hit_limit = false;
         self.collector.clear();
         let domain = self.full_domain();
-        let deadline = Instant::now() + std::time::Duration::from_secs_f64(self.limits.time_budget.max(0.05));
+        let deadline =
+            Instant::now() + std::time::Duration::from_secs_f64(self.limits.time_budget.max(0.05));
         let mut ctx = Walk {
             picks: vec![-1; self.slots.len()],
             chosen: 0,
@@ -1465,42 +1992,118 @@ impl Search {
             credits_max: 0,
             aborted: false,
         };
-        self.descend(0, &domain, &mut ctx, false, self.limits.max_exhaustive_leaves, deadline, intervals, interval_start, points, weights, options, sort, &mut SplitMix::new(self.seed));
+        self.descend(
+            0,
+            &domain,
+            &mut ctx,
+            false,
+            self.limits.max_exhaustive_leaves,
+            deadline,
+            intervals,
+            interval_start,
+            points,
+            weights,
+            options,
+            sort,
+            &mut SplitMix::new(self.seed),
+        );
     }
 
-    fn run_sampled(&mut self, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort) {
+    fn run_sampled(
+        &mut self,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+    ) {
         self.leaf_count = 0;
         let domain = self.full_domain();
-        let deadline = Instant::now() + std::time::Duration::from_secs_f64(self.limits.sample_time_budget.max(0.05));
-        let mut ctx = Walk { picks: vec![-1; self.slots.len()], chosen: 0, nodes: 0, load_classes: [0; 7], load_minutes: [0; 7], credits_min: 0, credits_max: 0, aborted: false };
+        let deadline = Instant::now()
+            + std::time::Duration::from_secs_f64(self.limits.sample_time_budget.max(0.05));
+        let mut ctx = Walk {
+            picks: vec![-1; self.slots.len()],
+            chosen: 0,
+            nodes: 0,
+            load_classes: [0; 7],
+            load_minutes: [0; 7],
+            credits_min: 0,
+            credits_max: 0,
+            aborted: false,
+        };
         let mut rng = SplitMix::new(self.seed);
-        self.descend(0, &domain, &mut ctx, true, self.limits.sample_leaves, deadline, intervals, interval_start, points, weights, options, sort, &mut rng);
+        self.descend(
+            0,
+            &domain,
+            &mut ctx,
+            true,
+            self.limits.sample_leaves,
+            deadline,
+            intervals,
+            interval_start,
+            points,
+            weights,
+            options,
+            sort,
+            &mut rng,
+        );
     }
 
     fn full_domain(&self) -> Vec<Vec<u64>> {
-        self.slots.iter().map(|slot| {
-            let words = (slot.size + 63) / 64;
-            let mut bits = vec![0u64; words.max(1)];
-            for i in 0..slot.size {
-                bits[i / 64] |= 1u64 << (i % 64);
-            }
-            bits
-        }).collect()
+        self.slots
+            .iter()
+            .map(|slot| {
+                let words = (slot.size + 63) / 64;
+                let mut bits = vec![0u64; words.max(1)];
+                for i in 0..slot.size {
+                    bits[i / 64] |= 1u64 << (i % 64);
+                }
+                bits
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn descend(&mut self, depth: usize, domain: &[Vec<u64>], ctx: &mut Walk, sampled: bool, max_leaves: usize, deadline: Instant, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort, rng: &mut SplitMix) {
+    fn descend(
+        &mut self,
+        depth: usize,
+        domain: &[Vec<u64>],
+        ctx: &mut Walk,
+        sampled: bool,
+        max_leaves: usize,
+        deadline: Instant,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+        rng: &mut SplitMix,
+    ) {
         if ctx.aborted {
             return;
         }
         ctx.nodes += 1;
-        if ctx.nodes & 0x3ff == 0 && (ctx.nodes >= self.limits.max_nodes || Instant::now() >= deadline) {
+        if ctx.nodes & 0x3ff == 0
+            && (ctx.nodes >= self.limits.max_nodes || Instant::now() >= deadline)
+        {
             self.hit_limit = true;
             ctx.aborted = true;
             return;
         }
         if depth == self.slots.len() {
-            self.record(depth, domain, ctx, intervals, interval_start, points, weights, options, sort);
+            self.record(
+                depth,
+                domain,
+                ctx,
+                intervals,
+                interval_start,
+                points,
+                weights,
+                options,
+                sort,
+            );
             if self.leaf_count >= max_leaves.max(1) {
                 self.hit_limit = true;
                 ctx.aborted = true;
@@ -1512,7 +2115,17 @@ impl Search {
                 for s in depth..self.slots.len() {
                     ctx.picks[s] = -1;
                 }
-                self.record(depth, domain, ctx, intervals, interval_start, points, weights, options, sort);
+                self.record(
+                    depth,
+                    domain,
+                    ctx,
+                    intervals,
+                    interval_start,
+                    points,
+                    weights,
+                    options,
+                    sort,
+                );
                 if self.leaf_count >= max_leaves.max(1) {
                     self.hit_limit = true;
                     ctx.aborted = true;
@@ -1532,7 +2145,9 @@ impl Search {
             while bits != 0 {
                 let local = word_index * 64 + bits.trailing_zeros() as usize;
                 bits &= bits.wrapping_sub(1);
-                if local < self.slots[depth].size && self.can_add(self.slots[depth].start + local, depth, ctx) {
+                if local < self.slots[depth].size
+                    && self.can_add(self.slots[depth].start + local, depth, ctx)
+                {
                     options_local.push(local as i32);
                 }
             }
@@ -1546,7 +2161,22 @@ impl Search {
                     break;
                 }
                 let before = self.leaf_count;
-                self.try_option(depth, option, domain, ctx, true, remaining, deadline, intervals, interval_start, points, weights, options, sort, rng);
+                self.try_option(
+                    depth,
+                    option,
+                    domain,
+                    ctx,
+                    true,
+                    remaining,
+                    deadline,
+                    intervals,
+                    interval_start,
+                    points,
+                    weights,
+                    options,
+                    sort,
+                    rng,
+                );
                 let got = self.leaf_count.saturating_sub(before);
                 remaining = remaining.saturating_sub(got.max(1).min(remaining));
                 left = left.saturating_sub(1);
@@ -1558,27 +2188,88 @@ impl Search {
             if ctx.aborted {
                 return;
             }
-            self.try_option(depth, option, domain, ctx, false, max_leaves, deadline, intervals, interval_start, points, weights, options, sort, rng);
+            self.try_option(
+                depth,
+                option,
+                domain,
+                ctx,
+                false,
+                max_leaves,
+                deadline,
+                intervals,
+                interval_start,
+                points,
+                weights,
+                options,
+                sort,
+                rng,
+            );
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_option(&mut self, depth: usize, option: i32, domain: &[Vec<u64>], ctx: &mut Walk, sampled: bool, max_leaves: usize, deadline: Instant, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort, rng: &mut SplitMix) {
+    fn try_option(
+        &mut self,
+        depth: usize,
+        option: i32,
+        domain: &[Vec<u64>],
+        ctx: &mut Walk,
+        sampled: bool,
+        max_leaves: usize,
+        deadline: Instant,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+        rng: &mut SplitMix,
+    ) {
         if option < 0 {
             ctx.picks[depth] = -1;
-            self.descend(depth + 1, domain, ctx, sampled, max_leaves, deadline, intervals, interval_start, points, weights, options, sort, rng);
+            self.descend(
+                depth + 1,
+                domain,
+                ctx,
+                sampled,
+                max_leaves,
+                deadline,
+                intervals,
+                interval_start,
+                points,
+                weights,
+                options,
+                sort,
+                rng,
+            );
             return;
         }
         let local = option as usize;
         let g = self.slots[depth].start + local;
-        let Some(next) = self.forward(domain, depth, g) else { return };
+        let Some(next) = self.forward(domain, depth, g) else {
+            return;
+        };
         if !self.can_add(g, depth, ctx) {
             return;
         }
         self.take(g, depth, ctx);
         ctx.picks[depth] = option;
         ctx.chosen += 1;
-        self.descend(depth + 1, &next, ctx, sampled, max_leaves, deadline, intervals, interval_start, points, weights, options, sort, rng);
+        self.descend(
+            depth + 1,
+            &next,
+            ctx,
+            sampled,
+            max_leaves,
+            deadline,
+            intervals,
+            interval_start,
+            points,
+            weights,
+            options,
+            sort,
+            rng,
+        );
         ctx.chosen -= 1;
         ctx.picks[depth] = -1;
         self.release(g, depth, ctx);
@@ -1642,14 +2333,19 @@ impl Search {
     }
 
     fn can_still_add(&self, domain: &[Vec<u64>], slot: usize, ctx: &Walk) -> bool {
-        if self.rules.max_classes == i32::MAX && self.rules.max_minutes == i32::MAX && self.rules.credit_window.is_none() {
+        if self.rules.max_classes == i32::MAX
+            && self.rules.max_minutes == i32::MAX
+            && self.rules.credit_window.is_none()
+        {
             return domain[slot].iter().any(|w| *w != 0);
         }
         for (word_index, mut bits) in domain[slot].iter().copied().enumerate() {
             while bits != 0 {
                 let local = word_index * 64 + bits.trailing_zeros() as usize;
                 bits &= bits.wrapping_sub(1);
-                if local < self.slots[slot].size && self.can_add(self.slots[slot].start + local, slot, ctx) {
+                if local < self.slots[slot].size
+                    && self.can_add(self.slots[slot].start + local, slot, ctx)
+                {
                     return true;
                 }
             }
@@ -1688,7 +2384,18 @@ impl Search {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record(&mut self, depth: usize, domain: &[Vec<u64>], ctx: &Walk, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort) {
+    fn record(
+        &mut self,
+        depth: usize,
+        domain: &[Vec<u64>],
+        ctx: &Walk,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+    ) {
         if ctx.chosen == 0 {
             return;
         }
@@ -1704,17 +2411,37 @@ impl Search {
         }
         if self.target.is_none() && self.rules.credit_window.is_none() {
             for s in 0..self.slots.len() {
-                if !self.slots[s].is_required && ctx.picks[s] < 0 && self.can_still_add(domain, s, ctx) {
+                if !self.slots[s].is_required
+                    && ctx.picks[s] < 0
+                    && self.can_still_add(domain, s, ctx)
+                {
                     return;
                 }
             }
         }
         let _ = depth;
-        self.offer(ctx, intervals, interval_start, points, weights, options, sort);
+        self.offer(
+            ctx,
+            intervals,
+            interval_start,
+            points,
+            weights,
+            options,
+            sort,
+        );
         self.leaf_count += 1;
     }
 
-    fn offer(&mut self, ctx: &Walk, intervals: &[Interval], interval_start: &[usize], points: &[f64], weights: &Weights, options: &MeasureOptions, sort: ScheduleSort) {
+    fn offer(
+        &mut self,
+        ctx: &Walk,
+        intervals: &[Interval],
+        interval_start: &[usize],
+        points: &[f64],
+        weights: &Weights,
+        options: &MeasureOptions,
+        sort: ScheduleSort,
+    ) {
         let mut own = vec![];
         let mut min_seats = i32::MAX;
         let mut total_seats = 0;
@@ -1736,7 +2463,11 @@ impl Search {
         }
         let raw = measure(&own, options);
         let seats_floor = if min_seats == i32::MAX { 0 } else { min_seats };
-        let latest = if raw.latest == i32::MIN { 0 } else { raw.latest };
+        let latest = if raw.latest == i32::MIN {
+            0
+        } else {
+            raw.latest
+        };
         let leaf = Leaf {
             picks: ctx.picks.clone(),
             class_days: raw.class_days,
@@ -1795,13 +2526,23 @@ impl Search {
         }
     }
 
-    fn materialize(&self, has_preferences: bool, preferences: &SchedulePreferences) -> Vec<GeneratedSchedule> {
+    fn materialize(
+        &self,
+        has_preferences: bool,
+        preferences: &SchedulePreferences,
+    ) -> Vec<GeneratedSchedule> {
         let mut kept = self.collector.clone();
         let sort = self.sort;
         kept.sort_by(|a, b| {
             let ab = precedes(sort, a, b);
             let ba = precedes(sort, b, a);
-            if ab && !ba { std::cmp::Ordering::Less } else if ba && !ab { std::cmp::Ordering::Greater } else { a.seq.cmp(&b.seq) }
+            if ab && !ba {
+                std::cmp::Ordering::Less
+            } else if ba && !ab {
+                std::cmp::Ordering::Greater
+            } else {
+                a.seq.cmp(&b.seq)
+            }
         });
         let mut out = vec![];
         for leaf in kept {
@@ -1810,22 +2551,40 @@ impl Search {
                 if *pick < 0 {
                     continue;
                 }
-                picked.push((self.slots[s].course_index, self.slots[s].start + *pick as usize));
+                picked.push((
+                    self.slots[s].course_index,
+                    self.slots[s].start + *pick as usize,
+                ));
             }
             picked.sort_by_key(|p| p.0);
-            let chosen: Vec<CourseSection> = picked.iter().map(|(_, id)| self.sections[*id].clone()).collect();
+            let chosen: Vec<CourseSection> = picked
+                .iter()
+                .map(|(_, id)| self.sections[*id].clone())
+                .collect();
             out.push(GeneratedSchedule::assemble(
                 chosen.clone(),
                 leaf.campus_days,
                 leaf.class_days,
-                if leaf.earliest == i32::MAX { None } else { Some(leaf.earliest) },
-                if leaf.class_days == 0 { None } else { Some(leaf.latest) },
+                if leaf.earliest == i32::MAX {
+                    None
+                } else {
+                    Some(leaf.earliest)
+                },
+                if leaf.class_days == 0 {
+                    None
+                } else {
+                    Some(leaf.latest)
+                },
                 leaf.gap,
                 leaf.min_seats,
                 leaf.total_seats,
                 leaf.full,
                 leaf.score,
-                if has_preferences { reasons_for(&chosen, preferences) } else { vec![] },
+                if has_preferences {
+                    reasons_for(&chosen, preferences)
+                } else {
+                    vec![]
+                },
             ));
         }
         out
@@ -1847,25 +2606,47 @@ fn precedes(sort: ScheduleSort, a: &Leaf, b: &Leaf) -> bool {
     match sort {
         ScheduleSort::Best => {}
         ScheduleSort::FewestDays => {
-            if a.campus_days != b.campus_days { return a.campus_days < b.campus_days; }
-            if a.class_days != b.class_days { return a.class_days < b.class_days; }
-            if a.gap != b.gap { return a.gap < b.gap; }
+            if a.campus_days != b.campus_days {
+                return a.campus_days < b.campus_days;
+            }
+            if a.class_days != b.class_days {
+                return a.class_days < b.class_days;
+            }
+            if a.gap != b.gap {
+                return a.gap < b.gap;
+            }
         }
         ScheduleSort::LatestStart => {
-            if a.earliest != b.earliest { return a.earliest > b.earliest; }
-            if a.campus_days != b.campus_days { return a.campus_days < b.campus_days; }
+            if a.earliest != b.earliest {
+                return a.earliest > b.earliest;
+            }
+            if a.campus_days != b.campus_days {
+                return a.campus_days < b.campus_days;
+            }
         }
         ScheduleSort::EarliestFinish => {
-            if a.latest != b.latest { return a.latest < b.latest; }
-            if a.campus_days != b.campus_days { return a.campus_days < b.campus_days; }
+            if a.latest != b.latest {
+                return a.latest < b.latest;
+            }
+            if a.campus_days != b.campus_days {
+                return a.campus_days < b.campus_days;
+            }
         }
         ScheduleSort::FewestGaps => {
-            if a.gap != b.gap { return a.gap < b.gap; }
-            if a.campus_days != b.campus_days { return a.campus_days < b.campus_days; }
+            if a.gap != b.gap {
+                return a.gap < b.gap;
+            }
+            if a.campus_days != b.campus_days {
+                return a.campus_days < b.campus_days;
+            }
         }
         ScheduleSort::MostSeats => {
-            if a.min_seats != b.min_seats { return a.min_seats > b.min_seats; }
-            if a.total_seats != b.total_seats { return a.total_seats > b.total_seats; }
+            if a.min_seats != b.min_seats {
+                return a.min_seats > b.min_seats;
+            }
+            if a.total_seats != b.total_seats {
+                return a.total_seats > b.total_seats;
+            }
         }
     }
     if a.score != b.score {
@@ -1875,7 +2656,8 @@ fn precedes(sort: ScheduleSort, a: &Leaf, b: &Leaf) -> bool {
 }
 
 fn meetings_conflict(a: &[Meeting], b: &[Meeting]) -> bool {
-    a.iter().any(|first| b.iter().any(|second| first.overlaps(second)))
+    a.iter()
+        .any(|first| b.iter().any(|second| first.overlaps(second)))
 }
 
 fn fnv_seed(sections: &[CourseSection]) -> u64 {
@@ -1913,33 +2695,89 @@ fn shuffle(mut items: Vec<i32>, rng: &mut SplitMix) -> Vec<i32> {
     items
 }
 
-pub fn suggest_relaxations(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, include_courses: bool) -> Vec<Suggestion> {
-    let mut candidates: Vec<(Relaxation, ScheduleFilters, SchedulePreferences, Vec<ScheduleCourseInput>)> = vec![];
+pub fn suggest_relaxations(
+    courses: &[ScheduleCourseInput],
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    include_courses: bool,
+) -> Vec<Suggestion> {
+    let mut candidates: Vec<(
+        Relaxation,
+        ScheduleFilters,
+        SchedulePreferences,
+        Vec<ScheduleCourseInput>,
+    )> = vec![];
     let add = |list: &mut Vec<_>, relaxation: Relaxation, active: bool| {
-        if !active { return; }
+        if !active {
+            return;
+        }
         let mut relaxed = filters.clone();
         relaxation.apply_filters(&mut relaxed);
         list.push((relaxation, relaxed, preferences.clone(), courses.to_vec()));
     };
-    add(&mut candidates, Relaxation::ClearEarliestStart, filters.earliest_start.is_some());
-    add(&mut candidates, Relaxation::ClearLatestEnd, filters.latest_end.is_some());
-    add(&mut candidates, Relaxation::ClearFreeDays, !filters.free_days.is_empty());
-    add(&mut candidates, Relaxation::AllowHonors, !filters.include_honors);
-    add(&mut candidates, Relaxation::AllowOnline, !filters.include_online);
-    add(&mut candidates, Relaxation::AllowFullSections, filters.hide_full_sections || filters.min_seats > 0);
-    add(&mut candidates, Relaxation::ClearCampus, filters.campus.is_some());
-    add(&mut candidates, Relaxation::ClearCourseCount, filters.course_count.is_some());
+    add(
+        &mut candidates,
+        Relaxation::ClearEarliestStart,
+        filters.earliest_start.is_some(),
+    );
+    add(
+        &mut candidates,
+        Relaxation::ClearLatestEnd,
+        filters.latest_end.is_some(),
+    );
+    add(
+        &mut candidates,
+        Relaxation::ClearFreeDays,
+        !filters.free_days.is_empty(),
+    );
+    add(
+        &mut candidates,
+        Relaxation::AllowHonors,
+        !filters.include_honors,
+    );
+    add(
+        &mut candidates,
+        Relaxation::AllowOnline,
+        !filters.include_online,
+    );
+    add(
+        &mut candidates,
+        Relaxation::AllowFullSections,
+        filters.hide_full_sections || filters.min_seats > 0,
+    );
+    add(
+        &mut candidates,
+        Relaxation::ClearCampus,
+        filters.campus.is_some(),
+    );
+    add(
+        &mut candidates,
+        Relaxation::ClearCourseCount,
+        filters.course_count.is_some(),
+    );
     for relaxation in PreferenceRelaxation::available(preferences) {
         let mut relaxed = preferences.clone();
         relaxation.apply(&mut relaxed);
-        candidates.push((Relaxation::Preference(relaxation), filters.clone(), relaxed, courses.to_vec()));
+        candidates.push((
+            Relaxation::Preference(relaxation),
+            filters.clone(),
+            relaxed,
+            courses.to_vec(),
+        ));
     }
     if include_courses && courses.len() > 1 {
         for (index, course) in courses.iter().enumerate() {
-            if !course.is_required { continue; }
+            if !course.is_required {
+                continue;
+            }
             let mut relaxed = courses.to_vec();
             relaxed[index].is_required = false;
-            candidates.push((Relaxation::MakeOptional(course.key.clone()), filters.clone(), preferences.clone(), relaxed));
+            candidates.push((
+                Relaxation::MakeOptional(course.key.clone()),
+                filters.clone(),
+                preferences.clone(),
+                relaxed,
+            ));
         }
     }
     let mut suggestions = vec![];
@@ -1947,7 +2785,11 @@ pub fn suggest_relaxations(courses: &[ScheduleCourseInput], filters: &ScheduleFi
     for (relaxation, filters, preferences, courses) in candidates {
         let result = generate(&courses, &filters, &preferences, ScheduleSort::Best, &probe);
         if result.total_found > 0 {
-            suggestions.push(Suggestion { relaxation, schedule_count: result.total_found, is_lower_bound: !result.is_exhaustive });
+            suggestions.push(Suggestion {
+                relaxation,
+                schedule_count: result.total_found,
+                is_lower_bound: !result.is_exhaustive,
+            });
         }
     }
     suggestions.sort_by_key(|suggestion| std::cmp::Reverse(suggestion.schedule_count));
@@ -1973,7 +2815,10 @@ pub fn no_results_headline(diagnostics: &ScheduleDiagnostics, has_suggestions: b
     if has_suggestions {
         return "Here’s what would work.".into();
     }
-    if diagnostics.count_problem.is_some() || !diagnostics.blocked_required().is_empty() || !diagnostics.conflicting_pairs.is_empty() {
+    if diagnostics.count_problem.is_some()
+        || !diagnostics.blocked_required().is_empty()
+        || !diagnostics.conflicting_pairs.is_empty()
+    {
         return "Here’s what’s getting in the way.".into();
     }
     "These courses can’t all be taken together with the current rules.".into()
@@ -2012,38 +2857,91 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
     let codes = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
     for section in sections {
         for (n, meeting) in section.weekly_meetings().into_iter().enumerate() {
-            let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
-            let Some(first) = meeting.start_date.clone().or_else(|| Some("2026-09-09".into())) else { continue };
+            let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+                continue;
+            };
+            let Some(first) = meeting
+                .start_date
+                .clone()
+                .or_else(|| Some("2026-09-09".into()))
+            else {
+                continue;
+            };
             let last = meeting.end_date.clone().unwrap_or_else(|| first.clone());
             lines.push("BEGIN:VEVENT".into());
-            lines.push(format!("UID:{}-{}-{n}@neuclasssearch", plan_id.to_ascii_lowercase(), section.crn));
+            lines.push(format!(
+                "UID:{}-{}-{n}@neuclasssearch",
+                plan_id.to_ascii_lowercase(),
+                section.crn
+            ));
             lines.push(format!("DTSTAMP:{stamp}"));
-            lines.push(format!("DTSTART;TZID=America/New_York:{}T{}", first.replace('-', ""), hhmm(start)));
-            lines.push(format!("DTEND;TZID=America/New_York:{}T{}", first.replace('-', ""), hhmm(end)));
-            let days = meeting.days.indices().into_iter().map(|d| codes[d as usize]).collect::<Vec<_>>().join(",");
-            lines.push(format!("RRULE:FREQ=WEEKLY;BYDAY={days};UNTIL={}", until_stamp(&last)));
-            lines.push(format!("SUMMARY:{}", escape_ics(&format!("{} {}", section.course_key(), section.title))));
-            let location = if meeting.is_online() || section.is_online() { Some("Online".into()) } else {
+            lines.push(format!(
+                "DTSTART;TZID=America/New_York:{}T{}",
+                first.replace('-', ""),
+                hhmm(start)
+            ));
+            lines.push(format!(
+                "DTEND;TZID=America/New_York:{}T{}",
+                first.replace('-', ""),
+                hhmm(end)
+            ));
+            let days = meeting
+                .days
+                .indices()
+                .into_iter()
+                .map(|d| codes[d as usize])
+                .collect::<Vec<_>>()
+                .join(",");
+            lines.push(format!(
+                "RRULE:FREQ=WEEKLY;BYDAY={days};UNTIL={}",
+                until_stamp(&last)
+            ));
+            lines.push(format!(
+                "SUMMARY:{}",
+                escape_ics(&format!("{} {}", section.course_key(), section.title))
+            ));
+            let location = if meeting.is_online() || section.is_online() {
+                Some("Online".into())
+            } else {
                 let label = meeting.long_location_label();
-                if label == "Location TBA" { None } else { Some(label) }
+                if label == "Location TBA" {
+                    None
+                } else {
+                    Some(label)
+                }
             };
             if let Some(location) = location {
                 lines.push(format!("LOCATION:{}", escape_ics(&location)));
             }
-            lines.push(format!("DESCRIPTION:{}", escape_ics(&format!("CRN {}", section.crn))));
+            lines.push(format!(
+                "DESCRIPTION:{}",
+                escape_ics(&format!("CRN {}", section.crn))
+            ));
             lines.push("TRANSP:OPAQUE".into());
             lines.push("END:VEVENT".into());
         }
     }
     lines.push("END:VCALENDAR".into());
-    lines.into_iter().map(fold_ics).collect::<Vec<_>>().join("\r\n") + "\r\n"
+    lines
+        .into_iter()
+        .map(fold_ics)
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
 }
 
 fn hhmm(minutes: i32) -> String {
-    format!("{:02}{:02}00", minutes.div_euclid(60).rem_euclid(24), minutes.rem_euclid(60))
+    format!(
+        "{:02}{:02}00",
+        minutes.div_euclid(60).rem_euclid(24),
+        minutes.rem_euclid(60)
+    )
 }
 fn escape_ics(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('\n', "\\n").replace(',', "\\,").replace(';', "\\;")
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace(',', "\\,")
+        .replace(';', "\\;")
 }
 fn fold_ics(line: String) -> String {
     let bytes = line.as_bytes();
@@ -2078,13 +2976,23 @@ fn until_stamp(date: &str) -> String {
     let (y, m, d) = (parts[0], parts[1], parts[2]);
     let offset = if is_edt(y, m, d) { 4 } else { 5 };
     let hour = 23 + offset;
-    let (day, hour) = if hour >= 24 { (d + 1, hour - 24) } else { (d, hour) };
+    let (day, hour) = if hour >= 24 {
+        (d + 1, hour - 24)
+    } else {
+        (d, hour)
+    };
     format!("{y:04}{m:02}{day:02}T{hour:02}5959Z")
 }
 fn is_edt(year: i32, month: i32, day: i32) -> bool {
-    if (4..11).contains(&month) { return true; }
-    if month == 3 { return day >= nth_weekday(year, 3, 0, 2); }
-    if month == 11 { return day < nth_weekday(year, 11, 0, 1); }
+    if (4..11).contains(&month) {
+        return true;
+    }
+    if month == 3 {
+        return day >= nth_weekday(year, 3, 0, 2);
+    }
+    if month == 11 {
+        return day < nth_weekday(year, 11, 0, 1);
+    }
     false
 }
 fn nth_weekday(year: i32, month: i32, weekday: i32, n: i32) -> i32 {
@@ -2093,7 +3001,9 @@ fn nth_weekday(year: i32, month: i32, weekday: i32, n: i32) -> i32 {
     while day < 32 {
         if civil_weekday(year, month, day) == weekday {
             seen += 1;
-            if seen == n { return day; }
+            if seen == n {
+                return day;
+            }
         }
         day += 1;
     }
@@ -2102,7 +3012,10 @@ fn nth_weekday(year: i32, month: i32, weekday: i32, n: i32) -> i32 {
 fn civil_weekday(year: i32, month: i32, day: i32) -> i32 {
     let mut y = year;
     let mut m = month;
-    if m < 3 { y -= 1; m += 12; }
+    if m < 3 {
+        y -= 1;
+        m += 12;
+    }
     let k = y % 100;
     let j = y / 100;
     let h = (day + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
@@ -2115,7 +3028,9 @@ pub fn week_png(sections: &[CourseSection]) -> Vec<u8> {
     let height = 520u32;
     let mut pixels = vec![255u8; (width * height * 3) as usize];
     let put = |pixels: &mut [u8], x: i32, y: i32, rgb: [u8; 3]| {
-        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 { return; }
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return;
+        }
         let i = ((y as u32 * width + x as u32) * 3) as usize;
         pixels[i..i + 3].copy_from_slice(&rgb);
     };
@@ -2128,13 +3043,28 @@ pub fn week_png(sections: &[CourseSection]) -> Vec<u8> {
             let _ = y;
         }
     }
-    let palette = [[28, 78, 110], [140, 74, 43], [46, 107, 78], [120, 72, 120], [160, 110, 40], [40, 90, 130], [150, 60, 70], [70, 90, 50], [90, 70, 40], [50, 80, 100]];
+    let palette = [
+        [28, 78, 110],
+        [140, 74, 43],
+        [46, 107, 78],
+        [120, 72, 120],
+        [160, 110, 40],
+        [40, 90, 130],
+        [150, 60, 70],
+        [70, 90, 50],
+        [90, 70, 40],
+        [50, 80, 100],
+    ];
     for (index, section) in sections.iter().enumerate() {
         let color = palette[index % palette.len()];
         for meeting in section.weekly_meetings() {
-            let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
+            let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+                continue;
+            };
             for day in meeting.days.indices() {
-                if !(1..=5).contains(&day) { continue; }
+                if !(1..=5).contains(&day) {
+                    continue;
+                }
                 let x0 = 48 + (day - 1) * ((width as i32 - 64) / 5) + 4;
                 let x1 = x0 + ((width as i32 - 64) / 5) - 8;
                 let y0 = 40 + ((start.max(8 * 60) - 8 * 60) * (height as i32 - 56) / (12 * 60));
@@ -2195,16 +3125,32 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 pub fn copy_crns(sections: &[CourseSection]) -> String {
-    sections.iter().map(|s| s.crn.clone()).collect::<Vec<_>>().join(", ")
+    sections
+        .iter()
+        .map(|s| s.crn.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Courses a degree plan offers for this term: the matching semester, then the closest one.
-pub fn autofill_courses(plan: &DegreePlan, term: &Term, index: &crate::index::CatalogIndex, taken: &HashSet<CourseKey>) -> Vec<CourseKey> {
-    crate::planlogic::schedule_suggestions(term, std::slice::from_ref(plan), &[], None, taken, Some(index))
-        .into_iter()
-        .next()
-        .map(|s| s.courses)
-        .unwrap_or_default()
+pub fn autofill_courses(
+    plan: &DegreePlan,
+    term: &Term,
+    index: &crate::index::CatalogIndex,
+    taken: &HashSet<CourseKey>,
+) -> Vec<CourseKey> {
+    crate::planlogic::schedule_suggestions(
+        term,
+        std::slice::from_ref(plan),
+        &[],
+        None,
+        taken,
+        Some(index),
+    )
+    .into_iter()
+    .next()
+    .map(|s| s.courses)
+    .unwrap_or_default()
 }
 
 // MARK: - What a plan resolves to, and the words around an empty search
@@ -2282,7 +3228,13 @@ pub struct ScheduleConflict {
 
 impl ScheduleConflict {
     pub fn summary(&self) -> String {
-        format!("{} overlaps {} · {} {}", self.first.course_key(), self.second.course_key(), self.days.short_label(), range_label(self.start, self.end))
+        format!(
+            "{} overlaps {} · {} {}",
+            self.first.course_key(),
+            self.second.course_key(),
+            self.days.short_label(),
+            range_label(self.start, self.end)
+        )
     }
 }
 
@@ -2313,7 +3265,9 @@ impl ResolvedPlan {
         let mut entries = vec![];
         let mut claimed = HashSet::new();
         for plan_course in &plan.courses {
-            let all = index.map(|index| index.sections_for(&plan_course.key)).unwrap_or_default();
+            let all = index
+                .map(|index| index.sections_for(&plan_course.key))
+                .unwrap_or_default();
             let mut selected = vec![];
             for crn in &plan.selected_crns {
                 if let Some(section) = by_section.get(crn) {
@@ -2334,11 +3288,24 @@ impl ResolvedPlan {
         let unclaimed: Vec<String> = if index.is_none() {
             vec![]
         } else {
-            plan.selected_crns.iter().filter(|crn| !claimed.contains(*crn)).cloned().collect()
+            plan.selected_crns
+                .iter()
+                .filter(|crn| !claimed.contains(*crn))
+                .cloned()
+                .collect()
         };
-        let unlisted_crns = unclaimed.iter().filter(|crn| !by_section.contains_key(*crn)).cloned().collect();
-        let orphaned_crns = unclaimed.iter().filter(|crn| by_section.contains_key(*crn)).cloned().collect();
-        let sections: Vec<CourseSection> = entries.iter().flat_map(|e| e.selected.clone()).collect();
+        let unlisted_crns = unclaimed
+            .iter()
+            .filter(|crn| !by_section.contains_key(*crn))
+            .cloned()
+            .collect();
+        let orphaned_crns = unclaimed
+            .iter()
+            .filter(|crn| by_section.contains_key(*crn))
+            .cloned()
+            .collect();
+        let sections: Vec<CourseSection> =
+            entries.iter().flat_map(|e| e.selected.clone()).collect();
         let mut full_sections = vec![];
         for entry in &entries {
             for section in &entry.selected {
@@ -2348,7 +3315,11 @@ impl ResolvedPlan {
             }
         }
         let conflicts = find_conflicts(&sections);
-        let missing_courses = entries.iter().filter(|e| e.is_missing() || e.has_no_sections()).map(|e| e.key().clone()).collect();
+        let missing_courses = entries
+            .iter()
+            .filter(|e| e.is_missing() || e.has_no_sections())
+            .map(|e| e.key().clone())
+            .collect();
         let mut credits_min = 0.0;
         let mut credits_max = 0.0;
         for entry in &entries {
@@ -2360,11 +3331,25 @@ impl ResolvedPlan {
                 credits_max += course.max_credits;
             }
         }
-        Self { plan: plan.clone(), has_catalog: index.is_some(), entries, unlisted_crns, orphaned_crns, conflicts, full_sections, missing_courses, credits_min, credits_max }
+        Self {
+            plan: plan.clone(),
+            has_catalog: index.is_some(),
+            entries,
+            unlisted_crns,
+            orphaned_crns,
+            conflicts,
+            full_sections,
+            missing_courses,
+            credits_min,
+            credits_max,
+        }
     }
 
     pub fn courses_without_section(&self) -> Vec<&PlanEntry> {
-        self.entries.iter().filter(|e| e.selected.is_empty() && !e.is_missing() && !e.has_no_sections()).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.selected.is_empty() && !e.is_missing() && !e.has_no_sections())
+            .collect()
     }
 
     pub fn is_over_credit_limit(&self) -> bool {
@@ -2378,23 +3363,59 @@ impl ResolvedPlan {
         let mut items = vec![];
         if !self.conflicts.is_empty() {
             let n = self.conflicts.len();
-            items.push(ScheduleWarning { text: if n == 1 { "1 conflict".into() } else { format!("{n} conflicts") }, symbol: "exclamationmark.triangle.fill".into(), severity: Attention::Error });
+            items.push(ScheduleWarning {
+                text: if n == 1 {
+                    "1 conflict".into()
+                } else {
+                    format!("{n} conflicts")
+                },
+                symbol: "exclamationmark.triangle.fill".into(),
+                severity: Attention::Error,
+            });
         }
         if !self.full_sections.is_empty() {
             let n = self.full_sections.len();
-            items.push(ScheduleWarning { text: if n == 1 { "1 full section".into() } else { format!("{n} full sections") }, symbol: "chair".into(), severity: Attention::Warning });
+            items.push(ScheduleWarning {
+                text: if n == 1 {
+                    "1 full section".into()
+                } else {
+                    format!("{n} full sections")
+                },
+                symbol: "chair".into(),
+                severity: Attention::Warning,
+            });
         }
         if !self.missing_courses.is_empty() {
             let n = self.missing_courses.len();
-            items.push(ScheduleWarning { text: if n == 1 { "1 course not offered".into() } else { format!("{n} courses not offered") }, symbol: "questionmark.folder".into(), severity: Attention::Warning });
+            items.push(ScheduleWarning {
+                text: if n == 1 {
+                    "1 course not offered".into()
+                } else {
+                    format!("{n} courses not offered")
+                },
+                symbol: "questionmark.folder".into(),
+                severity: Attention::Warning,
+            });
         }
         if self.is_over_credit_limit() {
-            items.push(ScheduleWarning { text: "Over 19 credits".into(), symbol: "exclamationmark.circle".into(), severity: Attention::Warning });
+            items.push(ScheduleWarning {
+                text: "Over 19 credits".into(),
+                symbol: "exclamationmark.circle".into(),
+                severity: Attention::Warning,
+            });
         }
-        let missing_sections = self.courses_without_section().iter().filter(|e| e.plan_course.is_required).count();
+        let missing_sections = self
+            .courses_without_section()
+            .iter()
+            .filter(|e| e.plan_course.is_required)
+            .count();
         if missing_sections > 0 && !self.plan.courses.is_empty() {
             items.push(ScheduleWarning {
-                text: if missing_sections == 1 { "1 course needs a section".into() } else { format!("{missing_sections} courses need sections") },
+                text: if missing_sections == 1 {
+                    "1 course needs a section".into()
+                } else {
+                    format!("{missing_sections} courses need sections")
+                },
                 symbol: "circle.dashed".into(),
                 severity: Attention::Neutral,
             });
@@ -2404,7 +3425,11 @@ impl ResolvedPlan {
 }
 
 pub fn section_title(section: &CourseSection) -> String {
-    if section.section_number.is_empty() { section.class_type.clone() } else { format!("{} {}", section.class_type, section.section_number) }
+    if section.section_number.is_empty() {
+        section.class_type.clone()
+    } else {
+        format!("{} {}", section.class_type, section.section_number)
+    }
 }
 
 fn find_conflicts(sections: &[CourseSection]) -> Vec<ScheduleConflict> {
@@ -2412,7 +3437,13 @@ fn find_conflicts(sections: &[CourseSection]) -> Vec<ScheduleConflict> {
     for i in 0..sections.len() {
         for j in (i + 1)..sections.len() {
             if let Some((days, start, end)) = section_overlap(&sections[i], &sections[j]) {
-                result.push(ScheduleConflict { first: sections[i].clone(), second: sections[j].clone(), days, start, end });
+                result.push(ScheduleConflict {
+                    first: sections[i].clone(),
+                    second: sections[j].clone(),
+                    days,
+                    start,
+                    end,
+                });
             }
         }
     }
@@ -2427,7 +3458,10 @@ fn section_overlap(a: &CourseSection, b: &CourseSection) -> Option<(DaySet, i32,
             if !m1.overlaps(m2) {
                 continue;
             }
-            let (Some(s1), Some(e1), Some(s2), Some(e2)) = (m1.start, m1.end, m2.start, m2.end) else { continue };
+            let (Some(s1), Some(e1), Some(s2), Some(e2)) = (m1.start, m1.end, m2.start, m2.end)
+            else {
+                continue;
+            };
             days = days.union(m1.days.intersection(m2.days));
             let start = s1.max(s2);
             let end = e1.min(e2);
@@ -2439,41 +3473,73 @@ fn section_overlap(a: &CourseSection, b: &CourseSection) -> Option<(DaySet, i32,
     window.map(|(start, end)| (days, start, end))
 }
 
-pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailable: bool) -> Vec<ScheduleNotice> {
+pub fn make_notices(
+    resolved: &ResolvedPlan,
+    term_name: &str,
+    catalog_unavailable: bool,
+) -> Vec<ScheduleNotice> {
     let mut items = vec![];
     if !resolved.has_catalog && catalog_unavailable && !resolved.plan.courses.is_empty() {
         items.push(ScheduleNotice {
             id: "catalog".into(),
             severity: Attention::Warning,
             title: format!("Course data for {term_name} isn’t on this device"),
-            lines: vec!["Switch to that term and download its catalog to see sections, times and seats.".into()],
+            lines: vec![
+                "Switch to that term and download its catalog to see sections, times and seats."
+                    .into(),
+            ],
             fix: None,
         });
     }
     if !resolved.conflicts.is_empty() {
         let count = resolved.conflicts.len();
-        let mut lines: Vec<String> = resolved.conflicts.iter().take(3).map(|c| c.summary()).collect();
+        let mut lines: Vec<String> = resolved
+            .conflicts
+            .iter()
+            .take(3)
+            .map(|c| c.summary())
+            .collect();
         if count > 3 {
             lines.push(format!("and {} more", count - 3));
         }
         items.push(ScheduleNotice {
             id: "conflicts".into(),
             severity: Attention::Error,
-            title: if count == 1 { "1 time conflict".into() } else { format!("{count} time conflicts") },
+            title: if count == 1 {
+                "1 time conflict".into()
+            } else {
+                format!("{count} time conflicts")
+            },
             lines,
             fix: None,
         });
     }
     if !resolved.full_sections.is_empty() {
-        let lines = resolved.full_sections.iter().map(|section| {
-            let waitlist = if section.waitlist_capacity > 0 { format!(" · {} waitlist spots left", section.waitlist_remaining) } else { String::new() };
-            format!("{} {} is full{waitlist}", section.course_key(), section_title(section))
-        }).collect();
+        let lines = resolved
+            .full_sections
+            .iter()
+            .map(|section| {
+                let waitlist = if section.waitlist_capacity > 0 {
+                    format!(" · {} waitlist spots left", section.waitlist_remaining)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {} is full{waitlist}",
+                    section.course_key(),
+                    section_title(section)
+                )
+            })
+            .collect();
         let n = resolved.full_sections.len();
         items.push(ScheduleNotice {
             id: "full".into(),
             severity: Attention::Warning,
-            title: if n == 1 { "1 section is full".into() } else { format!("{n} sections are full") },
+            title: if n == 1 {
+                "1 section is full".into()
+            } else {
+                format!("{n} sections are full")
+            },
             lines,
             fix: None,
         });
@@ -2483,8 +3549,16 @@ pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailabl
         items.push(ScheduleNotice {
             id: "missing".into(),
             severity: Attention::Warning,
-            title: if n == 1 { format!("1 course isn’t offered in {term_name}") } else { format!("{n} courses aren’t offered in {term_name}") },
-            lines: resolved.missing_courses.iter().map(|key| format!("{key} has no sections this term.")).collect(),
+            title: if n == 1 {
+                format!("1 course isn’t offered in {term_name}")
+            } else {
+                format!("{n} courses aren’t offered in {term_name}")
+            },
+            lines: resolved
+                .missing_courses
+                .iter()
+                .map(|key| format!("{key} has no sections this term."))
+                .collect(),
             fix: None,
         });
     }
@@ -2492,8 +3566,13 @@ pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailabl
         items.push(ScheduleNotice {
             id: "credits".into(),
             severity: Attention::Warning,
-            title: format!("{} is a heavy load", credit_span(resolved.credits_min, resolved.credits_max)),
-            lines: vec!["Above 19 credits you may need approval from your advisor or college.".into()],
+            title: format!(
+                "{} is a heavy load",
+                credit_span(resolved.credits_min, resolved.credits_max)
+            ),
+            lines: vec![
+                "Above 19 credits you may need approval from your advisor or college.".into(),
+            ],
             fix: None,
         });
     }
@@ -2503,8 +3582,15 @@ pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailabl
         items.push(ScheduleNotice {
             id: "unlisted".into(),
             severity: Attention::Info,
-            title: if n == 1 { "A saved section is no longer listed".into() } else { format!("{n} saved sections are no longer listed") },
-            lines: vec![format!("CRN {} isn’t in the current {term_name} catalog.", unlisted.join(", "))],
+            title: if n == 1 {
+                "A saved section is no longer listed".into()
+            } else {
+                format!("{n} saved sections are no longer listed")
+            },
+            lines: vec![format!(
+                "CRN {} isn’t in the current {term_name} catalog.",
+                unlisted.join(", ")
+            )],
             fix: Some(NoticeFix::RemoveSections(unlisted)),
         });
     }
@@ -2514,8 +3600,15 @@ pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailabl
         items.push(ScheduleNotice {
             id: "orphaned".into(),
             severity: Attention::Info,
-            title: if n == 1 { "A section from a removed course is still selected".into() } else { format!("{n} sections from removed courses are still selected") },
-            lines: vec![format!("CRN {} doesn’t belong to any course in this schedule.", orphaned.join(", "))],
+            title: if n == 1 {
+                "A section from a removed course is still selected".into()
+            } else {
+                format!("{n} sections from removed courses are still selected")
+            },
+            lines: vec![format!(
+                "CRN {} doesn’t belong to any course in this schedule.",
+                orphaned.join(", ")
+            )],
             fix: Some(NoticeFix::RemoveSections(orphaned)),
         });
     }
@@ -2523,37 +3616,73 @@ pub fn make_notices(resolved: &ResolvedPlan, term_name: &str, catalog_unavailabl
 }
 
 fn credit_span(min: f64, max: f64) -> String {
-    if (min - max).abs() < 1e-9 { format!("{} credits", credit_number(min)) } else { format!("{}–{} credits", credit_number(min), credit_number(max)) }
+    if (min - max).abs() < 1e-9 {
+        format!("{} credits", credit_number(min))
+    } else {
+        format!("{}–{} credits", credit_number(min), credit_number(max))
+    }
 }
 
 fn credit_number(value: f64) -> String {
-    if (value - value.round()).abs() < 1e-9 { format!("{}", value.round() as i64) } else { format!("{value:.1}") }
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.1}")
+    }
 }
 
-pub fn inputs_for(plan: &SchedulePlan, index: &crate::index::CatalogIndex) -> Vec<ScheduleCourseInput> {
-    plan.courses.iter().map(|course| {
-        let listed = index.course(&course.key);
-        ScheduleCourseInput {
-            key: course.key.clone(),
-            is_required: course.is_required,
-            sections: index.sections_for(&course.key),
-            excluded_crns: course.excluded_crns.clone(),
-            min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
-            max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
-        }
-    }).collect()
+pub fn inputs_for(
+    plan: &SchedulePlan,
+    index: &crate::index::CatalogIndex,
+) -> Vec<ScheduleCourseInput> {
+    plan.courses
+        .iter()
+        .map(|course| {
+            let listed = index.course(&course.key);
+            ScheduleCourseInput {
+                key: course.key.clone(),
+                is_required: course.is_required,
+                sections: index.sections_for(&course.key),
+                excluded_crns: course.excluded_crns.clone(),
+                min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
+                max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
+            }
+        })
+        .collect()
 }
 
-pub fn favorites_of(plan: &SchedulePlan, index: &crate::index::CatalogIndex, preferences: &SchedulePreferences) -> Vec<GeneratedSchedule> {
-    let order: HashMap<CourseKey, usize> = plan.courses.iter().enumerate().map(|(i, course)| (course.key.clone(), i)).collect();
+pub fn favorites_of(
+    plan: &SchedulePlan,
+    index: &crate::index::CatalogIndex,
+    preferences: &SchedulePreferences,
+) -> Vec<GeneratedSchedule> {
+    let order: HashMap<CourseKey, usize> = plan
+        .courses
+        .iter()
+        .enumerate()
+        .map(|(i, course)| (course.key.clone(), i))
+        .collect();
     let mut out = vec![];
     for crns in plan.favorite_combinations.iter().rev() {
-        let sections: Vec<CourseSection> = crns.iter().filter_map(|crn| index.section_crn(crn).cloned()).collect();
-        if sections.len() != crns.len() || sections.is_empty() || sections.iter().any(|s| !order.contains_key(&s.course_key())) {
+        let sections: Vec<CourseSection> = crns
+            .iter()
+            .filter_map(|crn| index.section_crn(crn).cloned())
+            .collect();
+        if sections.len() != crns.len()
+            || sections.is_empty()
+            || sections
+                .iter()
+                .any(|s| !order.contains_key(&s.course_key()))
+        {
             continue;
         }
         let mut ordered = sections;
-        ordered.sort_by_key(|section| order.get(&section.course_key()).copied().unwrap_or(usize::MAX));
+        ordered.sort_by_key(|section| {
+            order
+                .get(&section.course_key())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         out.push(GeneratedSchedule::from_sections(&ordered, preferences));
     }
     out
@@ -2565,7 +3694,11 @@ pub fn apply_relaxation(plan: &mut SchedulePlan, relaxation: &Relaxation) {
         Relaxation::Preference(_) => {
             let mut preferences = plan.preferences.clone().unwrap_or_default();
             relaxation.apply_preferences(&mut preferences);
-            plan.preferences = if preferences.is_default() { None } else { Some(preferences) };
+            plan.preferences = if preferences.is_default() {
+                None
+            } else {
+                Some(preferences)
+            };
         }
         other => other.apply_filters(&mut plan.filters),
     }
@@ -2592,7 +3725,11 @@ pub struct BlockerOption {
 
 impl BlockerOption {
     pub fn id(&self) -> String {
-        self.courses.iter().map(|key| key.to_string()).collect::<Vec<_>>().join("+")
+        self.courses
+            .iter()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>()
+            .join("+")
     }
 }
 
@@ -2608,7 +3745,10 @@ pub struct BlockerAnalysis {
 
 impl BlockerAnalysis {
     pub fn blocking_courses(&self) -> Vec<CourseKey> {
-        self.options.first().map(|option| option.courses.clone()).unwrap_or_default()
+        self.options
+            .first()
+            .map(|option| option.courses.clone())
+            .unwrap_or_default()
     }
     pub fn all_blocking_courses(&self) -> Vec<CourseKey> {
         let mut seen = HashSet::new();
@@ -2623,16 +3763,37 @@ impl BlockerAnalysis {
         out
     }
     pub fn clashes(&self, key: &CourseKey) -> Vec<CourseKey> {
-        self.conflicting_pairs.iter().filter_map(|pair| {
-            if &pair.first == key { Some(pair.second.clone()) } else if &pair.second == key { Some(pair.first.clone()) } else { None }
-        }).collect()
+        self.conflicting_pairs
+            .iter()
+            .filter_map(|pair| {
+                if &pair.first == key {
+                    Some(pair.second.clone())
+                } else if &pair.second == key {
+                    Some(pair.first.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
-pub fn analyze_blockers(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, diagnostics: Option<&ScheduleDiagnostics>, time_budget: f64, max_probes: usize) -> BlockerAnalysis {
+pub fn analyze_blockers(
+    courses: &[ScheduleCourseInput],
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    diagnostics: Option<&ScheduleDiagnostics>,
+    time_budget: f64,
+    max_probes: usize,
+) -> BlockerAnalysis {
     let started = Instant::now();
     let mut analysis = BlockerAnalysis::default();
-    let required: Vec<usize> = courses.iter().enumerate().filter(|(_, course)| course.is_required).map(|(i, _)| i).collect();
+    let required: Vec<usize> = courses
+        .iter()
+        .enumerate()
+        .filter(|(_, course)| course.is_required)
+        .map(|(i, _)| i)
+        .collect();
     analysis.required_count = required.len();
     if required.is_empty() {
         return analysis;
@@ -2641,7 +3802,14 @@ pub fn analyze_blockers(courses: &[ScheduleCourseInput], filters: &ScheduleFilte
     let base = if let Some(diagnostics) = diagnostics {
         diagnostics
     } else {
-        owned = generate(courses, filters, preferences, ScheduleSort::Best, &Limits::probe()).diagnostics;
+        owned = generate(
+            courses,
+            filters,
+            preferences,
+            ScheduleSort::Best,
+            &Limits::probe(),
+        )
+        .diagnostics;
         &owned
     };
     analysis.conflicting_pairs = base.conflicting_pairs.clone();
@@ -2659,23 +3827,37 @@ pub fn analyze_blockers(courses: &[ScheduleCourseInput], filters: &ScheduleFilte
             }
         }
     }
-    let others: Vec<usize> = required.iter().copied().filter(|index| !dead.contains(index)).collect();
+    let others: Vec<usize> = required
+        .iter()
+        .copied()
+        .filter(|index| !dead.contains(index))
+        .collect();
     let mut probes = 0usize;
-    let over_budget = |probes: usize| probes >= max_probes || started.elapsed().as_secs_f64() > time_budget;
+    let over_budget =
+        |probes: usize| probes >= max_probes || started.elapsed().as_secs_f64() > time_budget;
     let probe = |drop: &[usize], probes: &mut usize| -> Option<BlockerOption> {
         *probes += 1;
         let mut relaxed = courses.to_vec();
         for index in drop {
             relaxed[*index].is_required = false;
         }
-        let result = generate(&relaxed, filters, preferences, ScheduleSort::Best, &Limits::blocker_probe());
+        let result = generate(
+            &relaxed,
+            filters,
+            preferences,
+            ScheduleSort::Best,
+            &Limits::blocker_probe(),
+        );
         if result.total_found == 0 {
             return None;
         }
         let mut indexes = drop.to_vec();
         indexes.sort_unstable();
         Some(BlockerOption {
-            courses: indexes.iter().map(|index| courses[*index].key.clone()).collect(),
+            courses: indexes
+                .iter()
+                .map(|index| courses[*index].key.clone())
+                .collect(),
             schedule_count: result.total_found,
             is_lower_bound: !result.is_exhaustive,
         })
@@ -2715,7 +3897,12 @@ pub fn analyze_blockers(courses: &[ScheduleCourseInput], filters: &ScheduleFilte
             }
         }
     }
-    found.sort_by(|a, b| a.courses.len().cmp(&b.courses.len()).then(b.schedule_count.cmp(&a.schedule_count)));
+    found.sort_by(|a, b| {
+        a.courses
+            .len()
+            .cmp(&b.courses.len())
+            .then(b.schedule_count.cmp(&a.schedule_count))
+    });
     analysis.options = found;
     analysis
 }
@@ -2727,14 +3914,24 @@ pub struct EmptyResult {
     pub blockers: BlockerAnalysis,
 }
 
-pub fn analyze_empty_result(courses: &[ScheduleCourseInput], filters: &ScheduleFilters, preferences: &SchedulePreferences, diagnostics: &ScheduleDiagnostics, include_blockers: bool) -> EmptyResult {
+pub fn analyze_empty_result(
+    courses: &[ScheduleCourseInput],
+    filters: &ScheduleFilters,
+    preferences: &SchedulePreferences,
+    diagnostics: &ScheduleDiagnostics,
+    include_blockers: bool,
+) -> EmptyResult {
     let blockers = if include_blockers {
         analyze_blockers(courses, filters, preferences, Some(diagnostics), 1.5, 60)
     } else {
         BlockerAnalysis::default()
     };
     let suggestions = suggest_relaxations(courses, filters, preferences, !include_blockers);
-    EmptyResult { diagnostics: diagnostics.clone(), suggestions, blockers }
+    EmptyResult {
+        diagnostics: diagnostics.clone(),
+        suggestions,
+        blockers,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2749,26 +3946,48 @@ pub fn course_list(keys: &[CourseKey]) -> String {
     match names.len() {
         0 => String::new(),
         1 => names[0].clone(),
-        _ => format!("{} and {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
+        _ => format!(
+            "{} and {}",
+            names[..names.len() - 1].join(", "),
+            names[names.len() - 1]
+        ),
     }
 }
 
-pub fn no_results_headline_for(diagnostics: &ScheduleDiagnostics, blockers: Option<&BlockerAnalysis>) -> String {
+pub fn no_results_headline_for(
+    diagnostics: &ScheduleDiagnostics,
+    blockers: Option<&BlockerAnalysis>,
+) -> String {
     if diagnostics.has_no_courses() {
         return "Add some courses to this schedule first.".into();
     }
     if blockers.is_some_and(|blockers| !blockers.options.is_empty()) {
         return "Here’s what would work.".into();
     }
-    if diagnostics.count_problem.is_some() || !diagnostics.blocked_required().is_empty() || !diagnostics.conflicting_pairs.is_empty() {
+    if diagnostics.count_problem.is_some()
+        || !diagnostics.blocked_required().is_empty()
+        || !diagnostics.conflicting_pairs.is_empty()
+    {
         return "Here’s what’s getting in the way.".into();
     }
     "These courses can’t all be taken together with the current rules.".into()
 }
 
-pub fn blocker_detail(option: &BlockerOption, blockers: &BlockerAnalysis, term_name: &str) -> String {
-    let noun = if option.schedule_count == 1 && !option.is_lower_bound { "schedule" } else { "schedules" };
-    let mut parts = vec![if option.is_lower_bound { format!("{}+ {noun}", option.schedule_count) } else { format!("{} {noun}", option.schedule_count) }];
+pub fn blocker_detail(
+    option: &BlockerOption,
+    blockers: &BlockerAnalysis,
+    term_name: &str,
+) -> String {
+    let noun = if option.schedule_count == 1 && !option.is_lower_bound {
+        "schedule"
+    } else {
+        "schedules"
+    };
+    let mut parts = vec![if option.is_lower_bound {
+        format!("{}+ {noun}", option.schedule_count)
+    } else {
+        format!("{} {noun}", option.schedule_count)
+    }];
     for key in &option.courses {
         if blockers.not_offered.contains(key) {
             parts.push(format!("{key} isn’t offered in {term_name}"));
@@ -2792,13 +4011,28 @@ pub fn is_uncertain(reason: &str) -> bool {
     lower.contains("unknown") || lower.contains("couldn’t")
 }
 
-pub fn no_results_reasons(diagnostics: &ScheduleDiagnostics, term_name: &str) -> Vec<NoResultReason> {
+pub fn no_results_reasons(
+    diagnostics: &ScheduleDiagnostics,
+    term_name: &str,
+) -> Vec<NoResultReason> {
     let mut result = vec![];
-    for report in diagnostics.courses.iter().filter(|report| report.is_blocked() && report.is_required) {
+    for report in diagnostics
+        .courses
+        .iter()
+        .filter(|report| report.is_blocked() && report.is_required)
+    {
         if report.total_sections == 0 {
-            result.push(NoResultReason { symbol: "questionmark.folder".into(), title: format!("{} isn’t offered in {term_name}", report.key), detail: Some("Remove it from the schedule or make it optional.".into()) });
+            result.push(NoResultReason {
+                symbol: "questionmark.folder".into(),
+                title: format!("{} isn’t offered in {term_name}", report.key),
+                detail: Some("Remove it from the schedule or make it optional.".into()),
+            });
         } else {
-            result.push(NoResultReason { symbol: "xmark.circle".into(), title: format!("No {} sections left", report.key), detail: Some(rejection_text(report, diagnostics)) });
+            result.push(NoResultReason {
+                symbol: "xmark.circle".into(),
+                title: format!("No {} sections left", report.key),
+                detail: Some(rejection_text(report, diagnostics)),
+            });
         }
     }
     for pair in &diagnostics.conflicting_pairs {
@@ -2818,68 +4052,194 @@ pub fn no_results_reasons(diagnostics: &ScheduleDiagnostics, term_name: &str) ->
     match &diagnostics.count_problem {
         Some(CountProblem::TooManyRequired { required, wanted }) => result.push(NoResultReason {
             symbol: "number.circle".into(),
-            title: format!("{required} courses are required, but schedules are limited to {wanted}"),
+            title: format!(
+                "{required} courses are required, but schedules are limited to {wanted}"
+            ),
             detail: Some("Raise the number of courses or make some courses optional.".into()),
         }),
         Some(CountProblem::TooFewCourses { available, wanted }) => result.push(NoResultReason {
             symbol: "number.circle".into(),
-            title: format!("Only {available} {} sections left, but {wanted} are wanted", if *available == 1 { "course has" } else { "courses have" }),
+            title: format!(
+                "Only {available} {} sections left, but {wanted} are wanted",
+                if *available == 1 {
+                    "course has"
+                } else {
+                    "courses have"
+                }
+            ),
             detail: Some("Lower the number of courses or relax a filter.".into()),
         }),
         Some(CountProblem::CreditsOverTarget { required, limit }) => result.push(NoResultReason {
             symbol: "number.circle".into(),
-            title: format!("The required courses are {required} credits, but your target stops at {limit}"),
+            title: format!(
+                "The required courses are {required} credits, but your target stops at {limit}"
+            ),
             detail: Some("Raise the credit target or make a course optional.".into()),
         }),
-        Some(CountProblem::CreditsUnderTarget { available, wanted }) => result.push(NoResultReason {
-            symbol: "number.circle".into(),
-            title: format!("Your courses add up to {available} credits, but you want {wanted}"),
-            detail: Some("Lower the credit target or add a course.".into()),
-        }),
+        Some(CountProblem::CreditsUnderTarget { available, wanted }) => {
+            result.push(NoResultReason {
+                symbol: "number.circle".into(),
+                title: format!("Your courses add up to {available} credits, but you want {wanted}"),
+                detail: Some("Lower the credit target or add a course.".into()),
+            })
+        }
         None => {}
     }
-    for report in diagnostics.courses.iter().filter(|report| report.is_blocked() && !report.is_required && report.total_sections > 0) {
-        result.push(NoResultReason { symbol: "minus.circle".into(), title: format!("{} (optional) can’t be added", report.key), detail: Some(rejection_text(report, diagnostics)) });
+    for report in diagnostics
+        .courses
+        .iter()
+        .filter(|report| report.is_blocked() && !report.is_required && report.total_sections > 0)
+    {
+        result.push(NoResultReason {
+            symbol: "minus.circle".into(),
+            title: format!("{} (optional) can’t be added", report.key),
+            detail: Some(rejection_text(report, diagnostics)),
+        });
     }
     result
 }
 
 fn rejection_text(report: &CourseReport, diagnostics: &ScheduleDiagnostics) -> String {
     let total = report.total_sections;
-    let mut ordered: Vec<(FilterReason, i32)> = report.rejections.iter().filter(|(_, count)| **count > 0).map(|(reason, count)| (*reason, *count)).collect();
+    let mut ordered: Vec<(FilterReason, i32)> = report
+        .rejections
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| (*reason, *count))
+        .collect();
     ordered.sort_by(|a, b| b.1.cmp(&a.1).then((a.0 as u32).cmp(&(b.0 as u32))));
     if ordered.is_empty() {
-        return if total == 1 { "Its only section was filtered out.".into() } else { format!("All {total} sections were filtered out.") };
+        return if total == 1 {
+            "Its only section was filtered out.".into()
+        } else {
+            format!("All {total} sections were filtered out.")
+        };
     }
     if ordered.len() == 1 && ordered[0].1 as usize == total {
         let phrase = rejection_phrase(ordered[0].0, total != 1, diagnostics);
-        return if total == 1 { format!("Its only section {phrase}.") } else { format!("All {total} sections {phrase}.") };
+        return if total == 1 {
+            format!("Its only section {phrase}.")
+        } else {
+            format!("All {total} sections {phrase}.")
+        };
     }
-    let parts: Vec<String> = ordered.iter().map(|(reason, count)| format!("{count} {}", rejection_phrase(*reason, *count != 1, diagnostics))).collect();
+    let parts: Vec<String> = ordered
+        .iter()
+        .map(|(reason, count)| {
+            format!(
+                "{count} {}",
+                rejection_phrase(*reason, *count != 1, diagnostics)
+            )
+        })
+        .collect();
     format!("Of {total} sections: {}.", parts.join(", "))
 }
 
-fn rejection_phrase(reason: FilterReason, plural: bool, diagnostics: &ScheduleDiagnostics) -> String {
+fn rejection_phrase(
+    reason: FilterReason,
+    plural: bool,
+    diagnostics: &ScheduleDiagnostics,
+) -> String {
     let filters = &diagnostics.filters;
     let preferences = &diagnostics.preferences;
     let clock = |minutes: i32| label_minutes(minutes, true);
     match reason {
-        FilterReason::ExcludedByUser => if plural { "are skipped by you" } else { "is skipped by you" }.into(),
-        FilterReason::StartsTooEarly => format!("{} before {}", if plural { "start" } else { "starts" }, filters.earliest_start.map(clock).unwrap_or_else(|| "your limit".into())),
-        FilterReason::EndsTooLate => format!("{} after {}", if plural { "end" } else { "ends" }, filters.latest_end.map(clock).unwrap_or_else(|| "your limit".into())),
-        FilterReason::FreeDay => format!("{} on a day you want free", if plural { "meet" } else { "meets" }),
-        FilterReason::Honors => if plural { "are honors sections" } else { "is an honors section" }.into(),
+        FilterReason::ExcludedByUser => if plural {
+            "are skipped by you"
+        } else {
+            "is skipped by you"
+        }
+        .into(),
+        FilterReason::StartsTooEarly => format!(
+            "{} before {}",
+            if plural { "start" } else { "starts" },
+            filters
+                .earliest_start
+                .map(clock)
+                .unwrap_or_else(|| "your limit".into())
+        ),
+        FilterReason::EndsTooLate => format!(
+            "{} after {}",
+            if plural { "end" } else { "ends" },
+            filters
+                .latest_end
+                .map(clock)
+                .unwrap_or_else(|| "your limit".into())
+        ),
+        FilterReason::FreeDay => format!(
+            "{} on a day you want free",
+            if plural { "meet" } else { "meets" }
+        ),
+        FilterReason::Honors => if plural {
+            "are honors sections"
+        } else {
+            "is an honors section"
+        }
+        .into(),
         FilterReason::Online => if plural { "are online" } else { "is online" }.into(),
-        FilterReason::Seats => if plural { "are full or low on seats" } else { "is full or low on seats" }.into(),
-        FilterReason::Campus => if plural { "are on another campus" } else { "is on another campus" }.into(),
-        FilterReason::BlockedTime => if plural { "overlap a blocked time" } else { "overlaps a blocked time" }.into(),
-        FilterReason::PrefStartsTooEarly => format!("{} before {}", if plural { "start" } else { "starts" }, preferences.earliest_start.as_ref().map(|l| clock(l.minutes)).unwrap_or_else(|| "your earliest time".into())),
-        FilterReason::PrefEndsTooLate => format!("{} after {}", if plural { "end" } else { "ends" }, preferences.latest_end.as_ref().map(|l| clock(l.minutes)).unwrap_or_else(|| "your latest time".into())),
-        FilterReason::PrefDayOff => format!("{} on a day you want off", if plural { "meet" } else { "meets" }),
-        FilterReason::PrefFormat => format!("{}{}", if plural { "aren’t " } else { "isn’t " }, preferences.format.title().to_ascii_lowercase()),
-        FilterReason::PrefSeats => if plural { "have no open seats" } else { "has no open seats" }.into(),
-        FilterReason::PrefCampus => if plural { "are on another campus" } else { "is on another campus" }.into(),
-        FilterReason::PrefWorkload => if plural { "run longer in a day than your limit" } else { "runs longer in a day than your limit" }.into(),
+        FilterReason::Seats => if plural {
+            "are full or low on seats"
+        } else {
+            "is full or low on seats"
+        }
+        .into(),
+        FilterReason::Campus => if plural {
+            "are on another campus"
+        } else {
+            "is on another campus"
+        }
+        .into(),
+        FilterReason::BlockedTime => if plural {
+            "overlap a blocked time"
+        } else {
+            "overlaps a blocked time"
+        }
+        .into(),
+        FilterReason::PrefStartsTooEarly => format!(
+            "{} before {}",
+            if plural { "start" } else { "starts" },
+            preferences
+                .earliest_start
+                .as_ref()
+                .map(|l| clock(l.minutes))
+                .unwrap_or_else(|| "your earliest time".into())
+        ),
+        FilterReason::PrefEndsTooLate => format!(
+            "{} after {}",
+            if plural { "end" } else { "ends" },
+            preferences
+                .latest_end
+                .as_ref()
+                .map(|l| clock(l.minutes))
+                .unwrap_or_else(|| "your latest time".into())
+        ),
+        FilterReason::PrefDayOff => format!(
+            "{} on a day you want off",
+            if plural { "meet" } else { "meets" }
+        ),
+        FilterReason::PrefFormat => format!(
+            "{}{}",
+            if plural { "aren’t " } else { "isn’t " },
+            preferences.format.title().to_ascii_lowercase()
+        ),
+        FilterReason::PrefSeats => if plural {
+            "have no open seats"
+        } else {
+            "has no open seats"
+        }
+        .into(),
+        FilterReason::PrefCampus => if plural {
+            "are on another campus"
+        } else {
+            "is on another campus"
+        }
+        .into(),
+        FilterReason::PrefWorkload => if plural {
+            "run longer in a day than your limit"
+        } else {
+            "runs longer in a day than your limit"
+        }
+        .into(),
     }
 }
 
@@ -2903,9 +4263,26 @@ pub fn marking_conflicts(events: &[CalendarEvent]) -> Vec<CalendarEvent> {
             if i == j || result[i].is_ghost || result[j].is_ghost {
                 continue;
             }
-            let (a_day, a_start, a_end, a_payload, a_from, a_to) = (result[i].day, result[i].start, result[i].end, result[i].payload.clone(), result[i].start_date.clone(), result[i].end_date.clone());
+            let (a_day, a_start, a_end, a_payload, a_from, a_to) = (
+                result[i].day,
+                result[i].start,
+                result[i].end,
+                result[i].payload.clone(),
+                result[i].start_date.clone(),
+                result[i].end_date.clone(),
+            );
             let b = &result[j];
-            if a_day == b.day && a_start < b.end && b.start < a_end && a_payload != b.payload && date_windows_overlap(a_from.as_deref(), a_to.as_deref(), b.start_date.as_deref(), b.end_date.as_deref()) {
+            if a_day == b.day
+                && a_start < b.end
+                && b.start < a_end
+                && a_payload != b.payload
+                && date_windows_overlap(
+                    a_from.as_deref(),
+                    a_to.as_deref(),
+                    b.start_date.as_deref(),
+                    b.end_date.as_deref(),
+                )
+            {
                 result[i].is_conflict = true;
             }
         }
@@ -2924,8 +4301,12 @@ impl CarouselLayout {
         let mut latest = 0;
         let mut weekdays = HashSet::new();
         for schedule in schedules {
-            if let Some(start) = schedule.earliest_start { earliest = earliest.min(start); }
-            if let Some(end) = schedule.latest_end { latest = latest.max(end); }
+            if let Some(start) = schedule.earliest_start {
+                earliest = earliest.min(start);
+            }
+            if let Some(end) = schedule.latest_end {
+                latest = latest.max(end);
+            }
             for section in &schedule.sections {
                 for meeting in section.weekly_meetings() {
                     for day in meeting.days.indices() {
@@ -2940,12 +4321,18 @@ impl CarouselLayout {
             start..=end
         } else {
             let lower = (earliest / 60).max(0);
-            let upper = ((latest as f64 / 60.0).ceil() as i32).max(lower + 5).min(24);
+            let upper = ((latest as f64 / 60.0).ceil() as i32)
+                .max(lower + 5)
+                .min(24);
             lower..=upper
         };
         let mut days = vec![1, 2, 3, 4, 5];
-        if preferences.show_weekends || weekdays.contains(&6) { days.push(6); }
-        if preferences.show_weekends || weekdays.contains(&0) { days.insert(0, 0); }
+        if preferences.show_weekends || weekdays.contains(&6) {
+            days.push(6);
+        }
+        if preferences.show_weekends || weekdays.contains(&0) {
+            days.insert(0, 0);
+        }
         Self { hours, days }
     }
 }
@@ -2963,35 +4350,62 @@ pub struct AutofillSuggestion {
     pub from_schedule: bool,
 }
 
-pub fn autofill_suggestions(plan: &SchedulePlan, terms: &[Term], degree_plans: &[DegreePlan], schedule_plans: &[SchedulePlan], index: Option<&crate::index::CatalogIndex>) -> Vec<AutofillSuggestion> {
-    let has_siblings = schedule_plans.iter().any(|other| other.term_code == plan.term_code && other.id != plan.id && !other.courses.is_empty());
+pub fn autofill_suggestions(
+    plan: &SchedulePlan,
+    terms: &[Term],
+    degree_plans: &[DegreePlan],
+    schedule_plans: &[SchedulePlan],
+    index: Option<&crate::index::CatalogIndex>,
+) -> Vec<AutofillSuggestion> {
+    let has_siblings = schedule_plans.iter().any(|other| {
+        other.term_code == plan.term_code && other.id != plan.id && !other.courses.is_empty()
+    });
     if degree_plans.is_empty() && !has_siblings {
         return vec![];
     }
     let term = resolve_term(&plan.term_code, terms, index);
-    let already: HashSet<CourseKey> = plan.courses.iter().map(|course| course.key.clone()).collect();
-    crate::planlogic::schedule_suggestions(&term, degree_plans, schedule_plans, Some(plan.id), &already, index)
-        .into_iter()
-        .map(|suggestion| {
-            let from_schedule = suggestion.semester.is_none();
-            let id = if from_schedule {
-                schedule_plans.iter().find(|other| other.name == suggestion.plan_name && other.term_code == term.code).map(|other| format!("schedule-{}", other.id)).unwrap_or_else(|| format!("schedule-{}", suggestion.plan_name))
-            } else {
-                degree_plans.iter().find(|other| other.name == suggestion.plan_name).map(|other| format!("degree-{}", other.id)).unwrap_or_else(|| format!("degree-{}", suggestion.plan_name))
-            };
-            AutofillSuggestion {
-                id,
-                plan_name: suggestion.plan_name,
-                semester: suggestion.semester,
-                title: suggestion.title,
-                detail: suggestion.detail,
-                is_exact_term: suggestion.is_exact_term,
-                courses: suggestion.courses,
-                unavailable: suggestion.unavailable,
-                from_schedule,
-            }
-        })
-        .collect()
+    let already: HashSet<CourseKey> = plan
+        .courses
+        .iter()
+        .map(|course| course.key.clone())
+        .collect();
+    crate::planlogic::schedule_suggestions(
+        &term,
+        degree_plans,
+        schedule_plans,
+        Some(plan.id),
+        &already,
+        index,
+    )
+    .into_iter()
+    .map(|suggestion| {
+        let from_schedule = suggestion.semester.is_none();
+        let id = if from_schedule {
+            schedule_plans
+                .iter()
+                .find(|other| other.name == suggestion.plan_name && other.term_code == term.code)
+                .map(|other| format!("schedule-{}", other.id))
+                .unwrap_or_else(|| format!("schedule-{}", suggestion.plan_name))
+        } else {
+            degree_plans
+                .iter()
+                .find(|other| other.name == suggestion.plan_name)
+                .map(|other| format!("degree-{}", other.id))
+                .unwrap_or_else(|| format!("degree-{}", suggestion.plan_name))
+        };
+        AutofillSuggestion {
+            id,
+            plan_name: suggestion.plan_name,
+            semester: suggestion.semester,
+            title: suggestion.title,
+            detail: suggestion.detail,
+            is_exact_term: suggestion.is_exact_term,
+            courses: suggestion.courses,
+            unavailable: suggestion.unavailable,
+            from_schedule,
+        }
+    })
+    .collect()
 }
 
 pub fn autofill_source_name(suggestion: &AutofillSuggestion) -> String {
@@ -3002,7 +4416,11 @@ pub fn autofill_source_name(suggestion: &AutofillSuggestion) -> String {
 }
 
 pub fn course_count_label(count: usize) -> String {
-    if count == 1 { "1 course".into() } else { format!("{count} courses") }
+    if count == 1 {
+        "1 course".into()
+    } else {
+        format!("{count} courses")
+    }
 }
 
 pub fn dismissal_key(plan_id: uuid::Uuid, suggestion_id: &str) -> String {
@@ -3014,7 +4432,11 @@ pub fn dismissal_contains(key: &str, raw: &str) -> bool {
 }
 
 pub fn dismissal_adding(key: &str, raw: &str, limit: usize) -> String {
-    let mut keys: Vec<String> = raw.split('\n').filter(|line| !line.is_empty() && *line != key).map(str::to_string).collect();
+    let mut keys: Vec<String> = raw
+        .split('\n')
+        .filter(|line| !line.is_empty() && *line != key)
+        .map(str::to_string)
+        .collect();
     keys.push(key.to_string());
     let start = keys.len().saturating_sub(limit);
     keys[start..].join("\n")
@@ -3035,11 +4457,16 @@ pub fn parse_dropped(items: &[String]) -> Vec<DroppedCourse> {
             if parts.len() < 2 {
                 continue;
             }
-            let Some(key) = CourseKey::parse(&format!("{} {}", parts[0], parts[1])) else { continue };
+            let Some(key) = CourseKey::parse(&format!("{} {}", parts[0], parts[1])) else {
+                continue;
+            };
             if !key.number.chars().any(|c| c.is_ascii_digit()) {
                 continue;
             }
-            let crn = parts.get(2).filter(|text| text.len() == 5 && text.chars().all(|c| c.is_ascii_digit())).map(|text| (*text).to_string());
+            let crn = parts
+                .get(2)
+                .filter(|text| text.len() == 5 && text.chars().all(|c| c.is_ascii_digit()))
+                .map(|text| (*text).to_string());
             let dropped = DroppedCourse { key, crn };
             if seen.insert((dropped.key.clone(), dropped.crn.clone())) {
                 out.push(dropped);
@@ -3070,12 +4497,22 @@ pub struct PreferencesContext {
     pub total_credits: i32,
 }
 
-pub fn preferences_context(plan: &SchedulePlan, index: Option<&crate::index::CatalogIndex>) -> PreferencesContext {
-    let Some(index) = index else { return PreferencesContext::default() };
-    let campus_names = index.campus_names.iter().filter(|name| {
-        let lower = name.to_ascii_lowercase();
-        !lower.contains("online") && !lower.contains("no campus")
-    }).cloned().collect();
+pub fn preferences_context(
+    plan: &SchedulePlan,
+    index: Option<&crate::index::CatalogIndex>,
+) -> PreferencesContext {
+    let Some(index) = index else {
+        return PreferencesContext::default();
+    };
+    let campus_names = index
+        .campus_names
+        .iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            !lower.contains("online") && !lower.contains("no campus")
+        })
+        .cloned()
+        .collect();
     let mut by_name: HashMap<String, InstructorOption> = HashMap::new();
     let mut optional_course_count = 0;
     let mut required_credits = 0;
@@ -3084,14 +4521,25 @@ pub fn preferences_context(plan: &SchedulePlan, index: Option<&crate::index::Cat
         let course = index.course(&plan_course.key);
         let least = course.map(|c| c.min_credits.ceil() as i32).unwrap_or(0);
         let most = course.map(|c| c.max_credits.ceil() as i32).unwrap_or(0);
-        if plan_course.is_required { required_credits += least; } else { optional_course_count += 1; }
+        if plan_course.is_required {
+            required_credits += least;
+        } else {
+            optional_course_count += 1;
+        }
         total_credits += least.max(most);
         for section in index.sections_for(&plan_course.key) {
             if plan_course.excluded_crns.contains(&section.crn) {
                 continue;
             }
             for instructor in section.instructors.as_ref().into_iter().flatten() {
-                let option = by_name.entry(instructor.name.clone()).or_insert_with(|| InstructorOption { name: instructor.name.clone(), display_name: instructor.display_name(), courses: vec![] });
+                let option =
+                    by_name
+                        .entry(instructor.name.clone())
+                        .or_insert_with(|| InstructorOption {
+                            name: instructor.name.clone(),
+                            display_name: instructor.display_name(),
+                            courses: vec![],
+                        });
                 if !option.courses.contains(&plan_course.key) {
                     option.courses.push(plan_course.key.clone());
                 }
@@ -3100,7 +4548,13 @@ pub fn preferences_context(plan: &SchedulePlan, index: Option<&crate::index::Cat
     }
     let mut instructors: Vec<_> = by_name.into_values().collect();
     instructors.sort_by_key(|instructor| instructor.name.to_ascii_lowercase());
-    PreferencesContext { campus_names, instructors, optional_course_count, required_credits, total_credits }
+    PreferencesContext {
+        campus_names,
+        instructors,
+        optional_course_count,
+        required_credits,
+        total_credits,
+    }
 }
 
 pub fn create_plan(data: &mut UserData, name: &str, term_code: &str) -> SchedulePlan {
@@ -3140,22 +4594,43 @@ pub fn plan_by_id(data: &UserData, id: uuid::Uuid) -> Option<&SchedulePlan> {
     data.plans.iter().find(|plan| plan.id == id)
 }
 
-pub fn add_course(data: &mut UserData, plan_id: uuid::Uuid, key: CourseKey, required: bool) -> bool {
-    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else { return false };
+pub fn add_course(
+    data: &mut UserData,
+    plan_id: uuid::Uuid,
+    key: CourseKey,
+    required: bool,
+) -> bool {
+    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+        return false;
+    };
     if plan.contains(&key) {
         return false;
     }
     let color = plan.next_color_index();
-    plan.courses.push(PlanCourse { key, is_required: required, excluded_crns: HashSet::new(), color_index: color });
+    plan.courses.push(PlanCourse {
+        key,
+        is_required: required,
+        excluded_crns: HashSet::new(),
+        color_index: color,
+    });
     true
 }
 
-pub fn remove_course(data: &mut UserData, plan_id: uuid::Uuid, key: &CourseKey, sections_of_course: &[String]) {
-    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+pub fn remove_course(
+    data: &mut UserData,
+    plan_id: uuid::Uuid,
+    key: &CourseKey,
+    sections_of_course: &[String],
+) {
+    let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+        return;
+    };
     plan.courses.retain(|course| &course.key != key);
     let crns: HashSet<&str> = sections_of_course.iter().map(String::as_str).collect();
-    plan.selected_crns.retain(|crn| !crns.contains(crn.as_str()));
-    plan.favorite_combinations.retain(|combination| !combination.iter().any(|crn| crns.contains(crn.as_str())));
+    plan.selected_crns
+        .retain(|crn| !crns.contains(crn.as_str()));
+    plan.favorite_combinations
+        .retain(|combination| !combination.iter().any(|crn| crns.contains(crn.as_str())));
 }
 
 #[derive(Clone, Debug)]
@@ -3166,7 +4641,12 @@ pub struct CourseRemoval {
     pub favorite_combinations: Vec<Vec<String>>,
 }
 
-pub fn remove_plan_course(data: &mut UserData, plan_id: uuid::Uuid, key: &CourseKey, index: Option<&crate::index::CatalogIndex>) -> Option<CourseRemoval> {
+pub fn remove_plan_course(
+    data: &mut UserData,
+    plan_id: uuid::Uuid,
+    key: &CourseKey,
+    index: Option<&crate::index::CatalogIndex>,
+) -> Option<CourseRemoval> {
     let plan = data.plans.iter().find(|plan| plan.id == plan_id)?.clone();
     let resolved = ResolvedPlan::resolve(&plan, index);
     let entry = resolved.entries.iter().find(|entry| entry.key() == key)?;
@@ -3181,9 +4661,23 @@ pub fn remove_plan_course(data: &mut UserData, plan_id: uuid::Uuid, key: &Course
     }
     let removal = CourseRemoval {
         course: entry.plan_course.clone(),
-        index: plan.courses.iter().position(|course| &course.key == key).unwrap_or(plan.courses.len()),
-        selected_crns: plan.selected_crns.iter().filter(|crn| crns.contains(*crn)).cloned().collect(),
-        favorite_combinations: plan.favorite_combinations.iter().filter(|combination| combination.iter().any(|crn| crns.contains(crn))).cloned().collect(),
+        index: plan
+            .courses
+            .iter()
+            .position(|course| &course.key == key)
+            .unwrap_or(plan.courses.len()),
+        selected_crns: plan
+            .selected_crns
+            .iter()
+            .filter(|crn| crns.contains(*crn))
+            .cloned()
+            .collect(),
+        favorite_combinations: plan
+            .favorite_combinations
+            .iter()
+            .filter(|combination| combination.iter().any(|crn| crns.contains(crn)))
+            .cloned()
+            .collect(),
     };
     remove_course(data, plan_id, key, &crns.into_iter().collect::<Vec<_>>());
     Some(removal)
@@ -3207,7 +4701,11 @@ pub fn restore_removal(plan: &mut SchedulePlan, removal: &CourseRemoval) {
     }
 }
 
-pub fn add_autofill_courses(data: &mut UserData, plan_id: uuid::Uuid, courses: &[CourseKey]) -> Vec<CourseKey> {
+pub fn add_autofill_courses(
+    data: &mut UserData,
+    plan_id: uuid::Uuid,
+    courses: &[CourseKey],
+) -> Vec<CourseKey> {
     let mut added = vec![];
     for key in courses {
         if add_course(data, plan_id, key.clone(), true) {
@@ -3217,31 +4715,72 @@ pub fn add_autofill_courses(data: &mut UserData, plan_id: uuid::Uuid, courses: &
     added
 }
 
-pub fn undo_autofill(data: &mut UserData, plan_id: uuid::Uuid, keys: &[CourseKey], index: Option<&crate::index::CatalogIndex>) {
+pub fn undo_autofill(
+    data: &mut UserData,
+    plan_id: uuid::Uuid,
+    keys: &[CourseKey],
+    index: Option<&crate::index::CatalogIndex>,
+) {
     for key in keys {
-        let crns: Vec<String> = index.map(|index| index.sections_for(key).into_iter().map(|section| section.crn).collect()).unwrap_or_default();
+        let crns: Vec<String> = index
+            .map(|index| {
+                index
+                    .sections_for(key)
+                    .into_iter()
+                    .map(|section| section.crn)
+                    .collect()
+            })
+            .unwrap_or_default();
         remove_course(data, plan_id, key, &crns);
     }
 }
 
 pub fn active_primary_plan(plans: &[SchedulePlan], now: f64) -> Option<&SchedulePlan> {
-    let candidates: Vec<(&SchedulePlan, (f64, f64))> = plans.iter().filter_map(|plan| {
-        if !plan.is_primary || plan.selected_crns.is_empty() {
-            return None;
-        }
-        Some((plan, crate::calendar::approximate_window(&plan.term_code)?))
-    }).collect();
-    if let Some((plan, _)) = candidates.iter().filter(|(_, window)| now >= window.0 && now <= window.1).max_by_key(|(plan, _)| plan.selected_crns.len()) {
+    let candidates: Vec<(&SchedulePlan, (f64, f64))> = plans
+        .iter()
+        .filter_map(|plan| {
+            if !plan.is_primary || plan.selected_crns.is_empty() {
+                return None;
+            }
+            Some((plan, crate::calendar::approximate_window(&plan.term_code)?))
+        })
+        .collect();
+    if let Some((plan, _)) = candidates
+        .iter()
+        .filter(|(_, window)| now >= window.0 && now <= window.1)
+        .max_by_key(|(plan, _)| plan.selected_crns.len())
+    {
         return Some(*plan);
     }
-    if let Some((plan, _)) = candidates.iter().filter(|(_, window)| window.0 > now).min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap_or(std::cmp::Ordering::Equal)) {
+    if let Some((plan, _)) = candidates
+        .iter()
+        .filter(|(_, window)| window.0 > now)
+        .min_by(|a, b| {
+            a.1 .0
+                .partial_cmp(&b.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
         return Some(*plan);
     }
     let cutoff = now - 14.0 * 24.0 * 3600.0;
-    candidates.iter().filter(|(_, window)| window.1 >= cutoff).max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap_or(std::cmp::Ordering::Equal)).map(|(plan, _)| *plan)
+    candidates
+        .iter()
+        .filter(|(_, window)| window.1 >= cutoff)
+        .max_by(|a, b| {
+            a.1 .1
+                .partial_cmp(&b.1 .1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(plan, _)| *plan)
 }
 
-pub fn reorder_semester<'a>(plan: &SchedulePlan, degree: Option<&'a DegreePlan>, terms: &[Term], index: Option<&crate::index::CatalogIndex>) -> Option<(&'a DegreePlan, Term)> {
+pub fn reorder_semester<'a>(
+    plan: &SchedulePlan,
+    degree: Option<&'a DegreePlan>,
+    terms: &[Term],
+    index: Option<&crate::index::CatalogIndex>,
+) -> Option<(&'a DegreePlan, Term)> {
     let degree = degree?;
     let term = resolve_term(&plan.term_code, terms, index);
     degree.term_matching(&term)?;
@@ -3257,7 +4796,10 @@ fn resolve_term(code: &str, terms: &[Term], index: Option<&crate::index::Catalog
             return index.catalog.term.clone();
         }
     }
-    Term { code: code.to_string(), banner_description: String::new() }
+    Term {
+        code: code.to_string(),
+        banner_description: String::new(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3273,24 +4815,58 @@ pub struct ReorderOption {
 
 impl ReorderOption {
     pub fn from_suggestion(suggestion: &crate::reorder::Suggestion, origin: uuid::Uuid) -> Self {
-        let (moved_away, moved_in, adds_semester, _) = crate::reorder::schedule_option(suggestion, origin);
-        Self { id: suggestion.id.clone(), title: suggestion.title.clone(), reasons: suggestion.reasons.clone(), adds_semester, moved_away, moved_in, suggestion: Some(suggestion.clone()) }
+        let (moved_away, moved_in, adds_semester, _) =
+            crate::reorder::schedule_option(suggestion, origin);
+        Self {
+            id: suggestion.id.clone(),
+            title: suggestion.title.clone(),
+            reasons: suggestion.reasons.clone(),
+            adds_semester,
+            moved_away,
+            moved_in,
+            suggestion: Some(suggestion.clone()),
+        }
     }
     pub fn custom(title: impl Into<String>) -> Self {
-        Self { id: "x".into(), title: title.into(), reasons: vec![], adds_semester: false, moved_away: vec![], moved_in: vec![], suggestion: None }
+        Self {
+            id: "x".into(),
+            title: title.into(),
+            reasons: vec![],
+            adds_semester: false,
+            moved_away: vec![],
+            moved_in: vec![],
+            suggestion: None,
+        }
     }
     pub fn applied_text(&self) -> String {
-        self.title.strip_prefix("Move ").map(|rest| format!("Moved {rest}")).unwrap_or_else(|| "Updated your degree plan".into())
+        self.title
+            .strip_prefix("Move ")
+            .map(|rest| format!("Moved {rest}"))
+            .unwrap_or_else(|| "Updated your degree plan".into())
     }
     pub fn schedule_effect(&self) -> String {
         let mut parts = vec![];
         if !self.moved_away.is_empty() {
-            let verb = if self.moved_away.len() == 1 { "comes" } else { "come" };
-            parts.push(format!("{} {verb} out of this schedule.", course_list(&self.moved_away)));
+            let verb = if self.moved_away.len() == 1 {
+                "comes"
+            } else {
+                "come"
+            };
+            parts.push(format!(
+                "{} {verb} out of this schedule.",
+                course_list(&self.moved_away)
+            ));
         }
         if !self.moved_in.is_empty() {
-            let verb = if self.moved_in.len() == 1 { "it’s" } else { "they’re" };
-            parts.push(format!("{} will be added to it if {verb} offered this term.", course_list(&self.moved_in)));
+            let verb = if self.moved_in.len() == 1 {
+                "it’s"
+            } else {
+                "they’re"
+            };
+            parts.push(format!(
+                "{} will be added to it if {verb} offered this term.",
+                course_list(&self.moved_in)
+            ));
         }
         parts.join(" ")
     }
@@ -3302,18 +4878,45 @@ impl ReorderOption {
 }
 
 /// The offline early return: nothing is looked up when the blocking course is not in the semester.
-pub fn reorder_load_offline(blocking: &[CourseKey], degree_plan: &DegreePlan, term: &Term) -> Vec<ReorderOption> {
+pub fn reorder_load_offline(
+    blocking: &[CourseKey],
+    degree_plan: &DegreePlan,
+    term: &Term,
+) -> Vec<ReorderOption> {
     let mut plan = degree_plan.clone();
     plan.sort_terms();
-    let Some(origin) = plan.terms.iter().find(|semester| semester.matches_term(term)).cloned() else { return vec![] };
-    let in_semester: HashSet<CourseKey> = origin.courses.iter().filter_map(|course| course.key.clone()).collect();
-    let candidates: Vec<CourseKey> = blocking.iter().filter(|key| in_semester.contains(*key)).cloned().collect();
+    let Some(origin) = plan
+        .terms
+        .iter()
+        .find(|semester| semester.matches_term(term))
+        .cloned()
+    else {
+        return vec![];
+    };
+    let in_semester: HashSet<CourseKey> = origin
+        .courses
+        .iter()
+        .filter_map(|course| course.key.clone())
+        .collect();
+    let candidates: Vec<CourseKey> = blocking
+        .iter()
+        .filter(|key| in_semester.contains(*key))
+        .cloned()
+        .collect();
     if candidates.is_empty() {
         return vec![];
     }
     let history = crate::offering::OfferingHistory::empty();
-    crate::reorder::suggestions(&plan, origin.id, &candidates, &history, |_| None, &crate::CourseEquivalences::none(), 20.0)
-        .iter()
-        .map(|suggestion| ReorderOption::from_suggestion(suggestion, origin.id))
-        .collect()
+    crate::reorder::suggestions(
+        &plan,
+        origin.id,
+        &candidates,
+        &history,
+        |_| None,
+        &crate::CourseEquivalences::none(),
+        20.0,
+    )
+    .iter()
+    .map(|suggestion| ReorderOption::from_suggestion(suggestion, origin.id))
+    .collect()
 }

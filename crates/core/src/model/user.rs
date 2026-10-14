@@ -1,6 +1,6 @@
-use super::section::{CourseKey, DaySet};
 use super::degree::{CourseEquivalence, DegreePlan, RequirementSubstitution};
 use super::preferences::SchedulePreferences;
+use super::section::{CourseKey, DaySet};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -69,14 +69,30 @@ impl Default for ScheduleFilters {
 impl ScheduleFilters {
     pub fn active_count(&self) -> i32 {
         let mut n = 0;
-        if self.earliest_start.is_some() { n += 1; }
-        if self.latest_end.is_some() { n += 1; }
-        if !self.free_days.is_empty() { n += 1; }
-        if !self.include_honors { n += 1; }
-        if !self.include_online { n += 1; }
-        if self.hide_full_sections || self.min_seats > 0 { n += 1; }
-        if self.campus.is_some() { n += 1; }
-        if self.course_count.is_some() { n += 1; }
+        if self.earliest_start.is_some() {
+            n += 1;
+        }
+        if self.latest_end.is_some() {
+            n += 1;
+        }
+        if !self.free_days.is_empty() {
+            n += 1;
+        }
+        if !self.include_honors {
+            n += 1;
+        }
+        if !self.include_online {
+            n += 1;
+        }
+        if self.hide_full_sections || self.min_seats > 0 {
+            n += 1;
+        }
+        if self.campus.is_some() {
+            n += 1;
+        }
+        if self.course_count.is_some() {
+            n += 1;
+        }
         n
     }
 }
@@ -126,7 +142,9 @@ impl SchedulePlan {
     }
     pub fn next_color_index(&self) -> i32 {
         let used: HashSet<i32> = self.courses.iter().map(|c| c.color_index).collect();
-        (0..PALETTE_COUNT as i32).find(|i| !used.contains(i)).unwrap_or(self.courses.len() as i32 % PALETTE_COUNT as i32)
+        (0..PALETTE_COUNT as i32)
+            .find(|i| !used.contains(i))
+            .unwrap_or(self.courses.len() as i32 % PALETTE_COUNT as i32)
     }
 }
 
@@ -197,9 +215,15 @@ pub struct AppPreferences {
     pub include_student_in_export: bool,
 }
 
-fn hour8() -> i32 { 8 }
-fn hour21() -> i32 { 21 }
-fn fifteen() -> i32 { 15 }
+fn hour8() -> i32 {
+    8
+}
+fn hour21() -> i32 {
+    21
+}
+fn fifteen() -> i32 {
+    15
+}
 
 impl Default for AppPreferences {
     fn default() -> Self {
@@ -245,7 +269,9 @@ pub struct UserData {
     pub dismissed_equivalences: Vec<String>,
 }
 
-fn one() -> i32 { 1 }
+fn one() -> i32 {
+    1
+}
 
 impl Default for UserData {
     fn default() -> Self {
@@ -329,10 +355,17 @@ impl UserData {
     /// Whether a plan for the term already holds the course, or the given section.
     /// `UserDataStore.courseIsInSchedule`: plans of that term only. A CRN counts when a
     /// plan's selected CRNs contain it; otherwise the plan must contain the course.
-    pub fn course_is_in_schedule(&self, term_code: &str, key: &CourseKey, crn: Option<&str>) -> bool {
+    pub fn course_is_in_schedule(
+        &self,
+        term_code: &str,
+        key: &CourseKey,
+        crn: Option<&str>,
+    ) -> bool {
         let plans = self.plans.iter().filter(|plan| plan.term_code == term_code);
         if let Some(crn) = crn {
-            plans.into_iter().any(|plan| plan.selected_crns.iter().any(|item| item == crn))
+            plans
+                .into_iter()
+                .any(|plan| plan.selected_crns.iter().any(|item| item == crn))
         } else {
             plans.into_iter().any(|plan| plan.contains(key))
         }
@@ -359,12 +392,19 @@ impl UserData {
 
     /// Adds a course to a plan. Returns false if it was already there (`UserDataStore.addCourse`).
     pub fn add_course(&mut self, key: CourseKey, plan_id: Uuid) -> bool {
-        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else { return false };
+        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+            return false;
+        };
         if plan.contains(&key) {
             return false;
         }
         let color_index = plan.next_color_index();
-        plan.courses.push(PlanCourse { key, is_required: true, excluded_crns: HashSet::new(), color_index });
+        plan.courses.push(PlanCourse {
+            key,
+            is_required: true,
+            excluded_crns: HashSet::new(),
+            color_index,
+        });
         true
     }
 
@@ -375,7 +415,11 @@ impl UserData {
     }
 
     pub fn add_schedule(&mut self, mut plan: SchedulePlan) -> Uuid {
-        if !self.plans.iter().any(|p| p.is_primary && p.term_code == plan.term_code) {
+        if !self
+            .plans
+            .iter()
+            .any(|p| p.is_primary && p.term_code == plan.term_code)
+        {
             plan.is_primary = true;
         } else if plan.is_primary {
             for existing in &mut self.plans {
@@ -391,8 +435,12 @@ impl UserData {
 }
 
 fn decode_each<T: for<'de> Deserialize<'de>>(value: Option<&serde_json::Value>) -> Vec<T> {
-    let Some(arr) = value.and_then(|v| v.as_array()) else { return vec![] };
-    arr.iter().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect()
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|item| serde_json::from_value(item.clone()).ok())
+        .collect()
 }
 
 /// Re-export so user data mentions these types exist for the compiler.

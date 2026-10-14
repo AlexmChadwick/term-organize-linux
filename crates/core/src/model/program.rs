@@ -32,7 +32,9 @@ impl CatalogYear {
     }
     /// July is the catalog turnover.
     pub fn containing(year: i32, month: u32) -> Self {
-        Self { start_year: if month >= 7 { year } else { year - 1 } }
+        Self {
+            start_year: if month >= 7 { year } else { year - 1 },
+        }
     }
 }
 
@@ -81,8 +83,16 @@ impl CatalogEditions {
     }
     pub fn estimated(year: i32, month: u32) -> Self {
         let current = CatalogYear::containing(year, month);
-        let archived = (2016..current.start_year).rev().map(CatalogYear::new).collect();
-        Self { current, archived, fetched_at: 0.0, is_estimated: true }
+        let archived = (2016..current.start_year)
+            .rev()
+            .map(CatalogYear::new)
+            .collect();
+        Self {
+            current,
+            archived,
+            fetched_at: 0.0,
+            is_estimated: true,
+        }
     }
 }
 
@@ -111,9 +121,14 @@ impl CatalogProgram {
         }
     }
     pub fn parts(&self) -> (String, Option<String>, Option<String>) {
-        let re = regex::Regex::new(r"^(.+?),\s*([A-Za-z][A-Za-z.]{1,9})(?:\s*\(([^)]+)\))?\s*$").unwrap();
+        let re = regex::Regex::new(r"^(.+?),\s*([A-Za-z][A-Za-z.]{1,9})(?:\s*\(([^)]+)\))?\s*$")
+            .unwrap();
         if let Some(c) = re.captures(&self.title) {
-            (c[1].to_string(), Some(c[2].to_string()), c.get(3).map(|m| m.as_str().to_string()))
+            (
+                c[1].to_string(),
+                Some(c[2].to_string()),
+                c.get(3).map(|m| m.as_str().to_string()),
+            )
         } else {
             (self.title.clone(), None, None)
         }
@@ -168,13 +183,22 @@ pub struct ProgramRequirements {
 
 impl ProgramRequirements {
     pub fn concentrations(&self) -> Vec<&RequirementSection> {
-        self.sections.iter().filter(|s| s.is_concentration).collect()
+        self.sections
+            .iter()
+            .filter(|s| s.is_concentration)
+            .collect()
     }
     pub fn applicable_sections(&self, concentration_id: Option<&str>) -> Vec<&RequirementSection> {
-        self.sections.iter().filter(|s| !s.is_concentration || Some(s.id.as_str()) == concentration_id).collect()
+        self.sections
+            .iter()
+            .filter(|s| !s.is_concentration || Some(s.id.as_str()) == concentration_id)
+            .collect()
     }
     pub fn all_rules(&self) -> Vec<&RequirementRule> {
-        self.sections.iter().flat_map(|s| s.groups.iter().flat_map(|g| g.rules.iter())).collect()
+        self.sections
+            .iter()
+            .flat_map(|s| s.groups.iter().flat_map(|g| g.rules.iter()))
+            .collect()
     }
     pub fn rule(&self, id: &str) -> Option<&RequirementRule> {
         self.all_rules().into_iter().find(|r| r.id == id)
@@ -185,8 +209,14 @@ impl ProgramRequirements {
                 if let Some(rule) = group.rules.iter().find(|r| r.id == id) {
                     if group.rules.len() == 1 {
                         if let Some(title) = self.title_of_rule(id) {
-                            if section.is_concentration && group.title.is_none() && !rule.degree_names_courses() {
-                                return Some(format!("{} concentration", section.concentration_name()));
+                            if section.is_concentration
+                                && group.title.is_none()
+                                && !rule.degree_names_courses()
+                            {
+                                return Some(format!(
+                                    "{} concentration",
+                                    section.concentration_name()
+                                ));
                             }
                             return Some(title);
                         }
@@ -211,7 +241,11 @@ impl ProgramRequirements {
             for group in &section.groups {
                 if let Some(rule) = group.rules.iter().find(|r| r.id == id) {
                     if group.rules.len() == 1 {
-                        if let Some(title) = group.title.as_ref().or(if section.is_concentration { Some(&section.title) } else { None }) {
+                        if let Some(title) = group.title.as_ref().or(if section.is_concentration {
+                            Some(&section.title)
+                        } else {
+                            None
+                        }) {
                             return Some(title.clone());
                         }
                     }
@@ -238,9 +272,13 @@ pub struct RequirementSection {
 
 impl RequirementSection {
     pub fn concentration_name(&self) -> String {
-        let re1 = regex::Regex::new(r"(?i)^(Concentration|Track|Option|Pathway)(\s+in\s+|\s*:\s*)").unwrap();
+        let re1 = regex::Regex::new(r"(?i)^(Concentration|Track|Option|Pathway)(\s+in\s+|\s*:\s*)")
+            .unwrap();
         let re2 = regex::Regex::new(r"(?i)\s+(Concentration|Track|Option|Pathway)$").unwrap();
-        let t = re2.replace(&re1.replace(&self.title, ""), "").trim_matches(|c: char| c == '*' || c.is_whitespace()).to_string();
+        let t = re2
+            .replace(&re1.replace(&self.title, ""), "")
+            .trim_matches(|c: char| c == '*' || c.is_whitespace())
+            .to_string();
         t
     }
 }
@@ -287,10 +325,15 @@ pub struct RequirementRule {
 
 impl RequirementRule {
     pub fn display_label(&self) -> String {
-        self.label.strip_suffix(':').unwrap_or(&self.label).to_string()
+        self.label
+            .strip_suffix(':')
+            .unwrap_or(&self.label)
+            .to_string()
     }
     pub fn degree_names_courses(&self) -> bool {
-        regex::Regex::new(r"^[A-Z]{2,5}\s?\d{4}").unwrap().is_match(&self.display_label())
+        regex::Regex::new(r"^[A-Z]{2,5}\s?\d{4}")
+            .unwrap()
+            .is_match(&self.display_label())
     }
     pub fn degree_is_general_electives(&self) -> bool {
         matches!(self.kind, RuleKind::GeneralElectives { .. })
@@ -298,7 +341,9 @@ impl RequirementRule {
     pub fn listed_courses(&self) -> Vec<CourseKey> {
         match &self.kind {
             RuleKind::Required(o) => o.all_courses(),
-            RuleKind::Choose { options, .. } => options.iter().flat_map(|o| o.all_courses()).collect(),
+            RuleKind::Choose { options, .. } => {
+                options.iter().flat_map(|o| o.all_courses()).collect()
+            }
             RuleKind::GeneralElectives { .. } => vec![],
         }
     }
@@ -325,7 +370,12 @@ impl CourseOption {
     pub fn label(&self) -> String {
         self.alternatives
             .iter()
-            .map(|set| set.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" and "))
+            .map(|set| {
+                set.iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            })
             .collect::<Vec<_>>()
             .join(" or ")
     }
@@ -347,7 +397,11 @@ impl CourseRange {
         if key.subject != self.subject || self.except.iter().any(|e| e == key) {
             return false;
         }
-        let digits: String = key.number.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = key
+            .number
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if digits.len() != 4 {
             return false;
         }
@@ -356,14 +410,23 @@ impl CourseRange {
     }
     pub fn described_label(&self) -> String {
         let mut text = match (self.lowest > 0, self.highest) {
-            (true, Some(h)) => format!("{} {} to {} {}", self.subject, self.lowest, self.subject, h),
+            (true, Some(h)) => {
+                format!("{} {} to {} {}", self.subject, self.lowest, self.subject, h)
+            }
             (true, None) => format!("{} {} or higher", self.subject, self.lowest),
             (false, Some(h)) => format!("{} courses up to {} {}", self.subject, self.subject, h),
             (false, None) => format!("Any {} course", self.subject),
         };
         if !self.except.is_empty() {
             text.push_str(", except ");
-            text.push_str(&self.except.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
+            text.push_str(
+                &self
+                    .except
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
         }
         text
     }

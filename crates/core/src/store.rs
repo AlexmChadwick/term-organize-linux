@@ -22,7 +22,9 @@ pub fn user_path() -> PathBuf {
 
 pub fn load() -> UserData {
     let path = user_path();
-    let Ok(text) = std::fs::read_to_string(&path) else { return UserData::default() };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return UserData::default();
+    };
     let mut data = UserData::from_json_lossy(&text);
     keep_one_primary(&mut data);
     data
@@ -44,13 +46,21 @@ pub fn keep_one_primary(data: &mut UserData) {
     let mut seen = false;
     for plan in &mut data.plans {
         if plan.is_primary {
-            if seen { plan.is_primary = false; } else { seen = true; }
+            if seen {
+                plan.is_primary = false;
+            } else {
+                seen = true;
+            }
         }
     }
     let mut seen = false;
     for plan in &mut data.degree_plans {
         if plan.is_primary {
-            if seen { plan.is_primary = false; } else { seen = true; }
+            if seen {
+                plan.is_primary = false;
+            } else {
+                seen = true;
+            }
         }
     }
 }
@@ -81,7 +91,14 @@ pub fn round_trip_user_file(data: &UserData) -> Result<UserData, String> {
 }
 
 const INSTANT_KEYS: &[&str] = &[
-    "createdAt", "updatedAt", "savedAt", "addedAt", "viewedAt", "lastCheckedAt", "lastNotifiedAt", "printedAt",
+    "createdAt",
+    "updatedAt",
+    "savedAt",
+    "addedAt",
+    "viewedAt",
+    "lastCheckedAt",
+    "lastNotifiedAt",
+    "printedAt",
 ];
 
 pub fn floor_user_dates(value: &mut serde_json::Value) {

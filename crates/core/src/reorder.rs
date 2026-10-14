@@ -65,18 +65,36 @@ pub fn suggestions(
 ) -> Vec<Suggestion> {
     let mut plan = plan.clone();
     plan.sort_terms();
-    let Some(origin) = plan.terms.iter().position(|term| term.id == term_id) else { return vec![] };
+    let Some(origin) = plan.terms.iter().position(|term| term.id == term_id) else {
+        return vec![];
+    };
     let mut requirements = HashMap::new();
-    for key in plan.terms.iter().flat_map(|term| term.courses.iter().filter_map(|c| c.key.clone())) {
-        requirements.entry(key.clone()).or_insert_with(|| match prerequisites(&key) {
-            None => Need::Unknown,
-            Some(None) => Need::Nothing,
-            Some(Some(requisite)) => Need::Needs(requisite),
-        });
+    for key in plan
+        .terms
+        .iter()
+        .flat_map(|term| term.courses.iter().filter_map(|c| c.key.clone()))
+    {
+        requirements
+            .entry(key.clone())
+            .or_insert_with(|| match prerequisites(&key) {
+                None => Need::Unknown,
+                Some(None) => Need::Nothing,
+                Some(Some(requisite)) => Need::Needs(requisite),
+            });
     }
-    let equivalences = equivalences.merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let equivalences = equivalences.merging(&CourseEquivalences::from_declarations(
+        &plan.course_equivalences,
+    ));
     let before = evaluate(&plan, &requirements, &equivalences);
-    let engine = Engine { plan, origin, history, requirements, equivalences, max_credits, before };
+    let engine = Engine {
+        plan,
+        origin,
+        history,
+        requirements,
+        equivalences,
+        max_credits,
+        before,
+    };
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let blocking_set: HashSet<CourseKey> = blocking.iter().cloned().collect();
@@ -84,18 +102,33 @@ pub fn suggestions(
         if !seen.insert(key.clone()) {
             continue;
         }
-        let Some(course) = engine.plan.terms[origin].courses.iter().find(|c| c.key.as_ref() == Some(key)).cloned() else { continue };
+        let Some(course) = engine.plan.terms[origin]
+            .courses
+            .iter()
+            .find(|c| c.key.as_ref() == Some(key))
+            .cloned()
+        else {
+            continue;
+        };
         candidates.extend(engine.candidates(&course, order as i32, &blocking_set));
     }
     candidates.sort_by_key(|candidate| candidate.rank);
-    candidates.into_iter().take(MAX_SUGGESTIONS).map(|c| c.suggestion).collect()
+    candidates
+        .into_iter()
+        .take(MAX_SUGGESTIONS)
+        .map(|c| c.suggestion)
+        .collect()
 }
 
 pub fn apply(suggestion: &Suggestion, plan: &mut DegreePlan) {
     let mut updated = plan.clone();
     let mut semester_id: HashMap<Uuid, Uuid> = HashMap::new();
     if let Some(semester) = &suggestion.adds_semester {
-        if let Some(existing) = updated.terms.iter().find(|term| term.season == semester.season && term.year == semester.year) {
+        if let Some(existing) = updated
+            .terms
+            .iter()
+            .find(|term| term.season == semester.season && term.year == semester.year)
+        {
             semester_id.insert(semester.id, existing.id);
         } else {
             updated.terms.push(semester.clone());
@@ -112,18 +145,30 @@ pub fn apply(suggestion: &Suggestion, plan: &mut DegreePlan) {
 }
 
 fn perform_move(course: &CourseKey, from: Uuid, to: Uuid, plan: &mut DegreePlan) -> bool {
-    let Some(source) = plan.terms.iter().position(|term| term.id == from) else { return false };
+    let Some(source) = plan.terms.iter().position(|term| term.id == from) else {
+        return false;
+    };
     if !plan.terms.iter().any(|term| term.id == to) {
         return false;
     }
-    let Some(position) = plan.terms[source].courses.iter().position(|item| item.key.as_ref() == Some(course)) else { return false };
+    let Some(position) = plan.terms[source]
+        .courses
+        .iter()
+        .position(|item| item.key.as_ref() == Some(course))
+    else {
+        return false;
+    };
     let moved = plan.terms[source].courses.remove(position);
     let target = plan.terms.iter().position(|term| term.id == to).unwrap();
     plan.terms[target].courses.push(moved);
     true
 }
 
-fn evaluate(plan: &DegreePlan, requirements: &HashMap<CourseKey, Need>, equivalences: &CourseEquivalences) -> HashMap<Uuid, Check> {
+fn evaluate(
+    plan: &DegreePlan,
+    requirements: &HashMap<CourseKey, Need>,
+    equivalences: &CourseEquivalences,
+) -> HashMap<Uuid, Check> {
     let mut taken: HashSet<CourseKey> = plan.completed_keys().into_iter().collect();
     let mut checks = HashMap::new();
     for term in &plan.terms {
@@ -136,12 +181,24 @@ fn evaluate(plan: &DegreePlan, requirements: &HashMap<CourseKey, Need>, equivale
     checks
 }
 
-fn check(key: &CourseKey, taken: &HashSet<CourseKey>, requirements: &HashMap<CourseKey, Need>, equivalences: &CourseEquivalences) -> Check {
+fn check(
+    key: &CourseKey,
+    taken: &HashSet<CourseKey>,
+    requirements: &HashMap<CourseKey, Need>,
+    equivalences: &CourseEquivalences,
+) -> Check {
     match requirements.get(key).unwrap_or(&Need::Unknown) {
         Need::Unknown => Check::Unknown,
         Need::Nothing => Check::Met,
         Need::Needs(requisite) => {
-            if matches!(status(Some(requisite), taken, equivalences), PrereqStatus::Met) { Check::Met } else { Check::Missing }
+            if matches!(
+                status(Some(requisite), taken, equivalences),
+                PrereqStatus::Met
+            ) {
+                Check::Met
+            } else {
+                Check::Missing
+            }
         }
     }
 }
@@ -157,7 +214,11 @@ struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
-    fn checks_after(&self, changed: &DegreePlan, moved: &HashSet<Uuid>) -> Option<HashMap<Uuid, Check>> {
+    fn checks_after(
+        &self,
+        changed: &DegreePlan,
+        moved: &HashSet<Uuid>,
+    ) -> Option<HashMap<Uuid, Check>> {
         let after = evaluate(changed, &self.requirements, &self.equivalences);
         for (id, check) in &after {
             if moved.contains(id) {
@@ -172,7 +233,15 @@ impl<'a> Engine<'a> {
     }
 
     fn credits_label(&self, credits: f64) -> String {
-        format!("{} {}", crate::model::credit_number(credits), if (credits - 1.0).abs() < 1e-9 { "credit" } else { "credits" })
+        format!(
+            "{} {}",
+            crate::model::credit_number(credits),
+            if (credits - 1.0).abs() < 1e-9 {
+                "credit"
+            } else {
+                "credits"
+            }
+        )
     }
 
     fn uncertainty(&self, key: &CourseKey, season: PlanSeason) -> Option<i32> {
@@ -185,21 +254,48 @@ impl<'a> Engine<'a> {
 
     fn offering_reason(&self, key: &CourseKey, season: PlanSeason, named: bool) -> String {
         let text = self.history.summary_in(key, season);
-        if named { format!("{key}: {}", lower_first(&text)) } else { text }
+        if named {
+            format!("{key}: {}", lower_first(&text))
+        } else {
+            text
+        }
     }
 
-    fn prerequisite_reason(&self, key: &CourseKey, check: Check, was_met: bool, named: bool) -> String {
+    fn prerequisite_reason(
+        &self,
+        key: &CourseKey,
+        check: Check,
+        was_met: bool,
+        named: bool,
+    ) -> String {
         let text = match (self.requirements.get(key).unwrap_or(&Need::Unknown), check) {
             (_, Check::Unknown) => "Prerequisites couldn’t be checked".to_string(),
             (Need::Nothing, _) => "No prerequisites".into(),
-            (_, Check::Met) => if was_met { "Prerequisites still met".into() } else { "Prerequisites met by then".into() },
+            (_, Check::Met) => {
+                if was_met {
+                    "Prerequisites still met".into()
+                } else {
+                    "Prerequisites met by then".into()
+                }
+            }
             (_, Check::Missing) => "Prerequisites not met".into(),
         };
-        if named { format!("{key}: {}", lower_first(&text)) } else { text }
+        if named {
+            format!("{key}: {}", lower_first(&text))
+        } else {
+            text
+        }
     }
 
-    fn candidates(&self, course: &DegreePlanCourse, order: i32, blocking: &HashSet<CourseKey>) -> Vec<Candidate> {
-        let Some(key) = &course.key else { return vec![] };
+    fn candidates(
+        &self,
+        course: &DegreePlanCourse,
+        order: i32,
+        blocking: &HashSet<CourseKey>,
+    ) -> Vec<Candidate> {
+        let Some(key) = &course.key else {
+            return vec![];
+        };
         let mut found = Vec::new();
         if self.origin + 1 < self.plan.terms.len() {
             for target in (self.origin + 1)..self.plan.terms.len() {
@@ -207,11 +303,21 @@ impl<'a> Engine<'a> {
                     found.push(single);
                 }
                 for (position, partner) in self.plan.terms[target].courses.iter().enumerate() {
-                    let Some(partner_key) = &partner.key else { continue };
+                    let Some(partner_key) = &partner.key else {
+                        continue;
+                    };
                     if blocking.contains(partner_key) || partner_key == key {
                         continue;
                     }
-                    if let Some(swap) = self.swap(course, key, partner, partner_key, target, order, position as i32) {
+                    if let Some(swap) = self.swap(
+                        course,
+                        key,
+                        partner,
+                        partner_key,
+                        target,
+                        order,
+                        position as i32,
+                    ) {
                         found.push(swap);
                     }
                 }
@@ -225,14 +331,24 @@ impl<'a> Engine<'a> {
         found
     }
 
-    fn single_move(&self, course: &DegreePlanCourse, key: &CourseKey, target: usize, order: i32) -> Option<Candidate> {
+    fn single_move(
+        &self,
+        course: &DegreePlanCourse,
+        key: &CourseKey,
+        target: usize,
+        order: i32,
+    ) -> Option<Candidate> {
         let semester = &self.plan.terms[target];
         let offering = self.uncertainty(key, semester.season)?;
         let total = semester.credits() + course.credits;
         if total > self.max_credits {
             return None;
         }
-        let move_ = Move { course: key.clone(), from: self.plan.terms[self.origin].id, to: semester.id };
+        let move_ = Move {
+            course: key.clone(),
+            from: self.plan.terms[self.origin].id,
+            to: semester.id,
+        };
         let mut changed = self.plan.clone();
         if !perform_move(key, move_.from, move_.to, &mut changed) {
             return None;
@@ -241,8 +357,17 @@ impl<'a> Engine<'a> {
         let check = after.get(&course.id).copied().unwrap_or(Check::Unknown);
         let reasons = vec![
             self.offering_reason(key, semester.season, false),
-            self.prerequisite_reason(key, check, self.before.get(&course.id) == Some(&Check::Met), false),
-            format!("{} would have {}", semester.short_name(), self.credits_label(total)),
+            self.prerequisite_reason(
+                key,
+                check,
+                self.before.get(&course.id) == Some(&Check::Met),
+                false,
+            ),
+            format!(
+                "{} would have {}",
+                semester.short_name(),
+                self.credits_label(total)
+            ),
         ];
         Some(Candidate {
             suggestion: Suggestion {
@@ -252,23 +377,48 @@ impl<'a> Engine<'a> {
                 reasons,
                 adds_semester: None,
             },
-            rank: Rank { moves: 1, target: target as i32, uncertainty: offering + i32::from(check == Check::Unknown), order, detail: 0 },
+            rank: Rank {
+                moves: 1,
+                target: target as i32,
+                uncertainty: offering + i32::from(check == Check::Unknown),
+                order,
+                detail: 0,
+            },
         })
     }
 
-    fn swap(&self, course: &DegreePlanCourse, key: &CourseKey, partner: &DegreePlanCourse, partner_key: &CourseKey, target: usize, order: i32, detail: i32) -> Option<Candidate> {
+    fn swap(
+        &self,
+        course: &DegreePlanCourse,
+        key: &CourseKey,
+        partner: &DegreePlanCourse,
+        partner_key: &CourseKey,
+        target: usize,
+        order: i32,
+        detail: i32,
+    ) -> Option<Candidate> {
         let semester = &self.plan.terms[target];
         let home = &self.plan.terms[self.origin];
         let course_offering = self.uncertainty(key, semester.season)?;
         let partner_offering = self.uncertainty(partner_key, home.season)?;
         let new_home = home.credits() - course.credits + partner.credits;
         let new_target = semester.credits() - partner.credits + course.credits;
-        if new_home > self.max_credits.max(home.credits()) || new_target > self.max_credits.max(semester.credits()) {
+        if new_home > self.max_credits.max(home.credits())
+            || new_target > self.max_credits.max(semester.credits())
+        {
             return None;
         }
         let moves = vec![
-            Move { course: key.clone(), from: home.id, to: semester.id },
-            Move { course: partner_key.clone(), from: semester.id, to: home.id },
+            Move {
+                course: key.clone(),
+                from: home.id,
+                to: semester.id,
+            },
+            Move {
+                course: partner_key.clone(),
+                from: semester.id,
+                to: home.id,
+            },
         ];
         let mut changed = self.plan.clone();
         for move_ in &moves {
@@ -282,25 +432,61 @@ impl<'a> Engine<'a> {
         let reasons = vec![
             self.offering_reason(key, semester.season, true),
             self.offering_reason(partner_key, home.season, true),
-            self.prerequisite_reason(key, course_check, self.before.get(&course.id) == Some(&Check::Met), true),
-            self.prerequisite_reason(partner_key, partner_check, self.before.get(&partner.id) == Some(&Check::Met), true),
-            format!("{} would have {}", home.short_name(), self.credits_label(new_home)),
-            format!("{} would have {}", semester.short_name(), self.credits_label(new_target)),
+            self.prerequisite_reason(
+                key,
+                course_check,
+                self.before.get(&course.id) == Some(&Check::Met),
+                true,
+            ),
+            self.prerequisite_reason(
+                partner_key,
+                partner_check,
+                self.before.get(&partner.id) == Some(&Check::Met),
+                true,
+            ),
+            format!(
+                "{} would have {}",
+                home.short_name(),
+                self.credits_label(new_home)
+            ),
+            format!(
+                "{} would have {}",
+                semester.short_name(),
+                self.credits_label(new_target)
+            ),
         ];
-        let unsure = course_offering + partner_offering + i32::from(course_check == Check::Unknown) + i32::from(partner_check == Check::Unknown);
+        let unsure = course_offering
+            + partner_offering
+            + i32::from(course_check == Check::Unknown)
+            + i32::from(partner_check == Check::Unknown);
         Some(Candidate {
             suggestion: Suggestion {
                 id: format!("swap-{key}-{}-{partner_key}", semester.id.as_hyphenated()),
                 moves,
-                title: format!("Move {key} to {} and {partner_key} to {}", semester.short_name(), home.short_name()),
+                title: format!(
+                    "Move {key} to {} and {partner_key} to {}",
+                    semester.short_name(),
+                    home.short_name()
+                ),
                 reasons,
                 adds_semester: None,
             },
-            rank: Rank { moves: 2, target: target as i32, uncertainty: unsure, order, detail },
+            rank: Rank {
+                moves: 2,
+                target: target as i32,
+                uncertainty: unsure,
+                order,
+                detail,
+            },
         })
     }
 
-    fn appended_semester(&self, course: &DegreePlanCourse, key: &CourseKey, order: i32) -> Option<Candidate> {
+    fn appended_semester(
+        &self,
+        course: &DegreePlanCourse,
+        key: &CourseKey,
+        order: i32,
+    ) -> Option<Candidate> {
         if course.credits > self.max_credits {
             return None;
         }
@@ -309,22 +495,43 @@ impl<'a> Engine<'a> {
             if upcoming.sort_key() <= home.sort_key() {
                 continue;
             }
-            let Some(offering) = self.uncertainty(key, upcoming.season) else { continue };
+            let Some(offering) = self.uncertainty(key, upcoming.season) else {
+                continue;
+            };
             let mut semester = DegreePlanTerm::new(upcoming.season, upcoming.year);
-            semester.id = stable_id(&format!("degree-plan-term-{}-{}", season_raw(semester.season), semester.year));
+            semester.id = stable_id(&format!(
+                "degree-plan-term-{}-{}",
+                season_raw(semester.season),
+                semester.year
+            ));
             let mut changed = self.plan.clone();
             changed.terms.push(semester.clone());
             changed.sort_terms();
-            let move_ = Move { course: key.clone(), from: home.id, to: semester.id };
+            let move_ = Move {
+                course: key.clone(),
+                from: home.id,
+                to: semester.id,
+            };
             if !perform_move(key, move_.from, move_.to, &mut changed) {
                 continue;
             }
-            let Some(after) = self.checks_after(&changed, &HashSet::from([course.id])) else { continue };
+            let Some(after) = self.checks_after(&changed, &HashSet::from([course.id])) else {
+                continue;
+            };
             let check = after.get(&course.id).copied().unwrap_or(Check::Unknown);
             let reasons = vec![
                 self.offering_reason(key, semester.season, false),
-                self.prerequisite_reason(key, check, self.before.get(&course.id) == Some(&Check::Met), false),
-                format!("Adds {} to your plan, with {}", semester.short_name(), self.credits_label(course.credits)),
+                self.prerequisite_reason(
+                    key,
+                    check,
+                    self.before.get(&course.id) == Some(&Check::Met),
+                    false,
+                ),
+                format!(
+                    "Adds {} to your plan, with {}",
+                    semester.short_name(),
+                    self.credits_label(course.credits)
+                ),
             ];
             return Some(Candidate {
                 suggestion: Suggestion {
@@ -334,7 +541,13 @@ impl<'a> Engine<'a> {
                     reasons,
                     adds_semester: Some(semester),
                 },
-                rank: Rank { moves: 1, target: self.plan.terms.len() as i32, uncertainty: offering + i32::from(check == Check::Unknown), order, detail: 0 },
+                rank: Rank {
+                    moves: 1,
+                    target: self.plan.terms.len() as i32,
+                    uncertainty: offering + i32::from(check == Check::Unknown),
+                    order,
+                    detail: 0,
+                },
             });
         }
         None
@@ -370,13 +583,33 @@ pub fn stable_id(text: &str) -> Uuid {
         second = second.wrapping_mul(0x0000_0100_0000_01b3) ^ first;
     }
     let hex = format!("{first:016x}{second:016x}");
-    let formatted = format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]);
+    let formatted = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
     Uuid::parse_str(&formatted).unwrap_or_else(|_| Uuid::nil())
 }
 
-pub fn schedule_option(suggestion: &Suggestion, origin: Uuid) -> (Vec<CourseKey>, Vec<CourseKey>, bool, String) {
-    let away = suggestion.moves.iter().filter(|m| m.from == origin).map(|m| m.course.clone()).collect();
-    let into = suggestion.moves.iter().filter(|m| m.to == origin).map(|m| m.course.clone()).collect();
+pub fn schedule_option(
+    suggestion: &Suggestion,
+    origin: Uuid,
+) -> (Vec<CourseKey>, Vec<CourseKey>, bool, String) {
+    let away = suggestion
+        .moves
+        .iter()
+        .filter(|m| m.from == origin)
+        .map(|m| m.course.clone())
+        .collect();
+    let into = suggestion
+        .moves
+        .iter()
+        .filter(|m| m.to == origin)
+        .map(|m| m.course.clone())
+        .collect();
     let applied = if let Some(rest) = suggestion.title.strip_prefix("Move ") {
         format!("Moved {rest}")
     } else {

@@ -25,7 +25,11 @@ impl CourseRange {
         if self.except.iter().any(|item| item == key) {
             return Some(format!("{key} is excluded"));
         }
-        let digits: String = key.number.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = key
+            .number
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         let number: i32 = digits.parse().ok()?;
         if number < self.lowest {
             return Some(format!("Below {} {}", self.subject, self.lowest));
@@ -41,13 +45,25 @@ impl CourseRange {
 
 pub fn subjects_text(ranges: &[CourseRange]) -> String {
     let mut seen = std::collections::BTreeSet::new();
-    let subjects: Vec<String> = ranges.iter().map(|r| r.subject.clone()).filter(|s| seen.insert(s.clone())).collect();
+    let subjects: Vec<String> = ranges
+        .iter()
+        .map(|r| r.subject.clone())
+        .filter(|s| seen.insert(s.clone()))
+        .collect();
     join_or(&subjects)
 }
 
 pub fn minimums_text(ranges: &[CourseRange]) -> Option<String> {
-    let minimums: Vec<String> = ranges.iter().filter(|r| r.lowest > 0).map(|r| format!("{} {}", r.subject, r.lowest)).collect();
-    if minimums.is_empty() { None } else { Some(join_or(&minimums)) }
+    let minimums: Vec<String> = ranges
+        .iter()
+        .filter(|r| r.lowest > 0)
+        .map(|r| format!("{} {}", r.subject, r.lowest))
+        .collect();
+    if minimums.is_empty() {
+        None
+    } else {
+        Some(join_or(&minimums))
+    }
 }
 
 fn join_and(items: &[String]) -> String {
@@ -55,7 +71,11 @@ fn join_and(items: &[String]) -> String {
         0 => String::new(),
         1 => items[0].clone(),
         2 => format!("{} and {}", items[0], items[1]),
-        _ => format!("{}, and {}", items[..items.len() - 1].join(", "), items.last().unwrap()),
+        _ => format!(
+            "{}, and {}",
+            items[..items.len() - 1].join(", "),
+            items.last().unwrap()
+        ),
     }
 }
 
@@ -75,17 +95,29 @@ impl ProgramRequirements {
             .all_rules()
             .into_iter()
             .filter(|rule| {
-                self.degree_short_name(&rule.id).is_some_and(|text| text.to_ascii_lowercase() == name)
-                    || self.title_of_rule(&rule.id).is_some_and(|text| text.to_ascii_lowercase() == name)
+                self.degree_short_name(&rule.id)
+                    .is_some_and(|text| text.to_ascii_lowercase() == name)
+                    || self
+                        .title_of_rule(&rule.id)
+                        .is_some_and(|text| text.to_ascii_lowercase() == name)
             })
             .collect();
-        if matches.len() == 1 { matches.into_iter().next() } else { None }
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None
+        }
     }
 }
 
 impl RequirementReplacement {
     pub fn like_ranges<'a>(&self, requirements: &'a ProgramRequirements) -> Vec<&'a CourseRange> {
-        let Some(rule) = requirements.degree_rule(self.like_rule_id.as_deref(), self.like_rule_title.as_deref()) else { return vec![] };
+        let Some(rule) = requirements.degree_rule(
+            self.like_rule_id.as_deref(),
+            self.like_rule_title.as_deref(),
+        ) else {
+            return vec![];
+        };
         match &rule.kind {
             RuleKind::Choose { ranges, .. } => ranges.iter().collect(),
             _ => vec![],
@@ -93,14 +125,21 @@ impl RequirementReplacement {
     }
 
     pub fn asks_for_course_numbers(&self, requirements: &ProgramRequirements) -> bool {
-        self.like_ranges(requirements).iter().any(|range| range.lowest > 0)
+        self.like_ranges(requirements)
+            .iter()
+            .any(|range| range.lowest > 0)
     }
 }
 
 impl DegreePlan {
     pub fn set_course_numbers(&mut self, limit: Option<CourseNumberLimit>, id: Uuid) {
-        let Some(index) = self.substitutions.iter().position(|item| item.id == id) else { return };
-        let SubstitutionChange::Replace(mut replacement) = self.substitutions[index].change.clone() else { return };
+        let Some(index) = self.substitutions.iter().position(|item| item.id == id) else {
+            return;
+        };
+        let SubstitutionChange::Replace(mut replacement) = self.substitutions[index].change.clone()
+        else {
+            return;
+        };
         replacement.course_numbers = limit;
         self.substitutions[index].change = SubstitutionChange::Replace(replacement);
     }
@@ -126,7 +165,9 @@ impl CourseNumberChoice {
         match self {
             Self::SameAsRequirement => Some(CourseNumberLimit::SameAsRequirement),
             Self::AnyNumber => Some(CourseNumberLimit::AnyNumber),
-            Self::AtLeast => Self::is_valid_minimum(minimum).then_some(CourseNumberLimit::AtLeast(minimum)),
+            Self::AtLeast => {
+                Self::is_valid_minimum(minimum).then_some(CourseNumberLimit::AtLeast(minimum))
+            }
         }
     }
     pub fn is_valid_minimum(minimum: i32) -> bool {
@@ -136,7 +177,12 @@ impl CourseNumberChoice {
         if let Some(CourseNumberLimit::AtLeast(minimum)) = saved {
             return *minimum;
         }
-        let lowest = ranges.iter().map(|r| r.lowest).filter(|n| *n > 0).min().unwrap_or(2000);
+        let lowest = ranges
+            .iter()
+            .map(|r| r.lowest)
+            .filter(|n| *n > 0)
+            .min()
+            .unwrap_or(2000);
         (lowest / 1000 * 1000).max(1000)
     }
     pub fn title(self, like_title: &str) -> String {
@@ -148,11 +194,19 @@ impl CourseNumberChoice {
     }
     pub fn detail(self, ranges: &[CourseRange], minimum: i32) -> String {
         match self {
-            Self::SameAsRequirement => ranges.iter().map(|r| r.label.clone()).collect::<Vec<_>>().join(" · "),
+            Self::SameAsRequirement => ranges
+                .iter()
+                .map(|r| r.label.clone())
+                .collect::<Vec<_>>()
+                .join(" · "),
             Self::AnyNumber => format!("Any {} course", subjects_text(ranges)),
             Self::AtLeast => {
                 if Self::is_valid_minimum(minimum) {
-                    ranges.iter().map(|r| r.applying(Some(&CourseNumberLimit::AtLeast(minimum))).label).collect::<Vec<_>>().join(" · ")
+                    ranges
+                        .iter()
+                        .map(|r| r.applying(Some(&CourseNumberLimit::AtLeast(minimum))).label)
+                        .collect::<Vec<_>>()
+                        .join(" · ")
                 } else {
                     "Enter a course number, like 2000".into()
                 }
@@ -179,7 +233,11 @@ impl DegreePetitionQuestion {
         self.substitution.id
     }
     pub fn question(&self) -> String {
-        format!("Does your {} petition accept any {} course?", self.rule_title, subjects_text(&self.ranges))
+        format!(
+            "Does your {} petition accept any {} course?",
+            self.rule_title,
+            subjects_text(&self.ranges)
+        )
     }
     pub fn matters(&self) -> bool {
         self.satisfied_without_minimum > self.satisfied
@@ -204,16 +262,37 @@ impl DegreePetitionQuestion {
         if self.courses.is_empty() {
             parts.push(format!("With any number, {effect}."));
         } else {
-            let course_list = join_and(&self.courses.iter().map(|k| k.to_string()).collect::<Vec<_>>());
-            let verb = if self.courses.len() == 1 { "counts" } else { "count" };
-            parts.push(format!("With any number, {course_list} {verb} and {effect}."));
+            let course_list = join_and(
+                &self
+                    .courses
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>(),
+            );
+            let verb = if self.courses.len() == 1 {
+                "counts"
+            } else {
+                "count"
+            };
+            parts.push(format!(
+                "With any number, {course_list} {verb} and {effect}."
+            ));
         }
         parts.join(" ")
     }
 }
 
-pub fn questions(plan: &DegreePlan, requirements: &ProgramRequirements, equivalences: &CourseEquivalences, audit: Option<&DegreeAudit>) -> Vec<DegreePetitionQuestion> {
-    let candidates: Vec<&RequirementSubstitution> = plan.substitutions.iter().filter(|item| is_unanswered(item, requirements)).collect();
+pub fn questions(
+    plan: &DegreePlan,
+    requirements: &ProgramRequirements,
+    equivalences: &CourseEquivalences,
+    audit: Option<&DegreeAudit>,
+) -> Vec<DegreePetitionQuestion> {
+    let candidates: Vec<&RequirementSubstitution> = plan
+        .substitutions
+        .iter()
+        .filter(|item| is_unanswered(item, requirements))
+        .collect();
     if candidates.is_empty() {
         return vec![];
     }
@@ -221,7 +300,12 @@ pub fn questions(plan: &DegreePlan, requirements: &ProgramRequirements, equivale
     let current = if let Some(audit) = audit {
         audit
     } else {
-        owned = DegreeAudit::run(plan, requirements, equivalences, &crate::degree_audit::DegreeCourseAttributes::none());
+        owned = DegreeAudit::run(
+            plan,
+            requirements,
+            equivalences,
+            &crate::degree_audit::DegreeCourseAttributes::none(),
+        );
         &owned
     };
     candidates
@@ -238,29 +322,56 @@ pub fn question_about(
     equivalences: &CourseEquivalences,
     audit: &DegreeAudit,
 ) -> Option<DegreePetitionQuestion> {
-    let rule_id = audit.placements.get(&substitution.id).cloned().unwrap_or_else(|| substitution.rule_id.clone());
+    let rule_id = audit
+        .placements
+        .get(&substitution.id)
+        .cloned()
+        .unwrap_or_else(|| substitution.rule_id.clone());
     if !is_unanswered(substitution, requirements) {
         return None;
     }
-    let SubstitutionChange::Replace(replacement) = &substitution.change else { return None };
+    let SubstitutionChange::Replace(replacement) = &substitution.change else {
+        return None;
+    };
     audit.result_for(&rule_id)?;
     let mut relaxed = plan.clone();
     relaxed.set_course_numbers(Some(CourseNumberLimit::AnyNumber), substitution.id);
     let without = DegreeAudit::run(&relaxed, requirements, equivalences, &audit.attributes);
-    let ranges: Vec<CourseRange> = replacement.like_ranges(requirements).into_iter().cloned().collect();
+    let ranges: Vec<CourseRange> = replacement
+        .like_ranges(requirements)
+        .into_iter()
+        .cloned()
+        .collect();
     let newly = without
         .result_for(&rule_id)
-        .map(|result| result.used.iter().map(|use_| use_.key.clone()).filter(|key| !ranges.iter().any(|range| range.contains(key)) && !replacement.courses.contains(key)).collect())
+        .map(|result| {
+            result
+                .used
+                .iter()
+                .map(|use_| use_.key.clone())
+                .filter(|key| {
+                    !ranges.iter().any(|range| range.contains(key))
+                        && !replacement.courses.contains(key)
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let like_title = replacement
         .like_rule_title
         .clone()
-        .or_else(|| replacement.like_rule_id.as_ref().and_then(|id| requirements.title_of_rule(id)))
+        .or_else(|| {
+            replacement
+                .like_rule_id
+                .as_ref()
+                .and_then(|id| requirements.title_of_rule(id))
+        })
         .unwrap_or_else(|| "That requirement".into());
     Some(DegreePetitionQuestion {
         substitution: substitution.clone(),
         rule_id: rule_id.clone(),
-        rule_title: requirements.title_of_rule(&rule_id).unwrap_or_else(|| substitution.rule_title.clone()),
+        rule_title: requirements
+            .title_of_rule(&rule_id)
+            .unwrap_or_else(|| substitution.rule_title.clone()),
         like_title,
         ranges,
         courses: newly,
@@ -270,8 +381,13 @@ pub fn question_about(
     })
 }
 
-pub fn is_unanswered(substitution: &RequirementSubstitution, requirements: &ProgramRequirements) -> bool {
-    let SubstitutionChange::Replace(replacement) = &substitution.change else { return false };
+pub fn is_unanswered(
+    substitution: &RequirementSubstitution,
+    requirements: &ProgramRequirements,
+) -> bool {
+    let SubstitutionChange::Replace(replacement) = &substitution.change else {
+        return false;
+    };
     replacement.course_numbers.is_none() && replacement.asks_for_course_numbers(requirements)
 }
 
@@ -284,15 +400,24 @@ pub struct NearMiss {
 
 impl DegreeAudit {
     pub fn near_misses(&self, rule_id: &str) -> Vec<NearMiss> {
-        let Some(result) = self.result_for(rule_id) else { return vec![] };
+        let Some(result) = self.result_for(rule_id) else {
+            return vec![];
+        };
         if result.status.is_satisfied() {
             return vec![];
         }
-        let Some(RuleKind::Choose { count, ranges, .. }) = &result.effective_kind else { return vec![] };
+        let Some(RuleKind::Choose { count, ranges, .. }) = &result.effective_kind else {
+            return vec![];
+        };
         if ranges.is_empty() {
             return vec![];
         }
-        let mut candidates: Vec<&CourseUse> = self.general_electives.iter().chain(self.unused.iter()).filter(|use_| use_.credits > 0.0 && (count.is_none() || use_.credits >= 2.0)).collect();
+        let mut candidates: Vec<&CourseUse> = self
+            .general_electives
+            .iter()
+            .chain(self.unused.iter())
+            .filter(|use_| use_.credits > 0.0 && (count.is_none() || use_.credits >= 2.0))
+            .collect();
         candidates.sort_by_key(|use_| (!use_.is_completed(), use_.order));
         candidates
             .into_iter()
@@ -302,7 +427,11 @@ impl DegreeAudit {
                 }
                 for range in ranges {
                     if let Some(reason) = range.reason_excluding(&use_.key) {
-                        return Some(NearMiss { course: use_.clone(), range: range.clone(), reason });
+                        return Some(NearMiss {
+                            course: use_.clone(),
+                            range: range.clone(),
+                            reason,
+                        });
                     }
                 }
                 None

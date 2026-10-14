@@ -15,7 +15,11 @@ impl Requisite {
     pub fn referenced_courses(&self) -> Vec<CourseKey> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        fn visit(r: &Requisite, seen: &mut std::collections::HashSet<CourseKey>, out: &mut Vec<CourseKey>) {
+        fn visit(
+            r: &Requisite,
+            seen: &mut std::collections::HashSet<CourseKey>,
+            out: &mut Vec<CourseKey>,
+        ) {
             match r {
                 Requisite::Course(k) => {
                     if seen.insert(k.clone()) {
@@ -23,19 +27,29 @@ impl Requisite {
                     }
                 }
                 Requisite::Test { .. } => {}
-                Requisite::And(items) | Requisite::Or(items) => items.iter().for_each(|i| visit(i, seen, out)),
+                Requisite::And(items) | Requisite::Or(items) => {
+                    items.iter().for_each(|i| visit(i, seen, out))
+                }
             }
         }
         visit(self, &mut seen, &mut out);
         out
     }
 
-    pub fn is_satisfied(&self, completed: &std::collections::HashSet<CourseKey>, assume_tests: bool) -> bool {
+    pub fn is_satisfied(
+        &self,
+        completed: &std::collections::HashSet<CourseKey>,
+        assume_tests: bool,
+    ) -> bool {
         match self {
             Requisite::Course(k) => completed.contains(k),
             Requisite::Test { .. } => assume_tests,
-            Requisite::And(items) => items.iter().all(|i| i.is_satisfied(completed, assume_tests)),
-            Requisite::Or(items) => items.iter().any(|i| i.is_satisfied(completed, assume_tests)),
+            Requisite::And(items) => items
+                .iter()
+                .all(|i| i.is_satisfied(completed, assume_tests)),
+            Requisite::Or(items) => items
+                .iter()
+                .any(|i| i.is_satisfied(completed, assume_tests)),
         }
     }
 
@@ -43,7 +57,9 @@ impl Requisite {
         match self {
             Requisite::Course(k) => Requisite::Course(f(k)),
             Requisite::Test { .. } => self.clone(),
-            Requisite::And(items) => Requisite::And(items.iter().map(|i| i.map_courses(f)).collect()),
+            Requisite::And(items) => {
+                Requisite::And(items.iter().map(|i| i.map_courses(f)).collect())
+            }
             Requisite::Or(items) => Requisite::Or(items.iter().map(|i| i.map_courses(f)).collect()),
         }
     }
@@ -65,19 +81,35 @@ impl Requisite {
             Requisite::Course(k) => k.to_string(),
             Requisite::Test { name, score } => match score {
                 Some(s) => {
-                    let n = if (s - s.round()).abs() < 1e-9 { format!("{}", *s as i64) } else { format!("{s}") };
+                    let n = if (s - s.round()).abs() < 1e-9 {
+                        format!("{}", *s as i64)
+                    } else {
+                        format!("{s}")
+                    };
                     format!("{name} ({n})")
                 }
                 None => name.clone(),
             },
             Requisite::And(items) => items
                 .iter()
-                .map(|i| if i.is_condition() { format!("({})", i.summary()) } else { i.summary() })
+                .map(|i| {
+                    if i.is_condition() {
+                        format!("({})", i.summary())
+                    } else {
+                        i.summary()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" and "),
             Requisite::Or(items) => items
                 .iter()
-                .map(|i| if i.is_condition() { format!("({})", i.summary()) } else { i.summary() })
+                .map(|i| {
+                    if i.is_condition() {
+                        format!("({})", i.summary())
+                    } else {
+                        i.summary()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" or "),
         }
@@ -89,7 +121,9 @@ fn flatten(items: &[Requisite], and: bool) -> Option<Requisite> {
     for item in items {
         if let Some(child) = item.simplified() {
             match (&child, and) {
-                (Requisite::And(inner), true) | (Requisite::Or(inner), false) => flat.extend(inner.clone()),
+                (Requisite::And(inner), true) | (Requisite::Or(inner), false) => {
+                    flat.extend(inner.clone())
+                }
                 _ => flat.push(child),
             }
         }
@@ -97,7 +131,11 @@ fn flatten(items: &[Requisite], and: bool) -> Option<Requisite> {
     match flat.len() {
         0 => None,
         1 => Some(flat.remove(0)),
-        _ => Some(if and { Requisite::And(flat) } else { Requisite::Or(flat) }),
+        _ => Some(if and {
+            Requisite::And(flat)
+        } else {
+            Requisite::Or(flat)
+        }),
     }
 }
 

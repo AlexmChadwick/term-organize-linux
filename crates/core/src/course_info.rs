@@ -33,7 +33,12 @@ pub struct CourseInfo {
 }
 
 impl CourseInfo {
-    pub fn new(key: CourseKey, title: impl Into<String>, source_term: impl Into<String>, fetched_at: f64) -> Self {
+    pub fn new(
+        key: CourseKey,
+        title: impl Into<String>,
+        source_term: impl Into<String>,
+        fetched_at: f64,
+    ) -> Self {
         Self {
             key,
             title: title.into(),
@@ -80,7 +85,9 @@ impl CourseInfo {
 
     pub fn from_loaded(key: &CourseKey, indexes: &[CatalogIndex]) -> Option<Self> {
         for (position, index) in indexes.iter().enumerate() {
-            let Some(course) = index.course(key) else { continue };
+            let Some(course) = index.course(key) else {
+                continue;
+            };
             if !course.details_loaded {
                 continue;
             }
@@ -164,9 +171,14 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
     }
 
     pub fn catalog_terms(terms: &[Term], max_back: usize) -> Vec<String> {
-        let mut neu: Vec<&Term> = terms.iter().filter(|term| term.college() == College::Neu).collect();
+        let mut neu: Vec<&Term> = terms
+            .iter()
+            .filter(|term| term.college() == College::Neu)
+            .collect();
         neu.sort_by(|a, b| b.code.cmp(&a.code));
-        let Some(newest) = neu.first() else { return vec![] };
+        let Some(newest) = neu.first() else {
+            return vec![];
+        };
         let mut codes = vec![newest.code.clone()];
         for term in neu.into_iter().skip(1) {
             if term.season() != Season::Fall && term.season() != Season::Spring {
@@ -196,10 +208,16 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
     }
 
     pub fn lookup_one(&mut self, key: &CourseKey, indexes: &[CatalogIndex]) -> Lookup {
-        self.lookup(std::slice::from_ref(key), indexes).remove(key).unwrap_or(Lookup::Failed)
+        self.lookup(std::slice::from_ref(key), indexes)
+            .remove(key)
+            .unwrap_or(Lookup::Failed)
     }
 
-    pub fn lookup(&mut self, keys: &[CourseKey], indexes: &[CatalogIndex]) -> HashMap<CourseKey, Lookup> {
+    pub fn lookup(
+        &mut self,
+        keys: &[CourseKey],
+        indexes: &[CatalogIndex],
+    ) -> HashMap<CourseKey, Lookup> {
         self.load();
         let mut results = HashMap::new();
         let mut pending = Vec::new();
@@ -226,14 +244,22 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
         };
         let fetched = self.fetch_parallel(pending, &terms);
         for (key, result) in fetched {
-            let answer = if result == Lookup::Failed { self.stale_or_failed(&key) } else { result };
+            let answer = if result == Lookup::Failed {
+                self.stale_or_failed(&key)
+            } else {
+                result
+            };
             results.insert(key, answer);
         }
         self.save();
         results
     }
 
-    fn fetch_parallel(&mut self, pending: Vec<CourseKey>, terms: &[String]) -> HashMap<CourseKey, Lookup> {
+    fn fetch_parallel(
+        &mut self,
+        pending: Vec<CourseKey>,
+        terms: &[String],
+    ) -> HashMap<CourseKey, Lookup> {
         let limit = self.concurrency.max(1).min(pending.len().max(1));
         let jobs = Arc::new(Mutex::new(pending));
         let terms = terms.to_vec();
@@ -245,14 +271,12 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
                 let jobs = Arc::clone(&jobs);
                 let terms = terms.clone();
                 let found_out = Arc::clone(&found_out);
-                scope.spawn(move || {
-                    loop {
-                        let key = { jobs.lock().ok().and_then(|mut jobs| jobs.pop()) };
-                        let Some(key) = key else { break };
-                        let result = search_one(fetcher, &key, &terms, now);
-                        if let Ok(mut slot) = found_out.lock() {
-                            slot.insert(key, result);
-                        }
+                scope.spawn(move || loop {
+                    let key = { jobs.lock().ok().and_then(|mut jobs| jobs.pop()) };
+                    let Some(key) = key else { break };
+                    let result = search_one(fetcher, &key, &terms, now);
+                    if let Ok(mut slot) = found_out.lock() {
+                        slot.insert(key, result);
                     }
                 });
             }
@@ -290,7 +314,11 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
     }
 
     fn stale_or_failed(&self, key: &CourseKey) -> Lookup {
-        self.found.get(key).cloned().map(Lookup::Found).unwrap_or(Lookup::Failed)
+        self.found
+            .get(key)
+            .cloned()
+            .map(Lookup::Found)
+            .unwrap_or(Lookup::Failed)
     }
 
     fn is_fresh(&self, info: &CourseInfo) -> bool {
@@ -302,8 +330,12 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
             return;
         }
         self.loaded = true;
-        let Ok(text) = std::fs::read_to_string(&self.file) else { return };
-        let Ok(stored) = serde_json::from_str::<Stored>(&text) else { return };
+        let Ok(text) = std::fs::read_to_string(&self.file) else {
+            return;
+        };
+        let Ok(stored) = serde_json::from_str::<Stored>(&text) else {
+            return;
+        };
         if stored.version != Self::VERSION {
             return;
         }
@@ -320,15 +352,29 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
             return;
         }
         self.dirty = false;
-        let found: Vec<CourseInfo> = self.found.values().filter(|info| self.is_fresh(info)).cloned().collect();
+        let found: Vec<CourseInfo> = self
+            .found
+            .values()
+            .filter(|info| self.is_fresh(info))
+            .cloned()
+            .collect();
         let missing = self
             .missing
             .iter()
             .filter(|(_, at)| self.now - **at < self.not_found_lifetime)
-            .map(|(key, at)| Missing { key: key.clone(), checked_at: *at })
+            .map(|(key, at)| Missing {
+                key: key.clone(),
+                checked_at: *at,
+            })
             .collect();
-        let stored = Stored { version: Self::VERSION, found, missing };
-        let Ok(text) = serde_json::to_string(&stored) else { return };
+        let stored = Stored {
+            version: Self::VERSION,
+            found,
+            missing,
+        };
+        let Ok(text) = serde_json::to_string(&stored) else {
+            return;
+        };
         if let Some(parent) = self.file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -336,12 +382,21 @@ impl<F: CourseInfoSource> CourseInfoRepository<F> {
     }
 }
 
-fn search_one<F: CourseInfoSource>(fetcher: &F, key: &CourseKey, terms: &[String], now: f64) -> Lookup {
+fn search_one<F: CourseInfoSource>(
+    fetcher: &F,
+    key: &CourseKey,
+    terms: &[String],
+    now: f64,
+) -> Lookup {
     for (position, term) in terms.iter().enumerate() {
         match fetcher.catalog_entry(key, term) {
             Ok(Some(mut info)) => {
                 info.is_retired = Some(position > 0);
-                info.fetched_at = if info.fetched_at == 0.0 { now } else { info.fetched_at };
+                info.fetched_at = if info.fetched_at == 0.0 {
+                    now
+                } else {
+                    info.fetched_at
+                };
                 return Lookup::Found(info);
             }
             Ok(None) => {}
@@ -353,11 +408,15 @@ fn search_one<F: CourseInfoSource>(fetcher: &F, key: &CourseKey, terms: &[String
 
 fn unique(keys: &[CourseKey]) -> Vec<CourseKey> {
     let mut seen = HashSet::new();
-    keys.iter().filter(|key| seen.insert((*key).clone())).cloned().collect()
+    keys.iter()
+        .filter(|key| seen.insert((*key).clone()))
+        .cloned()
+        .collect()
 }
 
 fn normalize_equivalents(key: &CourseKey, equivalents: Vec<CourseKey>) -> Vec<CourseKey> {
-    let mut equivalents: Vec<CourseKey> = equivalents.into_iter().filter(|item| item != key).collect();
+    let mut equivalents: Vec<CourseKey> =
+        equivalents.into_iter().filter(|item| item != key).collect();
     equivalents.sort();
     equivalents.dedup();
     equivalents
@@ -365,7 +424,11 @@ fn normalize_equivalents(key: &CourseKey, equivalents: Vec<CourseKey>) -> Vec<Co
 
 fn nonempty(text: &str) -> Option<String> {
     let trimmed = text.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// What a screen has learned about a course. Synchronous port of `CourseInfoStore`.
@@ -393,7 +456,11 @@ pub struct CourseInfoStore<F, O> {
 }
 
 impl<F, O> CourseInfoStore<F, O> {
-    pub fn new(repository: CourseInfoRepository<F>, offering: OfferingRepository<O>, now: f64) -> Self {
+    pub fn new(
+        repository: CourseInfoRepository<F>,
+        offering: OfferingRepository<O>,
+        now: f64,
+    ) -> Self {
         Self {
             repository,
             offering,
@@ -428,13 +495,18 @@ impl<F, O> CourseInfoStore<F, O> {
 
     /// `None` when the course is not known, `Some(None)` when it has no prerequisites.
     pub fn requisite_lookup(&self) -> HashMap<CourseKey, Option<Requisite>> {
-        self.infos.iter().map(|(key, info)| (key.clone(), info.prerequisites.clone())).collect()
+        self.infos
+            .iter()
+            .map(|(key, info)| (key.clone(), info.prerequisites.clone()))
+            .collect()
     }
 
     pub fn equivalences(&self, plan: Option<&DegreePlan>) -> CourseEquivalences {
         match plan {
             None => self.derived.clone(),
-            Some(plan) => self.derived.merging(&CourseEquivalences::from_declarations(&plan.course_equivalences)),
+            Some(plan) => self.derived.merging(&CourseEquivalences::from_declarations(
+                &plan.course_equivalences,
+            )),
         }
     }
 
@@ -446,7 +518,9 @@ impl<F, O> CourseInfoStore<F, O> {
         catalog_titles: &HashMap<CourseKey, String>,
         also_comparing: &[CourseKey],
     ) -> Vec<EquivalenceSuggestion> {
-        let Some(newest) = self.indexes.first() else { return Vec::new() };
+        let Some(newest) = self.indexes.first() else {
+            return Vec::new();
+        };
         if newest.course(key).is_some() {
             return Vec::new();
         }
@@ -458,12 +532,25 @@ impl<F, O> CourseInfoStore<F, O> {
         let prerequisites: Vec<(CourseKey, Requisite)> = newest
             .courses
             .iter()
-            .filter_map(|course| course.prereqs.clone().map(|requisite| (course.key(), requisite)))
+            .filter_map(|course| {
+                course
+                    .prereqs
+                    .clone()
+                    .map(|requisite| (course.key(), requisite))
+            })
             .collect();
         let mut candidates = Vec::new();
         if let Some(plan) = plan {
-            candidates.extend(plan.completed.iter().filter_map(|course| course.key.clone()));
-            candidates.extend(plan.terms.iter().flat_map(|term| term.courses.iter().filter_map(|course| course.key.clone())));
+            candidates.extend(
+                plan.completed
+                    .iter()
+                    .filter_map(|course| course.key.clone()),
+            );
+            candidates.extend(
+                plan.terms
+                    .iter()
+                    .flat_map(|term| term.courses.iter().filter_map(|course| course.key.clone())),
+            );
         }
         candidates.extend(also_comparing.iter().cloned());
         let known = self.equivalences(plan);
@@ -481,7 +568,12 @@ impl<F, O> CourseInfoStore<F, O> {
         )
     }
 
-    fn title_of(&self, key: &CourseKey, catalog_titles: &HashMap<CourseKey, String>, plan: Option<&DegreePlan>) -> Option<String> {
+    fn title_of(
+        &self,
+        key: &CourseKey,
+        catalog_titles: &HashMap<CourseKey, String>,
+        plan: Option<&DegreePlan>,
+    ) -> Option<String> {
         if let Some(title) = catalog_titles.get(key).and_then(|text| nonempty(text)) {
             return Some(title);
         }
@@ -494,7 +586,11 @@ impl<F, O> CourseInfoStore<F, O> {
             }
         }
         let plan = plan?;
-        for course in plan.completed.iter().chain(plan.terms.iter().flat_map(|term| term.courses.iter())) {
+        for course in plan
+            .completed
+            .iter()
+            .chain(plan.terms.iter().flat_map(|term| term.courses.iter()))
+        {
             if course.key.as_ref() == Some(key) {
                 if let Some(title) = nonempty(&course.title) {
                     return Some(title);
@@ -533,11 +629,17 @@ impl<F: CourseInfoSource, O> CourseInfoStore<F, O> {
         self.repository.now = self.now;
         self.indexes = indexes.to_vec();
         let mut seen = HashSet::new();
-        let wanted: Vec<CourseKey> = keys.iter().filter(|key| seen.insert((*key).clone())).cloned().collect();
+        let wanted: Vec<CourseKey> = keys
+            .iter()
+            .filter(|key| seen.insert((*key).clone()))
+            .cloned()
+            .collect();
 
         let mut changed = false;
         for key in &wanted {
-            let Some(mut info) = CourseInfo::from_loaded(key, indexes) else { continue };
+            let Some(mut info) = CourseInfo::from_loaded(key, indexes) else {
+                continue;
+            };
             if let Some(previous) = self.infos.get(key) {
                 if info.source_term.as_str() < previous.source_term.as_str() {
                     continue;
@@ -553,7 +655,9 @@ impl<F: CourseInfoSource, O> CourseInfoStore<F, O> {
         }
         let mut stamp = BTreeMap::new();
         for index in indexes {
-            stamp.entry(index.catalog.term.code.clone()).or_insert(index.catalog.sections_updated_at);
+            stamp
+                .entry(index.catalog.term.code.clone())
+                .or_insert(index.catalog.sections_updated_at);
         }
         let indexes_changed = stamp != self.index_stamp;
         self.index_stamp = stamp;
@@ -569,7 +673,10 @@ impl<F: CourseInfoSource, O> CourseInfoStore<F, O> {
             .filter(|key| {
                 !self.infos.contains_key(key)
                     && !self.not_found.contains(key)
-                    && self.failed_at.get(key).is_none_or(|at| self.now - *at > self.retry_delay)
+                    && self
+                        .failed_at
+                        .get(key)
+                        .is_none_or(|at| self.now - *at > self.retry_delay)
             })
             .collect();
         if pending.is_empty() {
@@ -603,7 +710,11 @@ impl<F: CourseInfoSource, O> CourseInfoStore<F, O> {
 }
 
 impl<F, O: OfferingSource> CourseInfoStore<F, O> {
-    pub fn offering_history(&mut self, keys: &[CourseKey], indexes: Option<&[CatalogIndex]>) -> OfferingHistory {
+    pub fn offering_history(
+        &mut self,
+        keys: &[CourseKey],
+        indexes: Option<&[CatalogIndex]>,
+    ) -> OfferingHistory {
         self.offering.now = self.now;
         if let Some(indexes) = indexes {
             self.offering.history(keys, indexes)

@@ -33,7 +33,9 @@ pub fn prerequisite_status(
     equivalences: &CourseEquivalences,
 ) -> PrereqStatus {
     let taken = courses_before(plan, term_index);
-    let counting = equivalences.merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let counting = equivalences.merging(&CourseEquivalences::from_declarations(
+        &plan.course_equivalences,
+    ));
     if let Some(listed) = catalog.and_then(|c| c.course(key)) {
         if listed.details_loaded {
             return status(listed.prereqs.as_ref(), &taken, &counting);
@@ -47,36 +49,65 @@ pub fn prerequisite_status(
     PrereqStatus::Unknown
 }
 
-pub fn status(requisite: Option<&Requisite>, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences) -> PrereqStatus {
-    let Some(requisite) = requisite else { return PrereqStatus::Met };
+pub fn status(
+    requisite: Option<&Requisite>,
+    taken: &HashSet<CourseKey>,
+    equivalences: &CourseEquivalences,
+) -> PrereqStatus {
+    let Some(requisite) = requisite else {
+        return PrereqStatus::Met;
+    };
     match unmet_summary(requisite, taken, equivalences) {
         None => PrereqStatus::Met,
         Some(text) => PrereqStatus::Missing(text),
     }
 }
 
-pub fn unmet_summary(requisite: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences) -> Option<String> {
+pub fn unmet_summary(
+    requisite: &Requisite,
+    taken: &HashSet<CourseKey>,
+    equivalences: &CourseEquivalences,
+) -> Option<String> {
     unmet(requisite, &equivalences.expand(taken))
 }
 
-pub fn missing_count(requisite: &Requisite, taken: &HashSet<CourseKey>, equivalences: &CourseEquivalences) -> i32 {
+pub fn missing_count(
+    requisite: &Requisite,
+    taken: &HashSet<CourseKey>,
+    equivalences: &CourseEquivalences,
+) -> i32 {
     count(requisite, &equivalences.expand(taken))
 }
 
 fn unmet(requisite: &Requisite, covered: &HashSet<CourseKey>) -> Option<String> {
     match requisite {
         Requisite::Course(key) => {
-            if covered.contains(key) { None } else { Some(key.to_string()) }
+            if covered.contains(key) {
+                None
+            } else {
+                Some(key.to_string())
+            }
         }
         Requisite::Test { .. } => None,
         Requisite::And(items) => {
             let parts = unique(items.iter().filter_map(|i| unmet(i, covered)).collect());
             match parts.len() {
                 0 | 1 => parts.into_iter().next(),
-                2 | 3 => Some(parts.iter().map(|p| parenthesized(p)).collect::<Vec<_>>().join(" and ")),
+                2 | 3 => Some(
+                    parts
+                        .iter()
+                        .map(|p| parenthesized(p))
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                ),
                 _ => Some(format!(
                     "{} and {} more",
-                    parts.iter().take(2).map(|p| parenthesized(p)).collect::<Vec<_>>().join(", "),
+                    parts
+                        .iter()
+                        .take(2)
+                        .map(|p| parenthesized(p))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     parts.len() - 2
                 )),
             }
@@ -85,7 +116,13 @@ fn unmet(requisite: &Requisite, covered: &HashSet<CourseKey>) -> Option<String> 
             if items.iter().any(|i| unmet(i, covered).is_none()) {
                 return None;
             }
-            let courses: Vec<CourseKey> = items.iter().filter_map(|i| match i { Requisite::Course(k) => Some(k.clone()), _ => None }).collect();
+            let courses: Vec<CourseKey> = items
+                .iter()
+                .filter_map(|i| match i {
+                    Requisite::Course(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect();
             if courses.len() == items.len() {
                 let names = unique(courses.iter().map(|k| k.to_string()).collect());
                 return Some(if names.len() <= 3 {
@@ -103,7 +140,13 @@ fn unmet(requisite: &Requisite, covered: &HashSet<CourseKey>) -> Option<String> 
 
 fn count(requisite: &Requisite, covered: &HashSet<CourseKey>) -> i32 {
     match requisite {
-        Requisite::Course(key) => if covered.contains(key) { 0 } else { 1 },
+        Requisite::Course(key) => {
+            if covered.contains(key) {
+                0
+            } else {
+                1
+            }
+        }
         Requisite::Test { .. } => 0,
         Requisite::And(items) => items.iter().map(|i| count(i, covered)).sum(),
         Requisite::Or(items) => items.iter().map(|i| count(i, covered)).min().unwrap_or(0),
@@ -120,16 +163,25 @@ fn parenthesized(text: &str) -> String {
 
 fn unique(texts: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    texts.into_iter().filter(|t| seen.insert(t.clone())).collect()
+    texts
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
 }
 
 pub fn duplicate_keys(plan: &DegreePlan) -> HashSet<CourseKey> {
-    let planned: Vec<&DegreePlanCourse> = plan.terms.iter().flat_map(|t| t.courses.iter()).collect();
+    let planned: Vec<&DegreePlanCourse> =
+        plan.terms.iter().flat_map(|t| t.courses.iter()).collect();
     let mut duplicates = HashSet::new();
     for (index, course) in planned.iter().enumerate() {
         let Some(key) = &course.key else { continue };
-        let repeats_planned = planned[..index].iter().any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
-        let repeats_completed = plan.completed.iter().any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
+        let repeats_planned = planned[..index]
+            .iter()
+            .any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
+        let repeats_completed = plan
+            .completed
+            .iter()
+            .any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
         if repeats_planned || repeats_completed {
             duplicates.insert(key.clone());
         }
@@ -198,7 +250,10 @@ pub fn schedule_suggestions(
             let distance = (plan_term.month_index() - target).abs();
             candidates.push((plan_term, keys, distance));
         }
-        let Some((plan_term, keys, distance)) = candidates.into_iter().min_by(|a, b| a.2.cmp(&b.2).then(b.0.sort_key().cmp(&a.0.sort_key()))) else {
+        let Some((plan_term, keys, distance)) = candidates
+            .into_iter()
+            .min_by(|a, b| a.2.cmp(&b.2).then(b.0.sort_key().cmp(&a.0.sort_key())))
+        else {
             continue;
         };
         let (offered, unavailable) = split_offered(&keys, term, index);
@@ -221,16 +276,31 @@ pub fn schedule_suggestions(
             courses: offered,
             unavailable,
         };
-        if is_exact { exact.push(suggestion); } else { closest.push(suggestion); }
+        if is_exact {
+            exact.push(suggestion);
+        } else {
+            closest.push(suggestion);
+        }
     }
     let mut copies = vec![];
     let mut schedules: Vec<&SchedulePlan> = schedule_plans
         .iter()
-        .filter(|p| p.term_code == term.code && Some(p.id) != excluding_plan && !p.courses.is_empty())
+        .filter(|p| {
+            p.term_code == term.code && Some(p.id) != excluding_plan && !p.courses.is_empty()
+        })
         .collect();
-    schedules.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
+    schedules.sort_by(|a, b| {
+        b.updated_at
+            .partial_cmp(&a.updated_at)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for plan in schedules.into_iter().take(2) {
-        let keys: Vec<CourseKey> = plan.courses.iter().map(|c| c.key.clone()).filter(|k| !already.contains(k)).collect();
+        let keys: Vec<CourseKey> = plan
+            .courses
+            .iter()
+            .map(|c| c.key.clone())
+            .filter(|k| !already.contains(k))
+            .collect();
         if keys.is_empty() {
             continue;
         }
@@ -238,7 +308,11 @@ pub fn schedule_suggestions(
             plan_name: plan.name.clone(),
             semester: None,
             title: format!("Copy “{}”", plan.name),
-            detail: if plan.is_primary { "Your schedule for this term".into() } else { "Another schedule for this term".into() },
+            detail: if plan.is_primary {
+                "Your schedule for this term".into()
+            } else {
+                "Another schedule for this term".into()
+            },
             is_exact_term: true,
             courses: keys,
             unavailable: vec![],
@@ -249,8 +323,14 @@ pub fn schedule_suggestions(
     exact
 }
 
-fn split_offered(keys: &[CourseKey], term: &Term, index: Option<&CatalogIndex>) -> (Vec<CourseKey>, Vec<CourseKey>) {
-    let Some(index) = index else { return (keys.to_vec(), vec![]) };
+fn split_offered(
+    keys: &[CourseKey],
+    term: &Term,
+    index: Option<&CatalogIndex>,
+) -> (Vec<CourseKey>, Vec<CourseKey>) {
+    let Some(index) = index else {
+        return (keys.to_vec(), vec![]);
+    };
     if index.catalog.term.code != term.code {
         return (keys.to_vec(), vec![]);
     }
@@ -266,8 +346,17 @@ fn split_offered(keys: &[CourseKey], term: &Term, index: Option<&CatalogIndex>) 
     (offered, unavailable)
 }
 
-pub fn new_degree_plan_draft(name: &str, source: Option<&DegreePlan>, schedule_plans: &[SchedulePlan], now_year: i32, now_month: u32) -> DegreePlan {
-    let mut draft = DegreePlan { name: name.into(), ..DegreePlan::default() };
+pub fn new_degree_plan_draft(
+    name: &str,
+    source: Option<&DegreePlan>,
+    schedule_plans: &[SchedulePlan],
+    now_year: i32,
+    now_month: u32,
+) -> DegreePlan {
+    let mut draft = DegreePlan {
+        name: name.into(),
+        ..DegreePlan::default()
+    };
     if let Some(source) = source {
         draft.program = source.program.clone();
         draft.student_name = source.student_name.clone();
@@ -276,18 +365,60 @@ pub fn new_degree_plan_draft(name: &str, source: Option<&DegreePlan>, schedule_p
         draft.catalog_program_path = source.catalog_program_path.clone();
         draft.catalog_program_title = source.catalog_program_title.clone();
         draft.concentration_id = source.concentration_id.clone();
-        draft.substitutions = source.substitutions.iter().cloned().map(|mut s| { s.id = Uuid::new_v4(); s }).collect();
-        draft.course_equivalences = source.course_equivalences.iter().cloned().map(|mut e| { e.id = Uuid::new_v4(); e }).collect();
-        draft.completed = source.completed.iter().cloned().map(|mut c| { c.id = Uuid::new_v4(); c }).collect();
-        draft.terms = source.terms.iter().cloned().map(|mut term| {
-            term.id = Uuid::new_v4();
-            term.courses = term.courses.into_iter().map(|mut c| { c.id = Uuid::new_v4(); c }).collect();
-            term
-        }).collect();
+        draft.substitutions = source
+            .substitutions
+            .iter()
+            .cloned()
+            .map(|mut s| {
+                s.id = Uuid::new_v4();
+                s
+            })
+            .collect();
+        draft.course_equivalences = source
+            .course_equivalences
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                e.id = Uuid::new_v4();
+                e
+            })
+            .collect();
+        draft.completed = source
+            .completed
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                c.id = Uuid::new_v4();
+                c
+            })
+            .collect();
+        draft.terms = source
+            .terms
+            .iter()
+            .cloned()
+            .map(|mut term| {
+                term.id = Uuid::new_v4();
+                term.courses = term
+                    .courses
+                    .into_iter()
+                    .map(|mut c| {
+                        c.id = Uuid::new_v4();
+                        c
+                    })
+                    .collect();
+                term
+            })
+            .collect();
     }
     let done = draft.completed_keys();
-    for plan in schedule_plans.iter().filter(|p| p.is_primary && !p.courses.is_empty()) {
-        let term = Term { code: plan.term_code.clone(), banner_description: String::new() };
+    for plan in schedule_plans
+        .iter()
+        .filter(|p| p.is_primary && !p.courses.is_empty())
+    {
+        let term = Term {
+            code: plan.term_code.clone(),
+            banner_description: String::new(),
+        };
         if term_has_ended(&term, now_year, now_month) {
             continue;
         }
@@ -300,18 +431,32 @@ pub fn new_degree_plan_draft(name: &str, source: Option<&DegreePlan>, schedule_p
             Season::Fall => PlanSeason::Fall,
         };
         let year = term.calendar_year();
-        let position = if let Some(i) = draft.terms.iter().position(|t| t.season == season && t.year == year) {
+        let position = if let Some(i) = draft
+            .terms
+            .iter()
+            .position(|t| t.season == season && t.year == year)
+        {
             i
         } else {
             draft.terms.push(DegreePlanTerm::new(season, year));
             draft.terms.len() - 1
         };
-        let present: HashSet<CourseKey> = draft.terms[position].courses.iter().filter_map(|c| c.key.clone()).collect();
+        let present: HashSet<CourseKey> = draft.terms[position]
+            .courses
+            .iter()
+            .filter_map(|c| c.key.clone())
+            .collect();
         for course in &plan.courses {
             if present.contains(&course.key) || done.contains(&course.key) {
                 continue;
             }
-            draft.terms[position].courses.push(DegreePlanCourse::catalog(course.key.clone(), course.key.to_string(), 4.0));
+            draft.terms[position]
+                .courses
+                .push(DegreePlanCourse::catalog(
+                    course.key.clone(),
+                    course.key.to_string(),
+                    4.0,
+                ));
         }
     }
     draft.sort_terms();
@@ -332,15 +477,27 @@ fn term_has_ended(term: &Term, year: i32, month: u32) -> bool {
 
 fn credits_phrase(value: f64) -> String {
     let number = credit_number(value);
-    if (value - 1.0).abs() < 1e-9 { format!("{number} credit") } else { format!("{number} credits") }
+    if (value - 1.0).abs() < 1e-9 {
+        format!("{number} credit")
+    } else {
+        format!("{number} credits")
+    }
 }
 
 fn courses_phrase(count: usize) -> String {
-    if count == 1 { "1 course".into() } else { format!("{count} courses") }
+    if count == 1 {
+        "1 course".into()
+    } else {
+        format!("{count} courses")
+    }
 }
 
 pub fn completed_line(plan: &DegreePlan) -> String {
-    if plan.completed.is_empty() { "No completed courses yet".into() } else { format!("{} completed", credits_phrase(plan.completed_credits())) }
+    if plan.completed.is_empty() {
+        "No completed courses yet".into()
+    } else {
+        format!("{} completed", credits_phrase(plan.completed_credits()))
+    }
 }
 
 /// Banner code of a semester at Northeastern (`202730` for Spring 2027).
@@ -360,8 +517,16 @@ pub fn semester_has_ended(term: &DegreePlanTerm, now: f64) -> bool {
 }
 
 pub fn next_summary(plan: &DegreePlan, now: f64) -> Option<String> {
-    let next = plan.terms.iter().find(|term| !semester_has_ended(term, now) && !term.courses.is_empty())?;
-    Some(format!("{} · {} · {}", next.name(), credits_phrase(next.credits()), courses_phrase(next.courses.len())))
+    let next = plan
+        .terms
+        .iter()
+        .find(|term| !semester_has_ended(term, now) && !term.courses.is_empty())?;
+    Some(format!(
+        "{} · {} · {}",
+        next.name(),
+        credits_phrase(next.credits()),
+        courses_phrase(next.courses.len())
+    ))
 }
 
 pub fn next_line(plan: &DegreePlan, now: f64) -> String {
@@ -378,7 +543,10 @@ pub fn next_line(plan: &DegreePlan, now: f64) -> String {
 }
 
 pub fn now_unix() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// A schedule opened for one semester of a degree plan.
@@ -389,17 +557,43 @@ pub struct SemesterSchedule {
     pub course_count: usize,
 }
 
-pub fn schedule_for_semester(data: &mut UserData, semester: &DegreePlanTerm, term_code: &str) -> Option<SemesterSchedule> {
+pub fn schedule_for_semester(
+    data: &mut UserData,
+    semester: &DegreePlanTerm,
+    term_code: &str,
+) -> Option<SemesterSchedule> {
     let mut seen = HashSet::new();
-    let keys: Vec<CourseKey> = semester.courses.iter().filter_map(|course| course.key.clone()).filter(|key| seen.insert(key.clone())).collect();
+    let keys: Vec<CourseKey> = semester
+        .courses
+        .iter()
+        .filter_map(|course| course.key.clone())
+        .filter(|key| seen.insert(key.clone()))
+        .collect();
     if keys.is_empty() {
         return None;
     }
     let wanted: HashSet<CourseKey> = keys.iter().cloned().collect();
-    if let Some(existing) = data.plans.iter().find(|plan| plan.term_code == term_code && plan.courses.iter().map(|course| course.key.clone()).collect::<HashSet<_>>() == wanted) {
-        return Some(SemesterSchedule { plan: existing.clone(), is_new: false, course_count: keys.len() });
+    if let Some(existing) = data.plans.iter().find(|plan| {
+        plan.term_code == term_code
+            && plan
+                .courses
+                .iter()
+                .map(|course| course.key.clone())
+                .collect::<HashSet<_>>()
+                == wanted
+    }) {
+        return Some(SemesterSchedule {
+            plan: existing.clone(),
+            is_new: false,
+            course_count: keys.len(),
+        });
     }
-    let names: Vec<String> = data.plans.iter().filter(|plan| plan.term_code == term_code).map(|plan| plan.name.clone()).collect();
+    let names: Vec<String> = data
+        .plans
+        .iter()
+        .filter(|plan| plan.term_code == term_code)
+        .map(|plan| plan.name.clone())
+        .collect();
     let schedule = SchedulePlan {
         id: Uuid::new_v4(),
         name: unique_schedule_name(&format!("{} plan", semester.name()), &names),
@@ -407,7 +601,12 @@ pub fn schedule_for_semester(data: &mut UserData, semester: &DegreePlanTerm, ter
         courses: keys
             .iter()
             .enumerate()
-            .map(|(index, key)| PlanCourse { key: key.clone(), is_required: true, excluded_crns: HashSet::new(), color_index: index as i32 })
+            .map(|(index, key)| PlanCourse {
+                key: key.clone(),
+                is_required: true,
+                excluded_crns: HashSet::new(),
+                color_index: index as i32,
+            })
             .collect(),
         selected_crns: vec![],
         filters: ScheduleFilters::default(),
@@ -420,11 +619,18 @@ pub fn schedule_for_semester(data: &mut UserData, semester: &DegreePlanTerm, ter
     let id = schedule.id;
     data.add_schedule(schedule);
     let stored = data.plans.iter().find(|plan| plan.id == id).cloned()?;
-    Some(SemesterSchedule { plan: stored, is_new: true, course_count: keys.len() })
+    Some(SemesterSchedule {
+        plan: stored,
+        is_new: true,
+        course_count: keys.len(),
+    })
 }
 
 fn unique_schedule_name(base: &str, existing: &[String]) -> String {
-    let taken: HashSet<String> = existing.iter().map(|name| name.trim().to_ascii_lowercase()).collect();
+    let taken: HashSet<String> = existing
+        .iter()
+        .map(|name| name.trim().to_ascii_lowercase())
+        .collect();
     let wanted = base.trim();
     if !taken.contains(&wanted.to_ascii_lowercase()) {
         return wanted.to_string();
@@ -436,17 +642,36 @@ fn unique_schedule_name(base: &str, existing: &[String]) -> String {
     format!("{wanted} {number}")
 }
 
-pub fn next_semesters(plan: &DegreePlan, count: usize, year: i32, month: u32) -> Vec<DegreePlanTerm> {
-    let order = [PlanSeason::Spring, PlanSeason::SummerA, PlanSeason::SummerB, PlanSeason::Fall];
+pub fn next_semesters(
+    plan: &DegreePlan,
+    count: usize,
+    year: i32,
+    month: u32,
+) -> Vec<DegreePlanTerm> {
+    let order = [
+        PlanSeason::Spring,
+        PlanSeason::SummerA,
+        PlanSeason::SummerB,
+        PlanSeason::Fall,
+    ];
     let mut year = year;
-    let mut season_index = if month < 5 { 0 } else if month < 7 { 1 } else if month < 9 { 2 } else { 3 };
+    let mut season_index = if month < 5 {
+        0
+    } else if month < 7 {
+        1
+    } else if month < 9 {
+        2
+    } else {
+        3
+    };
     if let Some(last) = plan.terms.last() {
         if let Some(i) = order.iter().position(|s| *s == last.season) {
             year = last.year;
             season_index = i + 1;
         }
     }
-    let existing: HashSet<(PlanSeason, i32)> = plan.terms.iter().map(|t| (t.season, t.year)).collect();
+    let existing: HashSet<(PlanSeason, i32)> =
+        plan.terms.iter().map(|t| (t.season, t.year)).collect();
     let mut result = vec![];
     while result.len() < count {
         if season_index >= order.len() {

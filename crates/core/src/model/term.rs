@@ -73,12 +73,24 @@ impl Term {
     }
 
     pub fn calendar_year(&self) -> i32 {
-        let year: i32 = self.code.chars().take(4).collect::<String>().parse().unwrap_or(0);
-        if self.season() == Season::Fall { year - 1 } else { year }
+        let year: i32 = self
+            .code
+            .chars()
+            .take(4)
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+        if self.season() == Season::Fall {
+            year - 1
+        } else {
+            year
+        }
     }
 
     pub fn is_view_only(&self) -> bool {
-        self.banner_description.to_ascii_lowercase().contains("view only")
+        self.banner_description
+            .to_ascii_lowercase()
+            .contains("view only")
     }
 
     pub fn name(&self) -> String {

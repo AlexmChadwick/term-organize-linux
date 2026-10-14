@@ -8,7 +8,7 @@ Course information is © Northeastern University. This program is free software 
 
 ## What it does
 
-One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 snapshot (`data/catalog/term-202710.catalog`) is enough to search, build schedules, and read sections offline. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
+One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 snapshot (`data/catalog/term-202710.catalog`) is enough to search, build schedules, and read sections offline. It keeps instructor addresses on `northeastern.edu` and `neu.edu` (and their subdomains) and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
 
 ## Build
 

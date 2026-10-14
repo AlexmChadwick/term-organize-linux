@@ -55,13 +55,21 @@ impl PlanSeason {
         }
     }
     pub fn parse_export(raw: &str) -> Option<Self> {
-        let s = raw.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+        let s = raw
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
         Some(match s.as_str() {
             "fall" | "autumn" => Self::Fall,
             "spring" => Self::Spring,
             "winter" => Self::Winter,
-            "summer session a" | "summer a" | "summer 1" | "summer i" | "summer session 1" => Self::SummerA,
-            "summer session b" | "summer b" | "summer 2" | "summer ii" | "summer session 2" => Self::SummerB,
+            "summer session a" | "summer a" | "summer 1" | "summer i" | "summer session 1" => {
+                Self::SummerA
+            }
+            "summer session b" | "summer b" | "summer 2" | "summer ii" | "summer session 2" => {
+                Self::SummerB
+            }
             "summer full" | "summer" | "full summer" | "summer session full" => Self::SummerFull,
             _ => return None,
         })
@@ -70,7 +78,12 @@ impl PlanSeason {
         use super::term::Season::*;
         matches!(
             (self, season),
-            (Self::Fall, Fall) | (Self::Spring, Spring) | (Self::Winter, Winter) | (Self::SummerA, Summer1 | SummerFull) | (Self::SummerB, Summer2 | SummerFull) | (Self::SummerFull, SummerFull | Summer1 | Summer2)
+            (Self::Fall, Fall)
+                | (Self::Spring, Spring)
+                | (Self::Winter, Winter)
+                | (Self::SummerA, Summer1 | SummerFull)
+                | (Self::SummerB, Summer2 | SummerFull)
+                | (Self::SummerFull, SummerFull | Summer1 | Summer2)
         )
     }
 }
@@ -92,10 +105,22 @@ pub struct DegreePlanCourse {
 impl DegreePlanCourse {
     pub fn catalog(key: CourseKey, title: impl Into<String>, credits: f64) -> Self {
         let label = key.to_string();
-        Self { id: Uuid::new_v4(), key: Some(key), label, title: title.into(), credits }
+        Self {
+            id: Uuid::new_v4(),
+            key: Some(key),
+            label,
+            title: title.into(),
+            credits,
+        }
     }
     pub fn other(label: impl Into<String>, title: impl Into<String>, credits: f64) -> Self {
-        Self { id: Uuid::new_v4(), key: None, label: label.into(), title: title.into(), credits }
+        Self {
+            id: Uuid::new_v4(),
+            key: None,
+            label: label.into(),
+            title: title.into(),
+            credits,
+        }
     }
 }
 
@@ -112,7 +137,12 @@ pub struct DegreePlanTerm {
 
 impl DegreePlanTerm {
     pub fn new(season: PlanSeason, year: i32) -> Self {
-        Self { id: Uuid::new_v4(), season, year, courses: vec![] }
+        Self {
+            id: Uuid::new_v4(),
+            season,
+            year,
+            courses: vec![],
+        }
     }
     pub fn name(&self) -> String {
         format!("{} {}", self.season.export_name(), self.year)
@@ -186,7 +216,10 @@ where
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a list, or anything else treated as empty")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
             let mut items = Vec::new();
             while let Some(item) = seq.next_element()? {
                 items.push(item);
@@ -214,8 +247,14 @@ where
         fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
             Ok(Vec::new())
         }
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
             Ok(Vec::new())
         }
     }
@@ -251,6 +290,15 @@ impl Default for DegreePlan {
     }
 }
 
+/// Plan the degree page acts on. The page lists the first plan when the
+/// selection is missing or no longer in the file, and Load requirements uses
+/// that same plan.
+pub fn shown_degree_plan_id(selected: Option<Uuid>, plans: &[DegreePlan]) -> Option<Uuid> {
+    selected
+        .filter(|id| plans.iter().any(|plan| plan.id == *id))
+        .or_else(|| plans.first().map(|plan| plan.id))
+}
+
 impl DegreePlan {
     pub fn completed_credits(&self) -> f64 {
         self.completed.iter().map(|c| c.credits).sum()
@@ -259,7 +307,10 @@ impl DegreePlan {
         self.terms.iter().map(|t| t.credits()).sum()
     }
     pub fn completed_keys(&self) -> std::collections::BTreeSet<CourseKey> {
-        self.completed.iter().filter_map(|c| c.key.clone()).collect()
+        self.completed
+            .iter()
+            .filter_map(|c| c.key.clone())
+            .collect()
     }
     pub fn sort_terms(&mut self) {
         self.terms.sort_by_key(|t| t.sort_key());
@@ -312,7 +363,11 @@ pub struct RequirementReplacement {
     pub count: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hours: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "likeRuleID")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "likeRuleID"
+    )]
     pub like_rule_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub like_rule_title: Option<String>,
@@ -325,7 +380,11 @@ pub struct RequirementReplacement {
 impl RequirementReplacement {
     pub fn summary(&self) -> String {
         let amount = if let Some(count) = self.count {
-            if count == 1 { "1 course".into() } else { format!("{count} courses") }
+            if count == 1 {
+                "1 course".into()
+            } else {
+                format!("{count} courses")
+            }
         } else if let Some(hours) = self.hours {
             format!("{} semester hours", format_hours(hours))
         } else {
@@ -336,7 +395,14 @@ impl RequirementReplacement {
             sources.push(format!("like {title}"));
         }
         if !self.courses.is_empty() {
-            sources.push(format!("from {}", self.courses.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")));
+            sources.push(format!(
+                "from {}",
+                self.courses
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         let mut text = sources.join(" ");
         if self.like_rule_title.is_some() {
@@ -389,4 +455,27 @@ pub fn apply_number_limit(range: &CourseRange, limit: Option<&CourseNumberLimit>
     }
     range.label = range.described_label();
     range
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shown_plan_falls_back_to_the_first_saved_plan() {
+        let first = DegreePlan::default();
+        let second = DegreePlan {
+            name: "Second".into(),
+            ..DegreePlan::default()
+        };
+        let plans = [first.clone(), second.clone()];
+        assert_eq!(shown_degree_plan_id(None, &plans), Some(first.id));
+        assert_eq!(
+            shown_degree_plan_id(Some(second.id), &plans),
+            Some(second.id)
+        );
+        let gone = Uuid::new_v4();
+        assert_eq!(shown_degree_plan_id(Some(gone), &plans), Some(first.id));
+        assert_eq!(shown_degree_plan_id(None, &[]), None);
+    }
 }

@@ -39,7 +39,10 @@ fn default_true() -> bool {
 
 impl Course {
     pub fn key(&self) -> CourseKey {
-        CourseKey { subject: self.subject.clone(), number: self.number.clone() }
+        CourseKey {
+            subject: self.subject.clone(),
+            number: self.number.clone(),
+        }
     }
     pub fn code(&self) -> String {
         self.key().to_string()
@@ -66,7 +69,11 @@ pub fn credit_label(min: f64, max: f64) -> String {
     } else {
         format!("{}–{}", credit_number(min), credit_number(max))
     };
-    let word = if (max - 1.0).abs() < 1e-9 && (min - 1.0).abs() < 1e-9 { "credit" } else { "credits" };
+    let word = if (max - 1.0).abs() < 1e-9 && (min - 1.0).abs() < 1e-9 {
+        "credit"
+    } else {
+        "credits"
+    };
     format!("{text} {word}")
 }
 
@@ -128,7 +135,19 @@ pub enum NuPath {
 
 impl NuPath {
     pub const ALL: [NuPath; 13] = [
-        Self::Nd, Self::Ei, Self::Ic, Self::Fq, Self::Si, Self::Ad, Self::Dd, Self::Er, Self::Wf, Self::Wi, Self::Wd, Self::Ex, Self::Ce,
+        Self::Nd,
+        Self::Ei,
+        Self::Ic,
+        Self::Fq,
+        Self::Si,
+        Self::Ad,
+        Self::Dd,
+        Self::Er,
+        Self::Wf,
+        Self::Wi,
+        Self::Wd,
+        Self::Ex,
+        Self::Ce,
     ];
 
     pub fn code(self) -> &'static str {
@@ -186,19 +205,29 @@ impl NuPath {
     }
 
     pub fn from_codes(codes: &[String]) -> Vec<NuPath> {
-        Self::ALL.into_iter().filter(|p| codes.iter().any(|c| c == p.code())).collect()
+        Self::ALL
+            .into_iter()
+            .filter(|p| codes.iter().any(|c| c == p.code()))
+            .collect()
     }
 
     pub fn from_short(short: &str) -> Option<NuPath> {
-        Self::ALL.into_iter().find(|p| p.short().eq_ignore_ascii_case(short))
+        Self::ALL
+            .into_iter()
+            .find(|p| p.short().eq_ignore_ascii_case(short))
     }
 }
 
 /// What the primary degree plan does with a course (`CourseDegreePlanStanding`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DegreeStandingKind {
-    Completed { via: Option<CourseKey> },
-    Planned { semester: String, via: Option<CourseKey> },
+    Completed {
+        via: Option<CourseKey>,
+    },
+    Planned {
+        semester: String,
+        via: Option<CourseKey>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,8 +241,14 @@ impl DegreePlanStanding {
         match &self.kind {
             DegreeStandingKind::Completed { via: None } => "Completed".into(),
             DegreeStandingKind::Completed { via: Some(key) } => format!("Completed via {key}"),
-            DegreeStandingKind::Planned { semester, via: None } => format!("Planned · {semester}"),
-            DegreeStandingKind::Planned { semester, via: Some(key) } => format!("Planned via {key} · {semester}"),
+            DegreeStandingKind::Planned {
+                semester,
+                via: None,
+            } => format!("Planned · {semester}"),
+            DegreeStandingKind::Planned {
+                semester,
+                via: Some(key),
+            } => format!("Planned via {key} · {semester}"),
         }
     }
     pub fn symbol(&self) -> &'static str {
@@ -225,9 +260,17 @@ impl DegreePlanStanding {
     pub fn spoken_text(&self) -> String {
         match &self.kind {
             DegreeStandingKind::Completed { via: None } => "Completed, in your degree plan".into(),
-            DegreeStandingKind::Completed { via: Some(key) } => format!("Completed via {key}, in your degree plan"),
-            DegreeStandingKind::Planned { semester, via: None } => format!("Planned for {semester} in your degree plan"),
-            DegreeStandingKind::Planned { semester, via: Some(key) } => format!("Planned via {key} for {semester} in your degree plan"),
+            DegreeStandingKind::Completed { via: Some(key) } => {
+                format!("Completed via {key}, in your degree plan")
+            }
+            DegreeStandingKind::Planned {
+                semester,
+                via: None,
+            } => format!("Planned for {semester} in your degree plan"),
+            DegreeStandingKind::Planned {
+                semester,
+                via: Some(key),
+            } => format!("Planned via {key} for {semester} in your degree plan"),
         }
     }
 }

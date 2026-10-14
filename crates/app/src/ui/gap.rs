@@ -7,7 +7,9 @@ use termorganize_core::catalog;
 use termorganize_core::course_info::{self, CourseInfoRepository};
 use termorganize_core::editing;
 use termorganize_core::offering::{OfferingHistory, OfferingRepository, OfferingSource};
-use termorganize_core::outline::{GroupKind, ItemKind, PathContent, RequisiteItem, RequisiteLayout, RequisitePart};
+use termorganize_core::outline::{
+    GroupKind, ItemKind, PathContent, RequisiteItem, RequisiteLayout, RequisitePart,
+};
 use termorganize_core::petition::{self, CourseNumberChoice};
 use termorganize_core::reorder;
 use termorganize_core::suggestions;
@@ -20,13 +22,19 @@ impl OfferingSource for LocalTerms {
     fn terms(&self) -> Result<Vec<Term>, String> {
         Ok(self.terms.clone())
     }
-    fn offered_courses(&self, _term: &str, _courses: &[CourseKey]) -> Result<HashSet<CourseKey>, String> {
+    fn offered_courses(
+        &self,
+        _term: &str,
+        _courses: &[CourseKey],
+    ) -> Result<HashSet<CourseKey>, String> {
         Err("offline".into())
     }
 }
 
 pub fn install_css() {
-    let Some(display) = gtk::gdk::Display::default() else { return };
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
         ".req-chip { padding: 2px 4px; }
@@ -35,7 +43,11 @@ pub fn install_css() {
          .semester-card { padding: 12px; }
          .day-toggle { min-width: 2.75em; padding: 6px 8px; }",
     );
-    gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 pub fn term_label(term: &Term) -> String {
@@ -52,7 +64,8 @@ pub fn term_label(term: &Term) -> String {
 pub fn known_terms(current: &CatalogIndex) -> Vec<(String, String)> {
     let mut map = std::collections::BTreeMap::new();
     let mut add = |term: &Term| {
-        map.entry(term.code.clone()).or_insert_with(|| term_label(term));
+        map.entry(term.code.clone())
+            .or_insert_with(|| term_label(term));
     };
     add(&current.catalog.term);
     if let Some(path) = bundled_catalog_path() {
@@ -69,7 +82,15 @@ pub fn known_terms(current: &CatalogIndex) -> Vec<(String, String)> {
 }
 
 pub fn install_term_menu(shell: &Rc<RefCell<Shell>>, smoke: bool) {
-    let current = shell.borrow().state.borrow().index.catalog.term.code.clone();
+    let current = shell
+        .borrow()
+        .state
+        .borrow()
+        .index
+        .catalog
+        .term
+        .code
+        .clone();
     let terms = known_terms(&shell.borrow().state.borrow().index);
     apply_term_model(shell, &terms, &current);
     let menu = shell.borrow().term_menu.clone();
@@ -93,13 +114,18 @@ pub fn install_term_menu(shell: &Rc<RefCell<Shell>>, smoke: bool) {
 
 fn apply_term_model(shell: &Rc<RefCell<Shell>>, terms: &[(String, String)], selected: &str) {
     shell.borrow().guard.set(true);
-    shell.borrow().state.borrow_mut().term_codes = terms.iter().map(|(code, _)| code.clone()).collect();
-    shell.borrow().state.borrow_mut().term_labels = terms.iter().map(|(_, label)| label.clone()).collect();
+    shell.borrow().state.borrow_mut().term_codes =
+        terms.iter().map(|(code, _)| code.clone()).collect();
+    shell.borrow().state.borrow_mut().term_labels =
+        terms.iter().map(|(_, label)| label.clone()).collect();
     let labels: Vec<&str> = terms.iter().map(|(_, label)| label.as_str()).collect();
     let model = gtk::StringList::new(&labels);
     let menu = shell.borrow().term_menu.clone();
     menu.set_model(Some(&model));
-    let index = terms.iter().position(|(code, _)| code == selected).unwrap_or(0) as u32;
+    let index = terms
+        .iter()
+        .position(|(code, _)| code == selected)
+        .unwrap_or(0) as u32;
     if !terms.is_empty() {
         menu.set_selected(index);
     }
@@ -114,7 +140,15 @@ fn refresh_remote_terms(shell: &Rc<RefCell<Shell>>) {
     let shell = shell.clone();
     glib::timeout_add_local(Duration::from_millis(300), move || match rx.try_recv() {
         Ok(Ok(remote)) => {
-            let current = shell.borrow().state.borrow().index.catalog.term.code.clone();
+            let current = shell
+                .borrow()
+                .state
+                .borrow()
+                .index
+                .catalog
+                .term
+                .code
+                .clone();
             let mut terms = known_terms(&shell.borrow().state.borrow().index);
             for term in remote {
                 if !terms.iter().any(|(code, _)| code == &term.code) {
@@ -155,20 +189,40 @@ fn switch_term(shell: &Rc<RefCell<Shell>>, code: &str) {
         install_index(shell, index);
         return;
     }
-    toast(shell, &format!("Downloading term {code} from Banner. This can take a minute."));
+    toast(
+        shell,
+        &format!("Downloading term {code} from Banner. This can take a minute."),
+    );
     let code = code.to_string();
     let (knowledge, subjects, campuses, attributes, description) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let knowledge = state.index.catalog.courses.iter().map(|course| (course.key(), course.clone())).collect::<HashMap<_, _>>();
+        let knowledge = state
+            .index
+            .catalog
+            .courses
+            .iter()
+            .map(|course| (course.key(), course.clone()))
+            .collect::<HashMap<_, _>>();
         let description = state
             .term_codes
             .iter()
             .position(|item| item == &code)
             .and_then(|index| state.term_labels.get(index))
-            .map(|label| label.trim_end_matches(&format!(" · {code}")).trim().to_string())
+            .map(|label| {
+                label
+                    .trim_end_matches(&format!(" · {code}"))
+                    .trim()
+                    .to_string()
+            })
             .unwrap_or_default();
-        (knowledge, state.index.catalog.subjects.clone(), state.index.catalog.campuses.clone(), state.index.catalog.attributes.clone(), description)
+        (
+            knowledge,
+            state.index.catalog.subjects.clone(),
+            state.index.catalog.campuses.clone(),
+            state.index.catalog.attributes.clone(),
+            description,
+        )
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -179,9 +233,21 @@ fn switch_term(shell: &Rc<RefCell<Shell>>, code: &str) {
             let campuses = client.fetch_campuses(&code).ok().or(Some(campuses));
             let attributes = client.fetch_attributes(&code).ok().or(Some(attributes));
             let existing = catalog::load_cached(&code);
-            let term = Term { code: code.clone(), banner_description: description };
+            let term = Term {
+                code: code.clone(),
+                banner_description: description,
+            };
             let now = now_secs();
-            let merged = catalog::merge(existing.as_ref(), &sections, term, subjects, campuses, attributes, &knowledge, now);
+            let merged = catalog::merge(
+                existing.as_ref(),
+                &sections,
+                term,
+                subjects,
+                campuses,
+                attributes,
+                &knowledge,
+                now,
+            );
             catalog::save_cached(&merged)?;
             Ok::<_, String>(merged.term.code)
         })();
@@ -198,7 +264,15 @@ fn switch_term(shell: &Rc<RefCell<Shell>>, code: &str) {
         }
         Ok(Err(error)) => {
             toast(&shell, &format!("Could not download that term ({error})."));
-            let current = shell.borrow().state.borrow().index.catalog.term.code.clone();
+            let current = shell
+                .borrow()
+                .state
+                .borrow()
+                .index
+                .catalog
+                .term
+                .code
+                .clone();
             let terms = known_terms(&shell.borrow().state.borrow().index);
             apply_term_model(&shell, &terms, &current);
             glib::ControlFlow::Break
@@ -238,9 +312,19 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     let title = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        state.index.course(key).map(|course| format!("{} · {}", course.code(), course.title)).unwrap_or_else(|| key.to_string())
+        state
+            .index
+            .course(key)
+            .map(|course| format!("{} · {}", course.code(), course.title))
+            .unwrap_or_else(|| key.to_string())
     };
-    let window = adw::Window::builder().title(&title).default_width(760).default_height(680).content(&scroll).build();
+    let window = adw::Window::builder()
+        .title(&title)
+        .default_width(760)
+        .default_height(680)
+        .content(&scroll)
+        .build();
+    window.set_widget_name(&super::course_window_name(key));
     if let Some(app) = shell.borrow().window.application() {
         window.set_application(Some(&app));
     }
@@ -252,7 +336,12 @@ pub fn open_professor_window(shell: &Rc<RefCell<Shell>>, name: &str) {
     shell.borrow().state.borrow_mut().professor = Some(name.to_string());
     let page = professor_page(shell);
     shell.borrow().state.borrow_mut().professor = None;
-    let window = adw::Window::builder().title(name).default_width(720).default_height(640).content(&page).build();
+    let window = adw::Window::builder()
+        .title(name)
+        .default_width(720)
+        .default_height(640)
+        .content(&page)
+        .build();
     if let Some(app) = shell.borrow().window.application() {
         window.set_application(Some(&app));
     }
@@ -264,20 +353,36 @@ pub fn attach_course_drag(widget: &impl IsA<gtk::Widget>, key: &CourseKey) {
     let source = gtk::DragSource::new();
     source.set_actions(gtk::gdk::DragAction::COPY);
     let payload = format!("key:{}", key);
-    source.connect_prepare(move |_, _, _| Some(gtk::gdk::ContentProvider::for_value(&payload.to_value())));
+    source.connect_prepare(move |_, _, _| {
+        Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+    });
     widget.add_controller(source);
 }
 
-pub fn requisite_block(shell: &Rc<RefCell<Shell>>, requisite: &Requisite, title: &str) -> gtk::Widget {
+pub fn requisite_block(
+    shell: &Rc<RefCell<Shell>>,
+    requisite: &Requisite,
+    title: &str,
+) -> gtk::Widget {
     let (offered, completed, equivalences) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let offered: HashSet<CourseKey> = state.index.courses.iter().map(|course| course.key()).collect();
+        let offered: HashSet<CourseKey> = state
+            .index
+            .courses
+            .iter()
+            .map(|course| course.key())
+            .collect();
         let plan = state.data.primary_degree_plan();
-        let completed: HashSet<CourseKey> = plan.map(|plan| plan.completed_keys().into_iter().collect()).unwrap_or_default();
-        let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(
-            plan.map(|plan| plan.course_equivalences.as_slice()).unwrap_or(&[]),
-        ));
+        let completed: HashSet<CourseKey> = plan
+            .map(|plan| plan.completed_keys().into_iter().collect())
+            .unwrap_or_default();
+        let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(
+            &CourseEquivalences::from_declarations(
+                plan.map(|plan| plan.course_equivalences.as_slice())
+                    .unwrap_or(&[]),
+            ),
+        );
         (offered, completed, equivalences)
     };
     let Some(layout) = RequisiteLayout::build(
@@ -336,7 +441,9 @@ fn draw_path(shell: &Rc<RefCell<Shell>>, content: &PathContent) -> gtk::Widget {
     match content {
         PathContent::Item(item) => chip(shell, item),
         PathContent::Group(group) => chip_row(shell, &group.items, group.kind),
-        PathContent::Checklist(list) => draw_layout(shell, &RequisiteLayout::Checklist(list.clone())),
+        PathContent::Checklist(list) => {
+            draw_layout(shell, &RequisiteLayout::Checklist(list.clone()))
+        }
     }
 }
 
@@ -441,12 +548,25 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
     ensure_local_offering(shell);
     let shell_ref = shell.borrow();
     let state = shell_ref.state.borrow();
-    let Some(plan_id) = state.degree.filter(|id| state.data.degree_plans.iter().any(|plan| plan.id == *id)).or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else {
+    let Some(plan_id) = state
+        .degree
+        .filter(|id| state.data.degree_plans.iter().any(|plan| plan.id == *id))
+        .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+    else {
         return vec![];
     };
-    let Some(plan) = state.data.degree_plans.iter().find(|plan| plan.id == plan_id) else { return vec![] };
+    let Some(plan) = state
+        .data
+        .degree_plans
+        .iter()
+        .find(|plan| plan.id == plan_id)
+    else {
+        return vec![];
+    };
     let history = &state.offering;
-    let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(
+        &CourseEquivalences::from_declarations(&plan.course_equivalences),
+    );
     let mut views = Vec::new();
     for term in &plan.terms {
         let mut courses = Vec::new();
@@ -461,7 +581,12 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                     blocking.push(key.clone());
                 }
             }
-            courses.push(CourseRow { id: course.id, key: course.key.clone(), label: format!("{} {}", course.label, course.title), detail });
+            courses.push(CourseRow {
+                id: course.id,
+                key: course.key.clone(),
+                label: format!("{} {}", course.label, course.title),
+                detail,
+            });
         }
         let notes = &state.course_notes;
         let index = &state.index;
@@ -485,13 +610,24 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                 20.0,
             )
         };
-        views.push(SemesterSnap { id: term.id, title: format!("{} · {:.1} credits", term.name(), term.credits()), courses, suggestions });
+        views.push(SemesterSnap {
+            id: term.id,
+            title: format!("{} · {:.1} credits", term.name(), term.credits()),
+            courses,
+            suggestions,
+        });
     }
     views
 }
 
 fn ensure_local_offering(shell: &Rc<RefCell<Shell>>) {
-    let ready = !shell.borrow().state.borrow().offering.checked_terms.is_empty();
+    let ready = !shell
+        .borrow()
+        .state
+        .borrow()
+        .offering
+        .checked_terms
+        .is_empty();
     if ready {
         return;
     }
@@ -516,7 +652,11 @@ fn ensure_local_offering(shell: &Rc<RefCell<Shell>>) {
 
 fn plan_keys(plan: &DegreePlan) -> Vec<CourseKey> {
     let mut keys = Vec::new();
-    for course in plan.completed.iter().chain(plan.terms.iter().flat_map(|term| term.courses.iter())) {
+    for course in plan
+        .completed
+        .iter()
+        .chain(plan.terms.iter().flat_map(|term| term.courses.iter()))
+    {
         if let Some(key) = &course.key {
             if !keys.contains(key) {
                 keys.push(key.clone());
@@ -533,8 +673,15 @@ fn local_history(index: &CatalogIndex, keys: &[CourseKey]) -> OfferingHistory {
             indexes.push(extra);
         }
     }
-    let terms = indexes.iter().map(|index| index.catalog.term.clone()).collect();
-    let mut repo = OfferingRepository::new(LocalTerms { terms }, store::data_dir().join("offering-history.json"), now_secs());
+    let terms = indexes
+        .iter()
+        .map(|index| index.catalog.term.clone())
+        .collect();
+    let mut repo = OfferingRepository::new(
+        LocalTerms { terms },
+        store::data_dir().join("offering-history.json"),
+        now_secs(),
+    );
     repo.history(keys, &indexes)
 }
 
@@ -566,14 +713,28 @@ fn refresh_older_terms(shell: &Rc<RefCell<Shell>>) {
             }
         }
         let now = now_secs();
-        let mut offering_repo = OfferingRepository::new(BannerClient::default(), store::data_dir().join("offering-history.json"), now);
+        let mut offering_repo = OfferingRepository::new(
+            BannerClient::default(),
+            store::data_dir().join("offering-history.json"),
+            now,
+        );
         let history = offering_repo.history(&keys, &indexes);
         let missing: Vec<CourseKey> = keys
             .iter()
-            .filter(|key| indexes.iter().all(|index| index.course(key).is_none_or(|course| !course.details_loaded)))
+            .filter(|key| {
+                indexes.iter().all(|index| {
+                    index
+                        .course(key)
+                        .is_none_or(|course| !course.details_loaded)
+                })
+            })
             .cloned()
             .collect();
-        let mut info_repo = CourseInfoRepository::new(BannerClient::default(), store::data_dir().join("course-info.json"), now);
+        let mut info_repo = CourseInfoRepository::new(
+            BannerClient::default(),
+            store::data_dir().join("course-info.json"),
+            now,
+        );
         let looked = info_repo.lookup(&missing, &indexes);
         let mut notes = HashMap::new();
         for (key, lookup) in looked {
@@ -596,7 +757,10 @@ fn refresh_older_terms(shell: &Rc<RefCell<Shell>>) {
                     state.course_notes.insert(key, info);
                 }
             }
-            toast(&shell, &format!("Checked {checked} terms. {found} older catalog entries."));
+            toast(
+                &shell,
+                &format!("Checked {checked} terms. {found} older catalog entries."),
+            );
             refresh(&shell);
             glib::ControlFlow::Break
         }
@@ -616,7 +780,11 @@ fn semester_card(shell: &Rc<RefCell<Shell>>, semester: &SemesterSnap) -> gtk::Wi
     list.set_activate_on_single_click(false);
     let count = semester.courses.len() as i32;
     let ids: Vec<Uuid> = semester.courses.iter().map(|course| course.id).collect();
-    let keys: Vec<Option<CourseKey>> = semester.courses.iter().map(|course| course.key.clone()).collect();
+    let keys: Vec<Option<CourseKey>> = semester
+        .courses
+        .iter()
+        .map(|course| course.key.clone())
+        .collect();
     for (index, course) in semester.courses.iter().enumerate() {
         list.append(&course_drag_row(shell, semester.id, course, index as i32));
     }
@@ -656,7 +824,12 @@ fn semester_card(shell: &Rc<RefCell<Shell>>, semester: &SemesterSnap) -> gtk::Wi
     card.upcast()
 }
 
-fn course_drag_row(shell: &Rc<RefCell<Shell>>, term_id: Uuid, course: &CourseRow, position: i32) -> gtk::ListBoxRow {
+fn course_drag_row(
+    shell: &Rc<RefCell<Shell>>,
+    term_id: Uuid,
+    course: &CourseRow,
+    position: i32,
+) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     box_.set_margin_top(6);
@@ -687,31 +860,49 @@ fn course_drag_row(shell: &Rc<RefCell<Shell>>, term_id: Uuid, course: &CourseRow
     if let Some(key) = &course.key {
         let shell_open = shell.clone();
         let key_open = key.clone();
-        entries.push(super::menu_action("Open", move || open_course_window(&shell_open, &key_open)));
+        entries.push(super::menu_action("Open", move || {
+            open_course_window(&shell_open, &key_open)
+        }));
         let shell_copy = shell.clone();
         let code = key.to_string();
-        entries.push(super::menu_action("Copy code", move || super::copy_text(&shell_copy, &code, "Course code copied")));
+        entries.push(super::menu_action("Copy code", move || {
+            super::copy_text(&shell_copy, &code, "Course code copied")
+        }));
     }
     let shell_remove = shell.clone();
     let course_id = course.id;
-    entries.push(super::menu_action("Remove", move || super::remove_degree_course(&shell_remove, course_id)));
+    entries.push(super::menu_action("Remove", move || {
+        super::remove_degree_course(&shell_remove, course_id)
+    }));
     super::attach_context_menu(&row, entries);
     let source = gtk::DragSource::new();
     source.set_actions(gtk::gdk::DragAction::MOVE);
     let payload = format!("id:{}", course.id);
-    source.connect_prepare(move |_, _, _| Some(gtk::gdk::ContentProvider::for_value(&payload.to_value())));
+    source.connect_prepare(move |_, _, _| {
+        Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+    });
     row.add_controller(source);
     row.set_child(Some(&box_));
     attach_semester_drop(&row, shell, term_id, position);
     row
 }
 
-fn attach_semester_drop(widget: &impl IsA<gtk::Widget>, shell: &Rc<RefCell<Shell>>, term_id: Uuid, position: i32) {
-    let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+fn attach_semester_drop(
+    widget: &impl IsA<gtk::Widget>,
+    shell: &Rc<RefCell<Shell>>,
+    term_id: Uuid,
+    position: i32,
+) {
+    let target = gtk::DropTarget::new(
+        glib::Type::STRING,
+        gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+    );
     target.connect_drop({
         let shell = shell.clone();
         move |_, value, _, _| {
-            let Ok(text) = value.get::<String>() else { return false };
+            let Ok(text) = value.get::<String>() else {
+                return false;
+            };
             apply_drop(&shell, &text, term_id, position)
         }
     });
@@ -720,11 +911,17 @@ fn attach_semester_drop(widget: &impl IsA<gtk::Widget>, shell: &Rc<RefCell<Shell
 
 fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position: i32) -> bool {
     let added = if let Some(raw) = payload.strip_prefix("key:") {
-        let Some(key) = CourseKey::parse(raw) else { return false };
+        let Some(key) = CourseKey::parse(raw) else {
+            return false;
+        };
         let (title, credits) = {
             let shell_ref = shell.borrow();
-        let state = shell_ref.state.borrow();
-            state.index.course(&key).map(|course| (course.title.clone(), course.max_credits)).unwrap_or_else(|| (key.to_string(), 4.0))
+            let state = shell_ref.state.borrow();
+            state
+                .index
+                .course(&key)
+                .map(|course| (course.title.clone(), course.max_credits))
+                .unwrap_or_else(|| (key.to_string(), 4.0))
         };
         Some(DegreePlanCourse::catalog(key, title, credits))
     } else {
@@ -733,9 +930,24 @@ fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position
     let moved = {
         let shell_ref = shell.borrow();
         let mut state = shell_ref.state.borrow_mut();
-        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return false };
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return false };
-        if let Some(id) = payload.strip_prefix("id:").and_then(|raw| Uuid::parse_str(raw).ok()) {
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return false;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return false;
+        };
+        if let Some(id) = payload
+            .strip_prefix("id:")
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
             editing::move_course_at(id, term_id, position, plan);
         } else if let Some(course) = added {
             let id = course.id;
@@ -758,8 +970,20 @@ fn apply_move(shell: &Rc<RefCell<Shell>>, suggestion: &reorder::Suggestion) {
     {
         let shell_ref = shell.borrow();
         let mut state = shell_ref.state.borrow_mut();
-        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return };
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return;
+        };
         reorder::apply(suggestion, plan);
         plan.updated_at = Some(now_secs().to_string());
         persist(&state.data);
@@ -773,17 +997,35 @@ pub fn petition_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let (questions, misses) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let Some(plan) = state.degree.and_then(|id| state.data.degree_plans.iter().find(|plan| plan.id == id)).or_else(|| state.data.degree_plans.first()) else {
+        let Some(plan) = state
+            .degree
+            .and_then(|id| state.data.degree_plans.iter().find(|plan| plan.id == id))
+            .or_else(|| state.data.degree_plans.first())
+        else {
             return root.upcast();
         };
-        let Some(requirements) = state.requirements.get(&plan.id) else { return root.upcast() };
-        let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+        let Some(requirements) = state.requirements.get(&plan.id) else {
+            return root.upcast();
+        };
+        let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(
+            &CourseEquivalences::from_declarations(&plan.course_equivalences),
+        );
         let questions = petition::questions(plan, requirements, &equivalences, None);
-        let audit = DegreeAudit::run(plan, requirements, &equivalences, &DegreeCourseAttributes::none());
+        let audit = DegreeAudit::run(
+            plan,
+            requirements,
+            &equivalences,
+            &DegreeCourseAttributes::none(),
+        );
         let mut misses = Vec::new();
         for result in audit.rule_results() {
             for miss in audit.near_misses(&result.rule.id) {
-                misses.push(format!("{} · {} · {}", result.rule.display_label(), miss.course.key, miss.reason));
+                misses.push(format!(
+                    "{} · {} · {}",
+                    result.rule.display_label(),
+                    miss.course.key,
+                    miss.reason
+                ));
             }
         }
         (questions, misses)
@@ -807,22 +1049,38 @@ pub fn petition_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     root.upcast()
 }
 
-fn petition_card(shell: &Rc<RefCell<Shell>>, question: &petition::DegreePetitionQuestion) -> gtk::Widget {
+fn petition_card(
+    shell: &Rc<RefCell<Shell>>,
+    question: &petition::DegreePetitionQuestion,
+) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
     card.add_css_class("card");
     card.add_css_class("semester-card");
     card.append(&heading_label(&question.question()));
     card.append(&selectable(&question.explanation()));
     let minimum = CourseNumberChoice::suggested_minimum(&question.ranges, None);
-    let entry = gtk::Entry::builder().placeholder_text("Minimum, like 2000").text(minimum.to_string()).build();
-    let group = gtk::CheckButton::with_label(&CourseNumberChoice::SameAsRequirement.title(&question.like_title));
-    group.set_tooltip_text(Some(&CourseNumberChoice::SameAsRequirement.detail(&question.ranges, minimum)));
-    let any = gtk::CheckButton::with_label(&CourseNumberChoice::AnyNumber.title(&question.like_title));
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Minimum, like 2000")
+        .text(minimum.to_string())
+        .build();
+    let group = gtk::CheckButton::with_label(
+        &CourseNumberChoice::SameAsRequirement.title(&question.like_title),
+    );
+    group.set_tooltip_text(Some(
+        &CourseNumberChoice::SameAsRequirement.detail(&question.ranges, minimum),
+    ));
+    let any =
+        gtk::CheckButton::with_label(&CourseNumberChoice::AnyNumber.title(&question.like_title));
     any.set_group(Some(&group));
-    any.set_tooltip_text(Some(&CourseNumberChoice::AnyNumber.detail(&question.ranges, minimum)));
-    let least = gtk::CheckButton::with_label(&CourseNumberChoice::AtLeast.title(&question.like_title));
+    any.set_tooltip_text(Some(
+        &CourseNumberChoice::AnyNumber.detail(&question.ranges, minimum),
+    ));
+    let least =
+        gtk::CheckButton::with_label(&CourseNumberChoice::AtLeast.title(&question.like_title));
     least.set_group(Some(&group));
-    least.set_tooltip_text(Some(&CourseNumberChoice::AtLeast.detail(&question.ranges, minimum)));
+    least.set_tooltip_text(Some(
+        &CourseNumberChoice::AtLeast.detail(&question.ranges, minimum),
+    ));
     let id = question.id();
     let wire = |button: &gtk::CheckButton, choice: CourseNumberChoice, entry: &gtk::Entry| {
         button.connect_toggled({
@@ -852,7 +1110,9 @@ fn petition_card(shell: &Rc<RefCell<Shell>>, question: &petition::DegreePetition
         }
     });
     card.append(&group);
-    card.append(&dim_label(&CourseNumberChoice::SameAsRequirement.detail(&question.ranges, minimum)));
+    card.append(&dim_label(
+        &CourseNumberChoice::SameAsRequirement.detail(&question.ranges, minimum),
+    ));
     card.append(&any);
     card.append(&least);
     card.append(&entry);
@@ -868,8 +1128,20 @@ fn answer_petition(shell: &Rc<RefCell<Shell>>, id: Uuid, choice: CourseNumberCho
     {
         let shell_ref = shell.borrow();
         let mut state = shell_ref.state.borrow_mut();
-        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return };
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return;
+        };
         plan.set_course_numbers(limit, id);
         plan.updated_at = Some(now_secs().to_string());
         persist(&state.data);
@@ -881,7 +1153,10 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let prefs = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        current_plan_id(&state).and_then(|id| state.data.plans.iter().find(|plan| plan.id == id)).and_then(|plan| plan.preferences.clone()).unwrap_or_default()
+        current_plan_id(&state)
+            .and_then(|id| state.data.plans.iter().find(|plan| plan.id == id))
+            .and_then(|plan| plan.preferences.clone())
+            .unwrap_or_default()
     };
     let page = gtk::Box::new(gtk::Orientation::Vertical, 18);
 
@@ -921,118 +1196,201 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let days = adw::PreferencesGroup::new();
     days.set_title("Days off");
     days.set_description(Some("Selected days have no classes."));
-    let (picker, _) = day_picker("Days", &[("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY), ("Sat", DaySet::SATURDAY), ("Sun", DaySet::SUNDAY)], |bit| prefs.days_off.contains(bit), {
-        let shell = shell.clone();
-        move |bit, on| {
-            update_prefs(&shell, |prefs| {
-                if on {
-                    prefs.days_off.insert(bit);
-                } else {
-                    prefs.days_off.remove(bit);
-                }
-            });
-        }
-    });
+    let (picker, _) = day_picker(
+        "Days",
+        &[
+            ("Mon", DaySet::MONDAY),
+            ("Tue", DaySet::TUESDAY),
+            ("Wed", DaySet::WEDNESDAY),
+            ("Thu", DaySet::THURSDAY),
+            ("Fri", DaySet::FRIDAY),
+            ("Sat", DaySet::SATURDAY),
+            ("Sun", DaySet::SUNDAY),
+        ],
+        |bit| prefs.days_off.contains(bit),
+        {
+            let shell = shell.clone();
+            move |bit, on| {
+                update_prefs(&shell, |prefs| {
+                    if on {
+                        prefs.days_off.insert(bit);
+                    } else {
+                        prefs.days_off.remove(bit);
+                    }
+                });
+            }
+        },
+    );
     days.add(&picker);
-    days.add(&switch_row("Required", Some("Drop sections that meet on a day off"), prefs.days_off_strength == PreferenceStrength::Required, {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| prefs.days_off_strength = strength);
-        }
-    }));
+    days.add(&switch_row(
+        "Required",
+        Some("Drop sections that meet on a day off"),
+        prefs.days_off_strength == PreferenceStrength::Required,
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
+                };
+                update_prefs(&shell, |prefs| prefs.days_off_strength = strength);
+            }
+        },
+    ));
     page.append(&days);
 
     let limits = adw::PreferencesGroup::new();
     limits.set_title("Start and end");
     limits.set_description(Some("Leave a time blank to clear it."));
-    let earliest = entry_row("Nothing before", prefs.earliest_start.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default());
+    let earliest = entry_row(
+        "Nothing before",
+        prefs
+            .earliest_start
+            .as_ref()
+            .map(|limit| clock_label(limit.minutes))
+            .unwrap_or_default(),
+    );
     earliest.connect_apply({
         let shell = shell.clone();
         move |row| apply_clock(&shell, &row.text(), true)
     });
     limits.add(&earliest);
-    limits.add(&switch_row("Earliest start is required", None, prefs.earliest_start.as_ref().map(|limit| limit.strength) == Some(PreferenceStrength::Required), {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| {
-                if let Some(limit) = &mut prefs.earliest_start {
-                    limit.strength = strength;
-                }
-            });
-        }
-    }));
-    let latest = entry_row("Nothing after", prefs.latest_end.as_ref().map(|limit| clock_label(limit.minutes)).unwrap_or_default());
+    limits.add(&switch_row(
+        "Earliest start is required",
+        None,
+        prefs.earliest_start.as_ref().map(|limit| limit.strength)
+            == Some(PreferenceStrength::Required),
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
+                };
+                update_prefs(&shell, |prefs| {
+                    if let Some(limit) = &mut prefs.earliest_start {
+                        limit.strength = strength;
+                    }
+                });
+            }
+        },
+    ));
+    let latest = entry_row(
+        "Nothing after",
+        prefs
+            .latest_end
+            .as_ref()
+            .map(|limit| clock_label(limit.minutes))
+            .unwrap_or_default(),
+    );
     latest.connect_apply({
         let shell = shell.clone();
         move |row| apply_clock(&shell, &row.text(), false)
     });
     limits.add(&latest);
-    limits.add(&switch_row("Latest end is required", None, prefs.latest_end.as_ref().map(|limit| limit.strength) == Some(PreferenceStrength::Required), {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| {
-                if let Some(limit) = &mut prefs.latest_end {
-                    limit.strength = strength;
-                }
-            });
-        }
-    }));
+    limits.add(&switch_row(
+        "Latest end is required",
+        None,
+        prefs.latest_end.as_ref().map(|limit| limit.strength) == Some(PreferenceStrength::Required),
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
+                };
+                update_prefs(&shell, |prefs| {
+                    if let Some(limit) = &mut prefs.latest_end {
+                        limit.strength = strength;
+                    }
+                });
+            }
+        },
+    ));
     page.append(&limits);
 
     let shape = adw::PreferencesGroup::new();
     shape.set_title("Shape of the week");
-    shape.add(&combo_row("Day layout", None, &["No preference", "Fewer days", "Spread out"], match prefs.day_layout {
-        DayLayout::NoPreference => 0,
-        DayLayout::FewerDays => 1,
-        DayLayout::SpreadOut => 2,
-    }, {
-        let shell = shell.clone();
-        move |index| {
-            update_prefs(&shell, |prefs| {
-                prefs.day_layout = match index {
-                    1 => DayLayout::FewerDays,
-                    2 => DayLayout::SpreadOut,
-                    _ => DayLayout::NoPreference,
-                };
-            });
-        }
-    }));
-    shape.add(&combo_row("Gaps", None, &["Compact", "No preference", "Gaps are fine"], match prefs.gaps {
-        GapPreference::Compact => 0,
-        GapPreference::NoPreference => 1,
-        GapPreference::Fine => 2,
-    }, {
-        let shell = shell.clone();
-        move |index| {
-            update_prefs(&shell, |prefs| {
-                prefs.gaps = match index {
-                    0 => GapPreference::Compact,
-                    2 => GapPreference::Fine,
-                    _ => GapPreference::NoPreference,
-                };
-            });
-        }
-    }));
-    shape.add(&combo_row("Breaks", None, &["Back-to-back is fine", "Avoid back-to-back", "At least a break"], match prefs.breaks {
-        BreakPreference::Fine => 0,
-        BreakPreference::AvoidBackToBack => 1,
-        BreakPreference::AtLeast => 2,
-    }, {
-        let shell = shell.clone();
-        move |index| {
-            update_prefs(&shell, |prefs| {
-                prefs.breaks = match index {
-                    1 => BreakPreference::AvoidBackToBack,
-                    2 => BreakPreference::AtLeast,
-                    _ => BreakPreference::Fine,
-                };
-            });
-        }
-    }));
-    let max_classes = entry_row("Max classes per day", prefs.max_classes_per_day.map(|n| n.to_string()).unwrap_or_default());
+    shape.add(&combo_row(
+        "Day layout",
+        None,
+        &["No preference", "Fewer days", "Spread out"],
+        match prefs.day_layout {
+            DayLayout::NoPreference => 0,
+            DayLayout::FewerDays => 1,
+            DayLayout::SpreadOut => 2,
+        },
+        {
+            let shell = shell.clone();
+            move |index| {
+                update_prefs(&shell, |prefs| {
+                    prefs.day_layout = match index {
+                        1 => DayLayout::FewerDays,
+                        2 => DayLayout::SpreadOut,
+                        _ => DayLayout::NoPreference,
+                    };
+                });
+            }
+        },
+    ));
+    shape.add(&combo_row(
+        "Gaps",
+        None,
+        &["Compact", "No preference", "Gaps are fine"],
+        match prefs.gaps {
+            GapPreference::Compact => 0,
+            GapPreference::NoPreference => 1,
+            GapPreference::Fine => 2,
+        },
+        {
+            let shell = shell.clone();
+            move |index| {
+                update_prefs(&shell, |prefs| {
+                    prefs.gaps = match index {
+                        0 => GapPreference::Compact,
+                        2 => GapPreference::Fine,
+                        _ => GapPreference::NoPreference,
+                    };
+                });
+            }
+        },
+    ));
+    shape.add(&combo_row(
+        "Breaks",
+        None,
+        &[
+            "Back-to-back is fine",
+            "Avoid back-to-back",
+            "At least a break",
+        ],
+        match prefs.breaks {
+            BreakPreference::Fine => 0,
+            BreakPreference::AvoidBackToBack => 1,
+            BreakPreference::AtLeast => 2,
+        },
+        {
+            let shell = shell.clone();
+            move |index| {
+                update_prefs(&shell, |prefs| {
+                    prefs.breaks = match index {
+                        1 => BreakPreference::AvoidBackToBack,
+                        2 => BreakPreference::AtLeast,
+                        _ => BreakPreference::Fine,
+                    };
+                });
+            }
+        },
+    ));
+    let max_classes = entry_row(
+        "Max classes per day",
+        prefs
+            .max_classes_per_day
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    );
     max_classes.connect_apply({
         let shell = shell.clone();
         move |row| {
@@ -1041,7 +1399,13 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     shape.add(&max_classes);
-    let max_minutes = entry_row("Max minutes per day", prefs.max_minutes_per_day.map(|n| n.to_string()).unwrap_or_default());
+    let max_minutes = entry_row(
+        "Max minutes per day",
+        prefs
+            .max_minutes_per_day
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    );
     max_minutes.connect_apply({
         let shell = shell.clone();
         move |row| {
@@ -1050,7 +1414,10 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     shape.add(&max_minutes);
-    let minimum_break = entry_row("Minimum break, minutes", prefs.minimum_break_minutes.to_string());
+    let minimum_break = entry_row(
+        "Minimum break, minutes",
+        prefs.minimum_break_minutes.to_string(),
+    );
     minimum_break.connect_apply({
         let shell = shell.clone();
         move |row| {
@@ -1060,17 +1427,39 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     });
     shape.add(&minimum_break);
-    shape.add(&switch_row("Minimum break is required", None, prefs.minimum_break_strength == PreferenceStrength::Required, {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| prefs.minimum_break_strength = strength);
-        }
-    }));
-    shape.add(&switch_row("Keep a lunch break", Some("Leave a gap around noon"), prefs.lunch.is_some(), {
-        let shell = shell.clone();
-        move |on| update_prefs(&shell, |prefs| prefs.lunch = if on { Some(LunchBreak::default()) } else { None })
-    }));
+    shape.add(&switch_row(
+        "Minimum break is required",
+        None,
+        prefs.minimum_break_strength == PreferenceStrength::Required,
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
+                };
+                update_prefs(&shell, |prefs| prefs.minimum_break_strength = strength);
+            }
+        },
+    ));
+    shape.add(&switch_row(
+        "Keep a lunch break",
+        Some("Leave a gap around noon"),
+        prefs.lunch.is_some(),
+        {
+            let shell = shell.clone();
+            move |on| {
+                update_prefs(&shell, |prefs| {
+                    prefs.lunch = if on {
+                        Some(LunchBreak::default())
+                    } else {
+                        None
+                    }
+                })
+            }
+        },
+    ));
     page.append(&shape);
 
     let blocked = adw::PreferencesGroup::new();
@@ -1080,7 +1469,18 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         blocked.add(&blocked_row(shell, block));
     }
     let label = entry_row("Label", "");
-    let (block_days, day_buttons) = day_picker("Days", &[("Mon", DaySet::MONDAY), ("Tue", DaySet::TUESDAY), ("Wed", DaySet::WEDNESDAY), ("Thu", DaySet::THURSDAY), ("Fri", DaySet::FRIDAY)], |_| false, |_, _| {});
+    let (block_days, day_buttons) = day_picker(
+        "Days",
+        &[
+            ("Mon", DaySet::MONDAY),
+            ("Tue", DaySet::TUESDAY),
+            ("Wed", DaySet::WEDNESDAY),
+            ("Thu", DaySet::THURSDAY),
+            ("Fri", DaySet::FRIDAY),
+        ],
+        |_| false,
+        |_, _| {},
+    );
     let start = entry_row("Starts", "9:00");
     let end = entry_row("Ends", "12:00");
     let required = adw::SwitchRow::new();
@@ -1121,15 +1521,26 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             let name = label.text().trim().to_string();
             let block = BlockedTime {
                 id: Uuid::new_v4(),
-                label: if name.is_empty() { "Blocked time".into() } else { name },
+                label: if name.is_empty() {
+                    "Blocked time".into()
+                } else {
+                    name
+                },
                 days: dayset,
                 start: start_m,
                 end: end_m,
-                strength: if required.is_active() { PreferenceStrength::Required } else { PreferenceStrength::Preferred },
+                strength: if required.is_active() {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
+                },
                 is_enabled: true,
             };
             if !block.is_valid() {
-                toast(&shell, "Pick at least one day, and make the end later than the start.");
+                toast(
+                    &shell,
+                    "Pick at least one day, and make the end later than the start.",
+                );
                 return;
             }
             update_prefs(&shell, |prefs| prefs.blocked_times.push(block));
@@ -1139,68 +1550,103 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 
     let format = adw::PreferencesGroup::new();
     format.set_title("Format, campus, and seats");
-    format.add(&combo_row("Format", None, &["No format preference", "In person", "Hybrid", "Online"], match prefs.format {
-        FormatPreference::NoPreference => 0,
-        FormatPreference::InPerson => 1,
-        FormatPreference::Hybrid => 2,
-        FormatPreference::Online => 3,
-    }, {
-        let shell = shell.clone();
-        move |index| {
-            update_prefs(&shell, |prefs| {
-                prefs.format = match index {
-                    1 => FormatPreference::InPerson,
-                    2 => FormatPreference::Hybrid,
-                    3 => FormatPreference::Online,
-                    _ => FormatPreference::NoPreference,
+    format.add(&combo_row(
+        "Format",
+        None,
+        &["No format preference", "In person", "Hybrid", "Online"],
+        match prefs.format {
+            FormatPreference::NoPreference => 0,
+            FormatPreference::InPerson => 1,
+            FormatPreference::Hybrid => 2,
+            FormatPreference::Online => 3,
+        },
+        {
+            let shell = shell.clone();
+            move |index| {
+                update_prefs(&shell, |prefs| {
+                    prefs.format = match index {
+                        1 => FormatPreference::InPerson,
+                        2 => FormatPreference::Hybrid,
+                        3 => FormatPreference::Online,
+                        _ => FormatPreference::NoPreference,
+                    };
+                });
+            }
+        },
+    ));
+    format.add(&switch_row(
+        "Format is required",
+        None,
+        prefs.format_strength == PreferenceStrength::Required,
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
                 };
-            });
-        }
-    }));
-    format.add(&switch_row("Format is required", None, prefs.format_strength == PreferenceStrength::Required, {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| prefs.format_strength = strength);
-        }
-    }));
+                update_prefs(&shell, |prefs| prefs.format_strength = strength);
+            }
+        },
+    ));
     let campus = entry_row("Campus", prefs.campus.clone().unwrap_or_default());
     campus.connect_apply({
         let shell = shell.clone();
         move |row| {
             let text = row.text().trim().to_string();
-            update_prefs(&shell, |prefs| prefs.campus = if text.is_empty() { None } else { Some(text) });
+            update_prefs(&shell, |prefs| {
+                prefs.campus = if text.is_empty() { None } else { Some(text) }
+            });
         }
     });
     format.add(&campus);
-    format.add(&switch_row("Campus is required", None, prefs.campus_strength == PreferenceStrength::Required, {
-        let shell = shell.clone();
-        move |on| {
-            let strength = if on { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
-            update_prefs(&shell, |prefs| prefs.campus_strength = strength);
-        }
-    }));
-    format.add(&combo_row("Seats", None, &["Any seats", "Waitlist is fine", "Open seats only"], match prefs.seats {
-        SeatPolicy::Any => 0,
-        SeatPolicy::WaitlistOk => 1,
-        SeatPolicy::OpenOnly => 2,
-    }, {
-        let shell = shell.clone();
-        move |index| {
-            update_prefs(&shell, |prefs| {
-                prefs.seats = match index {
-                    1 => SeatPolicy::WaitlistOk,
-                    2 => SeatPolicy::OpenOnly,
-                    _ => SeatPolicy::Any,
+    format.add(&switch_row(
+        "Campus is required",
+        None,
+        prefs.campus_strength == PreferenceStrength::Required,
+        {
+            let shell = shell.clone();
+            move |on| {
+                let strength = if on {
+                    PreferenceStrength::Required
+                } else {
+                    PreferenceStrength::Preferred
                 };
-            });
-        }
-    }));
+                update_prefs(&shell, |prefs| prefs.campus_strength = strength);
+            }
+        },
+    ));
+    format.add(&combo_row(
+        "Seats",
+        None,
+        &["Any seats", "Waitlist is fine", "Open seats only"],
+        match prefs.seats {
+            SeatPolicy::Any => 0,
+            SeatPolicy::WaitlistOk => 1,
+            SeatPolicy::OpenOnly => 2,
+        },
+        {
+            let shell = shell.clone();
+            move |index| {
+                update_prefs(&shell, |prefs| {
+                    prefs.seats = match index {
+                        1 => SeatPolicy::WaitlistOk,
+                        2 => SeatPolicy::OpenOnly,
+                        _ => SeatPolicy::Any,
+                    };
+                });
+            }
+        },
+    ));
     page.append(&format);
 
     let people = adw::PreferencesGroup::new();
     people.set_title("Instructors and credits");
-    let preferred = entry_row("Preferred instructors", prefs.preferred_instructors.join(", "));
+    let preferred = entry_row(
+        "Preferred instructors",
+        prefs.preferred_instructors.join(", "),
+    );
     preferred.connect_apply({
         let shell = shell.clone();
         move |row| {
@@ -1218,8 +1664,22 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     });
     people.add(&preferred);
     people.add(&avoided);
-    let lower = entry_row("Minimum credits", prefs.credit_target.as_ref().map(|t| t.lower.to_string()).unwrap_or_default());
-    let upper = entry_row("Maximum credits", prefs.credit_target.as_ref().map(|t| t.upper.to_string()).unwrap_or_default());
+    let lower = entry_row(
+        "Minimum credits",
+        prefs
+            .credit_target
+            .as_ref()
+            .map(|t| t.lower.to_string())
+            .unwrap_or_default(),
+    );
+    let upper = entry_row(
+        "Maximum credits",
+        prefs
+            .credit_target
+            .as_ref()
+            .map(|t| t.upper.to_string())
+            .unwrap_or_default(),
+    );
     let apply_credits = Rc::new({
         let shell = shell.clone();
         let lower = lower.clone();
@@ -1258,24 +1718,40 @@ pub fn preference_survey(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     clamp.upcast()
 }
 
-fn band_row(shell: &Rc<RefCell<Shell>>, band: TimeBand, prefs: &SchedulePreferences) -> adw::ComboRow {
+fn band_row(
+    shell: &Rc<RefCell<Shell>>,
+    band: TimeBand,
+    prefs: &SchedulePreferences,
+) -> adw::ComboRow {
     let selected = match prefs.band(band) {
         TimePreference::Avoid => 0,
         TimePreference::Okay => 1,
         TimePreference::Prefer => 2,
     };
     let shell = shell.clone();
-    combo_row(band.title(), Some(band.detail()), &["Avoid", "Okay", "Prefer"], selected, move |index| {
-        let pref = match index {
-            0 => TimePreference::Avoid,
-            2 => TimePreference::Prefer,
-            _ => TimePreference::Okay,
-        };
-        update_prefs(&shell, |prefs| prefs.set_band(band, pref));
-    })
+    combo_row(
+        band.title(),
+        Some(band.detail()),
+        &["Avoid", "Okay", "Prefer"],
+        selected,
+        move |index| {
+            let pref = match index {
+                0 => TimePreference::Avoid,
+                2 => TimePreference::Prefer,
+                _ => TimePreference::Okay,
+            };
+            update_prefs(&shell, |prefs| prefs.set_band(band, pref));
+        },
+    )
 }
 
-fn combo_row(title: &str, subtitle: Option<&str>, labels: &[&str], selected: u32, apply: impl Fn(u32) + 'static) -> adw::ComboRow {
+fn combo_row(
+    title: &str,
+    subtitle: Option<&str>,
+    labels: &[&str],
+    selected: u32,
+    apply: impl Fn(u32) + 'static,
+) -> adw::ComboRow {
     let row = adw::ComboRow::new();
     row.set_title(title);
     if let Some(subtitle) = subtitle {
@@ -1287,7 +1763,12 @@ fn combo_row(title: &str, subtitle: Option<&str>, labels: &[&str], selected: u32
     row
 }
 
-fn switch_row(title: &str, subtitle: Option<&str>, active: bool, apply: impl Fn(bool) + 'static) -> adw::SwitchRow {
+fn switch_row(
+    title: &str,
+    subtitle: Option<&str>,
+    active: bool,
+    apply: impl Fn(bool) + 'static,
+) -> adw::SwitchRow {
     let row = adw::SwitchRow::new();
     row.set_title(title);
     if let Some(subtitle) = subtitle {
@@ -1308,7 +1789,10 @@ fn entry_row(title: &str, text: impl AsRef<str>) -> adw::EntryRow {
 fn apply_clock(shell: &Rc<RefCell<Shell>>, text: &str, earliest: bool) {
     let minutes = parse_clock(text);
     update_prefs(shell, |prefs| {
-        let limit = minutes.map(|minutes| TimeLimit { minutes, strength: PreferenceStrength::Required });
+        let limit = minutes.map(|minutes| TimeLimit {
+            minutes,
+            strength: PreferenceStrength::Required,
+        });
         if earliest {
             if let (Some(next), Some(prev)) = (&limit, &prefs.earliest_start) {
                 let mut next = next.clone();
@@ -1327,7 +1811,12 @@ fn apply_clock(shell: &Rc<RefCell<Shell>>, text: &str, earliest: bool) {
     });
 }
 
-fn day_picker(title: &str, days: &[(&str, DaySet)], is_on: impl Fn(DaySet) -> bool, toggle: impl Fn(DaySet, bool) + 'static) -> (adw::PreferencesRow, Rc<Vec<(gtk::ToggleButton, DaySet)>>) {
+fn day_picker(
+    title: &str,
+    days: &[(&str, DaySet)],
+    is_on: impl Fn(DaySet) -> bool,
+    toggle: impl Fn(DaySet, bool) + 'static,
+) -> (adw::PreferencesRow, Rc<Vec<(gtk::ToggleButton, DaySet)>>) {
     let toggle = Rc::new(toggle);
     let row = adw::PreferencesRow::new();
     row.set_activatable(false);
@@ -1385,12 +1874,20 @@ fn blocked_row(shell: &Rc<RefCell<Shell>>, block: &BlockedTime) -> adw::SwitchRo
         }
     });
     let strength = gtk::DropDown::from_strings(&["If possible", "Always"]);
-    strength.set_selected(if block.strength == PreferenceStrength::Required { 1 } else { 0 });
+    strength.set_selected(if block.strength == PreferenceStrength::Required {
+        1
+    } else {
+        0
+    });
     strength.set_valign(gtk::Align::Center);
     strength.connect_selected_notify({
         let shell = shell.clone();
         move |menu| {
-            let value = if menu.selected() == 1 { PreferenceStrength::Required } else { PreferenceStrength::Preferred };
+            let value = if menu.selected() == 1 {
+                PreferenceStrength::Required
+            } else {
+                PreferenceStrength::Preferred
+            };
             update_prefs(&shell, |prefs| {
                 if let Some(block) = prefs.blocked_times.iter_mut().find(|block| block.id == id) {
                     block.strength = value;
@@ -1403,7 +1900,11 @@ fn blocked_row(shell: &Rc<RefCell<Shell>>, block: &BlockedTime) -> adw::SwitchRo
     remove.set_valign(gtk::Align::Center);
     remove.connect_clicked({
         let shell = shell.clone();
-        move |_| update_prefs(&shell, |prefs| prefs.blocked_times.retain(|block| block.id != id))
+        move |_| {
+            update_prefs(&shell, |prefs| {
+                prefs.blocked_times.retain(|block| block.id != id)
+            })
+        }
     });
     row.add_suffix(&strength);
     row.add_suffix(&remove);
@@ -1411,12 +1912,20 @@ fn blocked_row(shell: &Rc<RefCell<Shell>>, block: &BlockedTime) -> adw::SwitchRo
 }
 
 fn split_names(text: &str) -> Vec<String> {
-    text.split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect()
+    text.split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 pub fn load_dismissed() -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(dismissed_path()) else { return Vec::new() };
-    text.lines().filter(|line| !line.is_empty()).map(|line| line.to_string()).collect()
+    let Ok(text) = std::fs::read_to_string(dismissed_path()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
 }
 
 fn dismissed_path() -> std::path::PathBuf {
@@ -1432,7 +1941,11 @@ fn save_dismissed(pairs: &[String]) {
 }
 
 fn pair_id(a: &CourseKey, b: &CourseKey) -> String {
-    if a < b { format!("{a}|{b}") } else { format!("{b}|{a}") }
+    if a < b {
+        format!("{a}|{b}")
+    } else {
+        format!("{b}|{a}")
+    }
 }
 
 fn unbroken(key: &CourseKey) -> String {
@@ -1451,7 +1964,11 @@ pub fn equivalence_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
         card.add_css_class("card");
         card.add_css_class("semester-card");
-        card.append(&heading_label(&format!("Does {} count as {}?", unbroken(&taken), unbroken(&counts_as))));
+        card.append(&heading_label(&format!(
+            "Does {} count as {}?",
+            unbroken(&taken),
+            unbroken(&counts_as)
+        )));
         if !evidence.is_empty() {
             card.append(&selectable(&evidence));
         }
@@ -1481,28 +1998,59 @@ pub fn equivalence_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 fn equivalence_prompts(shell: &Rc<RefCell<Shell>>) -> Vec<(CourseKey, CourseKey, String)> {
     let shell_ref = shell.borrow();
     let state = shell_ref.state.borrow();
-    let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return vec![] };
-    let Some(plan) = state.data.degree_plans.iter().find(|plan| plan.id == plan_id) else { return vec![] };
-    let known = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let Some(plan_id) = state
+        .degree
+        .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+    else {
+        return vec![];
+    };
+    let Some(plan) = state
+        .data
+        .degree_plans
+        .iter()
+        .find(|plan| plan.id == plan_id)
+    else {
+        return vec![];
+    };
+    let known = CourseEquivalences::from_cross_listed(&state.index).merging(
+        &CourseEquivalences::from_declarations(&plan.course_equivalences),
+    );
     let dismissed: HashSet<String> = state.dismissed_pairs.iter().cloned().collect();
     let mut plan_titles = HashMap::new();
     let mut retired = Vec::new();
     for course in plan.terms.iter().flat_map(|term| term.courses.iter()) {
-        let Some(key) = course.key.clone() else { continue };
+        let Some(key) = course.key.clone() else {
+            continue;
+        };
         plan_titles.insert(key.clone(), course.title.clone());
         if state.index.course(&key).is_none() && !retired.contains(&key) {
             retired.push(key);
         }
     }
-    let title_candidates: Vec<CourseKey> = state.index.courses.iter().map(|course| course.key()).collect();
+    let title_candidates: Vec<CourseKey> = state
+        .index
+        .courses
+        .iter()
+        .map(|course| course.key())
+        .collect();
     let mut prompts = Vec::new();
     for key in retired {
         let pairs: Vec<(CourseKey, Requisite)> = state
             .index
             .courses
             .iter()
-            .filter_map(|course| course.prereqs.clone().map(|requisite| (course.key(), requisite)))
-            .filter(|(_, requisite)| requisite.referenced_courses().iter().any(|named| named == &key))
+            .filter_map(|course| {
+                course
+                    .prereqs
+                    .clone()
+                    .map(|requisite| (course.key(), requisite))
+            })
+            .filter(|(_, requisite)| {
+                requisite
+                    .referenced_courses()
+                    .iter()
+                    .any(|named| named == &key)
+            })
             .collect();
         let found = suggestions::suggestions(
             &key,
@@ -1513,12 +2061,25 @@ fn equivalence_prompts(shell: &Rc<RefCell<Shell>>) -> Vec<(CourseKey, CourseKey,
             0.5,
             1,
             |candidate| {
-                state.index.course(candidate).map(|course| course.title.clone()).or_else(|| plan_titles.get(candidate).cloned()).or_else(|| state.course_notes.get(candidate).map(|info| info.title.clone()))
+                state
+                    .index
+                    .course(candidate)
+                    .map(|course| course.title.clone())
+                    .or_else(|| plan_titles.get(candidate).cloned())
+                    .or_else(|| {
+                        state
+                            .course_notes
+                            .get(candidate)
+                            .map(|info| info.title.clone())
+                    })
             },
             &title_candidates,
             titles_minimum(),
         );
-        if let Some(best) = found.into_iter().find(|item| !dismissed.contains(&pair_id(&key, &item.candidate)) && !known.are_equivalent(&key, &item.candidate)) {
+        if let Some(best) = found.into_iter().find(|item| {
+            !dismissed.contains(&pair_id(&key, &item.candidate))
+                && !known.are_equivalent(&key, &item.candidate)
+        }) {
             let evidence = best.evidence();
             prompts.push((key, best.candidate, evidence));
         }
@@ -1537,11 +2098,28 @@ fn declare_equivalence(shell: &Rc<RefCell<Shell>>, taken: &CourseKey, counts_as:
     {
         let shell_ref = shell.borrow();
         let mut state = shell_ref.state.borrow_mut();
-        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return };
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return;
+        };
         let known = CourseEquivalences::from_declarations(&plan.course_equivalences);
         if taken != counts_as && !known.are_equivalent(taken, counts_as) {
-            plan.course_equivalences.push(CourseEquivalence { id: Uuid::new_v4(), course: taken.clone(), counts_as: counts_as.clone(), note: String::new() });
+            plan.course_equivalences.push(CourseEquivalence {
+                id: Uuid::new_v4(),
+                course: taken.clone(),
+                counts_as: counts_as.clone(),
+                note: String::new(),
+            });
             plan.updated_at = Some(now_secs().to_string());
             persist(&state.data);
         }

@@ -67,8 +67,10 @@ University's public class search (<https://nubanner.neu.edu/StudentRegistrationS
 same source SearchNEU uses. Course titles, descriptions and other catalog content are
 © Northeastern University. The bundled snapshot
 (`NEUClassSearch/Resources/Catalog/term-202710.catalog`) was generated on 2026-10-03 with
-`Tools/build-catalog-snapshot.sh`. It includes the instructor names and work email
-addresses that Northeastern publishes in its class search. This data belongs to Northeastern
+`Tools/build-catalog-snapshot.sh`. It includes the instructor names and the
+`northeastern.edu` and `neu.edu` addresses (including their subdomains) that
+Northeastern publishes in its class search. Any other address Banner had stored
+in those fields was removed from the bundled snapshot. This data belongs to Northeastern
 University and is **not** covered by this project's AGPL license grant. "Northeastern
 University" and "NUpath" are used only descriptively; no Northeastern logos or other marks
 are included.

@@ -5,6 +5,9 @@
   <summary>Unofficial Northeastern course search and term planner</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>AGPL-3.0-only</project_license>
+  <developer id="org.termorganize">
+    <name>Term Organize contributors</name>
+  </developer>
   <description>
     <p>Term Organize searches Northeastern courses, builds conflict-free schedules, and checks a degree plan against the academic catalog.</p>
     <p>Unofficial. Not affiliated with, endorsed by, or sponsored by Northeastern University or Sandbox.</p>

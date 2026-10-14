@@ -47,10 +47,19 @@ pub fn decode_entities(input: &str) -> String {
             continue;
         };
         let entity: String = chars[i + 1..semi].iter().collect();
-        let replacement = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
-            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32).map(|c| c.to_string())
+        let replacement = if let Some(hex) = entity
+            .strip_prefix("#x")
+            .or_else(|| entity.strip_prefix("#X"))
+        {
+            u32::from_str_radix(hex, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|c| c.to_string())
         } else if let Some(dec) = entity.strip_prefix('#') {
-            dec.parse::<u32>().ok().and_then(char::from_u32).map(|c| c.to_string())
+            dec.parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+                .map(|c| c.to_string())
         } else {
             named_entity(&entity.to_ascii_lowercase()).map(|s| s.to_string())
         };
@@ -68,9 +77,18 @@ pub fn decode_entities(input: &str) -> String {
 pub fn plain_text(html: &str) -> String {
     let comment = regex_comment();
     let mut s = comment.replace_all(html, "").to_string();
-    s = Regex::new(r"(?i)<br\s*/?>").unwrap().replace_all(&s, "\n").to_string();
-    s = Regex::new(r"(?i)</p>").unwrap().replace_all(&s, "\n").to_string();
-    s = Regex::new(r"<[^>]*>").unwrap().replace_all(&s, "").to_string();
+    s = Regex::new(r"(?i)<br\s*/?>")
+        .unwrap()
+        .replace_all(&s, "\n")
+        .to_string();
+    s = Regex::new(r"(?i)</p>")
+        .unwrap()
+        .replace_all(&s, "\n")
+        .to_string();
+    s = Regex::new(r"<[^>]*>")
+        .unwrap()
+        .replace_all(&s, "")
+        .to_string();
     s = decode_entities(&decode_entities(&s));
     let space = Regex::new(r"[ \t\u{00A0}]+").unwrap();
     let mut result: Vec<String> = Vec::new();
@@ -115,7 +133,9 @@ pub fn table_rows(html: &str) -> Option<Vec<Vec<String>>> {
 }
 
 pub fn captures(pattern: &str, text: &str) -> Vec<String> {
-    let Ok(re) = Regex::new(pattern) else { return vec![] };
+    let Ok(re) = Regex::new(pattern) else {
+        return vec![];
+    };
     re.captures_iter(text)
         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .collect()

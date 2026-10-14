@@ -4,8 +4,8 @@
 //! and calls `org.gnome.Shell.SearchProvider2`.
 
 use crate::load_index;
-use gtk::{gio, glib};
 use glib::prelude::*;
+use gtk::{gio, glib};
 use std::rc::Rc;
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::search::{self, SearchQuery};
@@ -61,9 +61,11 @@ pub fn serve() -> i32 {
             let index = owned.clone();
             if let Err(error) = connection
                 .register_object("/org/termorganize/SearchProvider", iface)
-                .method_call(move |_connection, _sender, _path, _interface, method, params, invocation| {
-                    dispatch(&index, method, &params, invocation);
-                })
+                .method_call(
+                    move |_connection, _sender, _path, _interface, method, params, invocation| {
+                        dispatch(&index, method, &params, invocation);
+                    },
+                )
                 .build()
             {
                 eprintln!("termorganize: could not export the search provider: {error}");
@@ -76,7 +78,12 @@ pub fn serve() -> i32 {
     0
 }
 
-fn dispatch(index: &CatalogIndex, method: &str, params: &glib::Variant, invocation: gio::DBusMethodInvocation) {
+fn dispatch(
+    index: &CatalogIndex,
+    method: &str,
+    params: &glib::Variant,
+    invocation: gio::DBusMethodInvocation,
+) {
     match method {
         "GetInitialResultSet" => {
             let terms = string_list(&params.child_value(0));
@@ -107,7 +114,13 @@ fn dispatch(index: &CatalogIndex, method: &str, params: &glib::Variant, invocati
 }
 
 fn result_ids(index: &CatalogIndex, text: &str) -> Vec<String> {
-    let response = search::search(&SearchQuery { text: text.into(), ..SearchQuery::default() }, index);
+    let response = search::search(
+        &SearchQuery {
+            text: text.into(),
+            ..SearchQuery::default()
+        },
+        index,
+    );
     let mut ids = Vec::new();
     if let Some(section) = &response.crn_match {
         ids.push(format!("CRN {}", section.crn));
@@ -122,7 +135,10 @@ fn meta(index: &CatalogIndex, id: &str) -> glib::Variant {
     let description = if let Some(rest) = id.strip_prefix("CRN ") {
         format!("Section {rest}")
     } else if let Some(key) = termorganize_core::model::CourseKey::parse(id) {
-        index.course(&key).map(|c| c.title.clone()).unwrap_or_else(|| "Course".into())
+        index
+            .course(&key)
+            .map(|c| c.title.clone())
+            .unwrap_or_else(|| "Course".into())
     } else {
         "Term Organize".into()
     };
@@ -134,7 +150,8 @@ fn meta(index: &CatalogIndex, id: &str) -> glib::Variant {
 }
 
 fn reply_strings(invocation: gio::DBusMethodInvocation, ids: &[String]) {
-    let array = glib::Variant::array_from_iter::<glib::Variant>(ids.iter().map(|id| id.to_variant()));
+    let array =
+        glib::Variant::array_from_iter::<glib::Variant>(ids.iter().map(|id| id.to_variant()));
     invocation.return_value(Some(&glib::Variant::tuple_from_iter([array])));
 }
 

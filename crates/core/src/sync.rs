@@ -25,14 +25,29 @@ pub struct SyncState {
 }
 
 const DEVICE_PREF_FIELDS: &[&str] = &[
-    "selectedTermCode", "hasCompletedOnboarding", "searchHistory", "folderSyncEnabled", "folderSyncPath",
-    "backgroundRefreshEnabled", "seatCheckMinutes", "autoRefreshSeats", "colorScheme",
+    "selectedTermCode",
+    "hasCompletedOnboarding",
+    "searchHistory",
+    "folderSyncEnabled",
+    "folderSyncPath",
+    "backgroundRefreshEnabled",
+    "seatCheckMinutes",
+    "autoRefreshSeats",
+    "colorScheme",
 ];
 
-pub fn record_key_plan(id: &str) -> String { format!("schedule:{id}") }
-pub fn record_key_degree(id: &str) -> String { format!("degree:{id}") }
-pub fn record_key_watch(id: &str) -> String { format!("watch:{id}") }
-pub fn record_key_saved(term: &str, key: &CourseKey) -> String { format!("saved:{term}:{}", key) }
+pub fn record_key_plan(id: &str) -> String {
+    format!("schedule:{id}")
+}
+pub fn record_key_degree(id: &str) -> String {
+    format!("degree:{id}")
+}
+pub fn record_key_watch(id: &str) -> String {
+    format!("watch:{id}")
+}
+pub fn record_key_saved(term: &str, key: &CourseKey) -> String {
+    format!("saved:{term}:{}", key)
+}
 
 pub fn diff(local: &[Record], remote: &[Record]) -> (Vec<Record>, Vec<String>) {
     let remote_keys: HashSet<_> = remote.iter().map(|r| r.key.clone()).collect();
@@ -40,7 +55,9 @@ pub fn diff(local: &[Record], remote: &[Record]) -> (Vec<Record>, Vec<String>) {
     let mut changes = vec![];
     for rec in local {
         match remote.iter().find(|r| r.key == rec.key) {
-            Some(other) if other.payload != rec.payload || other.deleted != rec.deleted => changes.push(rec.clone()),
+            Some(other) if other.payload != rec.payload || other.deleted != rec.deleted => {
+                changes.push(rec.clone())
+            }
             None => changes.push(rec.clone()),
             _ => {}
         }
@@ -51,14 +68,28 @@ pub fn diff(local: &[Record], remote: &[Record]) -> (Vec<Record>, Vec<String>) {
 
 /// Newer timestamp wins. A tie goes to the remote copy. A remote deletion removes a value
 /// that was not edited locally after the deletion. A newer local edit keeps it.
-pub fn merge_record(local: Option<&Record>, remote: Option<&Record>, local_edit: Option<f64>) -> Option<Record> {
+pub fn merge_record(
+    local: Option<&Record>,
+    remote: Option<&Record>,
+    local_edit: Option<f64>,
+) -> Option<Record> {
     match (local, remote) {
         (None, None) => None,
         (Some(l), None) => Some(l.clone()),
-        (None, Some(r)) => if r.deleted { None } else { Some(r.clone()) },
+        (None, Some(r)) => {
+            if r.deleted {
+                None
+            } else {
+                Some(r.clone())
+            }
+        }
         (Some(l), Some(r)) => {
             if r.deleted {
-                if local_edit.is_some_and(|t| t > r.updated_at) { Some(l.clone()) } else { None }
+                if local_edit.is_some_and(|t| t > r.updated_at) {
+                    Some(l.clone())
+                } else {
+                    None
+                }
             } else if l.updated_at > r.updated_at {
                 Some(l.clone())
             } else {
@@ -68,12 +99,20 @@ pub fn merge_record(local: Option<&Record>, remote: Option<&Record>, local_edit:
     }
 }
 
-pub fn merge_preferences(local: &AppPreferences, remote: &serde_json::Value, remote_newer: bool) -> AppPreferences {
-    if !remote_newer { return local.clone(); }
+pub fn merge_preferences(
+    local: &AppPreferences,
+    remote: &serde_json::Value,
+    remote_newer: bool,
+) -> AppPreferences {
+    if !remote_newer {
+        return local.clone();
+    }
     let mut value = serde_json::to_value(local).unwrap_or(serde_json::json!({}));
     if let (Some(dst), Some(src)) = (value.as_object_mut(), remote.as_object()) {
         for (k, v) in src {
-            if DEVICE_PREF_FIELDS.contains(&k.as_str()) { continue; }
+            if DEVICE_PREF_FIELDS.contains(&k.as_str()) {
+                continue;
+            }
             dst.insert(k.clone(), v.clone());
         }
     }
@@ -96,7 +135,11 @@ pub fn ensure_one_primary_plans(plans: &mut [SchedulePlan]) {
     let mut seen = false;
     for plan in plans.iter_mut() {
         if plan.is_primary {
-            if seen { plan.is_primary = false; } else { seen = true; }
+            if seen {
+                plan.is_primary = false;
+            } else {
+                seen = true;
+            }
         }
     }
 }
@@ -104,7 +147,13 @@ pub fn ensure_one_primary_plans(plans: &mut [SchedulePlan]) {
 pub fn export_snapshot(data: &UserData) -> Vec<Record> {
     let mut records = vec![];
     let prefs = serde_json::to_value(&data.preferences).unwrap_or(serde_json::json!({}));
-    records.push(Record { key: "preferences".into(), kind: "preferences".into(), updated_at: 0.0, deleted: false, payload: prefs });
+    records.push(Record {
+        key: "preferences".into(),
+        kind: "preferences".into(),
+        updated_at: 0.0,
+        deleted: false,
+        payload: prefs,
+    });
     for plan in &data.plans {
         records.push(Record {
             key: record_key_plan(&plan.id.to_string()),
@@ -186,7 +235,10 @@ pub struct CloudSyncKey {
 
 impl CloudSyncKey {
     pub fn new(record_type: RecordType, record_name: impl Into<String>) -> Self {
-        Self { record_type, record_name: normalize_record_name(record_name.into()) }
+        Self {
+            record_type,
+            record_name: normalize_record_name(record_name.into()),
+        }
     }
 
     pub fn preferences() -> Self {
@@ -225,7 +277,10 @@ impl PartialOrd for CloudSyncKey {
 
 impl Ord for CloudSyncKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.record_type.as_str().cmp(other.record_type.as_str()).then(self.record_name.cmp(&other.record_name))
+        self.record_type
+            .as_str()
+            .cmp(other.record_type.as_str())
+            .then(self.record_name.cmp(&other.record_name))
     }
 }
 
@@ -260,7 +315,8 @@ impl<'de> Deserialize<'de> for CloudSyncKey {
                     }
                 }
                 let record_type = record_type.ok_or_else(|| de::Error::missing_field("type"))?;
-                let record_name = record_name.ok_or_else(|| de::Error::missing_field("recordName"))?;
+                let record_name =
+                    record_name.ok_or_else(|| de::Error::missing_field("recordName"))?;
                 Ok(CloudSyncKey::new(record_type, record_name))
             }
         }
@@ -269,7 +325,8 @@ impl<'de> Deserialize<'de> for CloudSyncKey {
 }
 
 fn same_record(left: &CloudSyncKey, right: &CloudSyncKey) -> bool {
-    left.record_type == right.record_type && left.record_name.eq_ignore_ascii_case(&right.record_name)
+    left.record_type == right.record_type
+        && left.record_name.eq_ignore_ascii_case(&right.record_name)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -284,10 +341,17 @@ pub enum Entity {
 impl Entity {
     pub fn key(&self) -> CloudSyncKey {
         match self {
-            Self::SchedulePlan(plan) => CloudSyncKey::new(RecordType::SchedulePlan, plan.id.to_string()),
-            Self::DegreePlan(plan) => CloudSyncKey::new(RecordType::DegreePlan, plan.id.to_string()),
+            Self::SchedulePlan(plan) => {
+                CloudSyncKey::new(RecordType::SchedulePlan, plan.id.to_string())
+            }
+            Self::DegreePlan(plan) => {
+                CloudSyncKey::new(RecordType::DegreePlan, plan.id.to_string())
+            }
             Self::WatchItem(item) => CloudSyncKey::new(RecordType::WatchItem, item.id()),
-            Self::SavedCourse(course) => CloudSyncKey::new(RecordType::SavedCourse, format!("{}|{}", course.term_code, course.key)),
+            Self::SavedCourse(course) => CloudSyncKey::new(
+                RecordType::SavedCourse,
+                format!("{}|{}", course.term_code, course.key),
+            ),
             Self::Preferences(_) => CloudSyncKey::preferences(),
         }
     }
@@ -299,7 +363,10 @@ pub enum RemoteValue {
     DegreePlan(DegreePlan),
     WatchItem(WatchItem),
     SavedCourse(SavedCourse),
-    Preferences { values: SyncedPreferences, changed_at: BTreeMap<String, f64> },
+    Preferences {
+        values: SyncedPreferences,
+        changed_at: BTreeMap<String, f64>,
+    },
 }
 
 impl RemoteValue {
@@ -314,7 +381,12 @@ impl RemoteValue {
     }
 }
 
-const PREF_FIELDS: [&str; 4] = ["preferredCampus", "showWeekends", "calendarStartHour", "calendarEndHour"];
+const PREF_FIELDS: [&str; 4] = [
+    "preferredCampus",
+    "showWeekends",
+    "calendarStartHour",
+    "calendarEndHour",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -345,7 +417,10 @@ impl SyncedPreferences {
     }
 
     pub fn fields_differing<'a>(&self, other: &'a Self) -> Vec<&'a str> {
-        PREF_FIELDS.into_iter().filter(|field| !pref_field_eq(field, self, other)).collect()
+        PREF_FIELDS
+            .into_iter()
+            .filter(|field| !pref_field_eq(field, self, other))
+            .collect()
     }
 
     pub fn merge(
@@ -417,18 +492,36 @@ impl SyncedPreferences {
     fn from_value(value: &serde_json::Value) -> Self {
         let defaults = Self::from_app(&AppPreferences::default());
         let obj = value.as_object();
-        let preferred_campus = obj.and_then(|map| map.get("preferredCampus")).and_then(|item| item.as_str()).map(|text| text.to_string());
-        let show_weekends = obj.and_then(|map| map.get("showWeekends")).and_then(|item| item.as_bool()).unwrap_or(defaults.show_weekends);
-        let start = obj.and_then(|map| map.get("calendarStartHour")).and_then(|item| item.as_i64()).map(|n| n as i32);
-        let end = obj.and_then(|map| map.get("calendarEndHour")).and_then(|item| item.as_i64()).map(|n| n as i32);
+        let preferred_campus = obj
+            .and_then(|map| map.get("preferredCampus"))
+            .and_then(|item| item.as_str())
+            .map(|text| text.to_string());
+        let show_weekends = obj
+            .and_then(|map| map.get("showWeekends"))
+            .and_then(|item| item.as_bool())
+            .unwrap_or(defaults.show_weekends);
+        let start = obj
+            .and_then(|map| map.get("calendarStartHour"))
+            .and_then(|item| item.as_i64())
+            .map(|n| n as i32);
+        let end = obj
+            .and_then(|map| map.get("calendarEndHour"))
+            .and_then(|item| item.as_i64())
+            .map(|n| n as i32);
         let start = start.unwrap_or(defaults.calendar_start_hour);
         let end = end.unwrap_or(defaults.calendar_end_hour);
-        let (calendar_start_hour, calendar_end_hour) = if (0..=23).contains(&start) && (1..=24).contains(&end) && start < end {
-            (start, end)
-        } else {
-            (defaults.calendar_start_hour, defaults.calendar_end_hour)
-        };
-        Self { preferred_campus, show_weekends, calendar_start_hour, calendar_end_hour }
+        let (calendar_start_hour, calendar_end_hour) =
+            if (0..=23).contains(&start) && (1..=24).contains(&end) && start < end {
+                (start, end)
+            } else {
+                (defaults.calendar_start_hour, defaults.calendar_end_hour)
+            };
+        Self {
+            preferred_campus,
+            show_weekends,
+            calendar_start_hour,
+            calendar_end_hour,
+        }
     }
 }
 
@@ -440,32 +533,48 @@ struct PreferencesPayload {
     changed_at: BTreeMap<String, f64>,
 }
 
-pub fn payload_for(entity: &Entity, preference_changed_at: &BTreeMap<String, f64>) -> Result<Vec<u8>, String> {
+pub fn payload_for(
+    entity: &Entity,
+    preference_changed_at: &BTreeMap<String, f64>,
+) -> Result<Vec<u8>, String> {
     let value = match entity {
         Entity::SchedulePlan(plan) => serde_json::to_value(plan).map_err(|e| e.to_string())?,
-        Entity::DegreePlan(plan) => serde_json::to_value(synced_form(plan)).map_err(|e| e.to_string())?,
+        Entity::DegreePlan(plan) => {
+            serde_json::to_value(synced_form(plan)).map_err(|e| e.to_string())?
+        }
         Entity::WatchItem(item) => serde_json::to_value(item).map_err(|e| e.to_string())?,
         Entity::SavedCourse(course) => serde_json::to_value(course).map_err(|e| e.to_string())?,
         Entity::Preferences(preferences) => serde_json::to_value(&PreferencesPayload {
             values: SyncedPreferences::from_app(preferences),
             changed_at: preference_changed_at.clone(),
-        }).map_err(|e| e.to_string())?,
+        })
+        .map_err(|e| e.to_string())?,
     };
     Ok(canonical_bytes(value))
 }
 
 pub fn decode(payload: &[u8], record_type: RecordType) -> Result<RemoteValue, String> {
     match record_type {
-        RecordType::SchedulePlan => Ok(RemoteValue::SchedulePlan(serde_json::from_slice(payload).map_err(|e| e.to_string())?)),
+        RecordType::SchedulePlan => Ok(RemoteValue::SchedulePlan(
+            serde_json::from_slice(payload).map_err(|e| e.to_string())?,
+        )),
         RecordType::DegreePlan => {
             let plan: DegreePlan = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
             Ok(RemoteValue::DegreePlan(synced_form(&plan)))
         }
-        RecordType::WatchItem => Ok(RemoteValue::WatchItem(serde_json::from_slice(payload).map_err(|e| e.to_string())?)),
-        RecordType::SavedCourse => Ok(RemoteValue::SavedCourse(serde_json::from_slice(payload).map_err(|e| e.to_string())?)),
+        RecordType::WatchItem => Ok(RemoteValue::WatchItem(
+            serde_json::from_slice(payload).map_err(|e| e.to_string())?,
+        )),
+        RecordType::SavedCourse => Ok(RemoteValue::SavedCourse(
+            serde_json::from_slice(payload).map_err(|e| e.to_string())?,
+        )),
         RecordType::Preferences => {
-            let decoded: PreferencesPayload = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
-            Ok(RemoteValue::Preferences { values: decoded.values, changed_at: decoded.changed_at })
+            let decoded: PreferencesPayload =
+                serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+            Ok(RemoteValue::Preferences {
+                values: decoded.values,
+                changed_at: decoded.changed_at,
+            })
         }
     }
 }
@@ -473,10 +582,19 @@ pub fn decode(payload: &[u8], record_type: RecordType) -> Result<RemoteValue, St
 pub fn fingerprint_of(entity: &Entity) -> String {
     let value = match entity {
         Entity::SchedulePlan(plan) => serde_json::to_value(plan).unwrap_or(serde_json::json!({})),
-        Entity::DegreePlan(plan) => serde_json::to_value(synced_form(plan)).unwrap_or(serde_json::json!({})),
-        Entity::WatchItem(item) => serde_json::to_value(tracked_form(item)).unwrap_or(serde_json::json!({})),
-        Entity::SavedCourse(course) => serde_json::to_value(course).unwrap_or(serde_json::json!({})),
-        Entity::Preferences(preferences) => serde_json::to_value(SyncedPreferences::from_app(preferences)).unwrap_or(serde_json::json!({})),
+        Entity::DegreePlan(plan) => {
+            serde_json::to_value(synced_form(plan)).unwrap_or(serde_json::json!({}))
+        }
+        Entity::WatchItem(item) => {
+            serde_json::to_value(tracked_form(item)).unwrap_or(serde_json::json!({}))
+        }
+        Entity::SavedCourse(course) => {
+            serde_json::to_value(course).unwrap_or(serde_json::json!({}))
+        }
+        Entity::Preferences(preferences) => {
+            serde_json::to_value(SyncedPreferences::from_app(preferences))
+                .unwrap_or(serde_json::json!({}))
+        }
     };
     hex_digest(&canonical_bytes(value))
 }
@@ -494,16 +612,30 @@ pub fn fingerprint_of_remote(value: &RemoteValue) -> String {
     }
 }
 
-pub fn modified_at(entity: &Entity, local_changed_at: Option<f64>, preference_changed_at: &BTreeMap<String, f64>) -> f64 {
+pub fn modified_at(
+    entity: &Entity,
+    local_changed_at: Option<f64>,
+    preference_changed_at: &BTreeMap<String, f64>,
+) -> f64 {
     match entity {
-        Entity::SchedulePlan(plan) => plan.updated_at.max(local_changed_at.unwrap_or(DISTANT_PAST)),
+        Entity::SchedulePlan(plan) => plan
+            .updated_at
+            .max(local_changed_at.unwrap_or(DISTANT_PAST)),
         Entity::DegreePlan(plan) => {
-            let updated = plan.updated_at.as_deref().and_then(iso8601_to_unix).unwrap_or(DISTANT_PAST);
+            let updated = plan
+                .updated_at
+                .as_deref()
+                .and_then(iso8601_to_unix)
+                .unwrap_or(DISTANT_PAST);
             updated.max(local_changed_at.unwrap_or(DISTANT_PAST))
         }
         Entity::WatchItem(item) => local_changed_at.unwrap_or(item.added_at),
         Entity::SavedCourse(course) => local_changed_at.unwrap_or(course.saved_at),
-        Entity::Preferences(_) => preference_changed_at.values().copied().max_by(f64::total_cmp).unwrap_or(local_changed_at.unwrap_or(DISTANT_PAST)),
+        Entity::Preferences(_) => preference_changed_at
+            .values()
+            .copied()
+            .max_by(f64::total_cmp)
+            .unwrap_or(local_changed_at.unwrap_or(DISTANT_PAST)),
     }
 }
 
@@ -535,7 +667,11 @@ fn sort_excluded(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for name in ["excludedCRNs", "excludedCrns"] {
                 if let Some(serde_json::Value::Array(items)) = map.get_mut(name) {
-                    items.sort_by(|left, right| left.as_str().unwrap_or("").cmp(right.as_str().unwrap_or("")));
+                    items.sort_by(|left, right| {
+                        left.as_str()
+                            .unwrap_or("")
+                            .cmp(right.as_str().unwrap_or(""))
+                    });
                 }
             }
             let keys: Vec<String> = map.keys().cloned().collect();
@@ -575,7 +711,13 @@ impl Snapshot {
                 return;
             }
             let fingerprint = fingerprint_of(&entity);
-            items.insert(key, SnapshotItem { entity, fingerprint });
+            items.insert(
+                key,
+                SnapshotItem {
+                    entity,
+                    fingerprint,
+                },
+            );
         };
         add(Entity::Preferences(data.preferences.clone()));
         for plan in &data.plans {
@@ -590,7 +732,10 @@ impl Snapshot {
         for course in &data.saved {
             add(Entity::SavedCourse(course.clone()));
         }
-        Self { items, preferences: data.preferences.clone() }
+        Self {
+            items,
+            preferences: data.preferences.clone(),
+        }
     }
 
     pub fn get(&self, key: &CloudSyncKey) -> Option<&SnapshotItem> {
@@ -615,7 +760,9 @@ pub struct RecordState {
 
 impl RecordState {
     pub fn is_known_in_icloud(&self) -> bool {
-        self.server_fingerprint.is_some() || self.system_fields.is_some() || self.is_server_copy_unreadable
+        self.server_fingerprint.is_some()
+            || self.system_fields.is_some()
+            || self.is_server_copy_unreadable
     }
 }
 
@@ -632,7 +779,9 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn has_data_in_icloud(&self) -> bool {
-        self.records.values().any(|state| state.is_known_in_icloud())
+        self.records
+            .values()
+            .any(|state| state.is_known_in_icloud())
     }
 
     pub fn observe_local_data(&mut self, snapshot: &Snapshot, now: f64) {
@@ -646,9 +795,16 @@ impl Metadata {
             state.local_changed_at = if first { None } else { Some(now) };
             self.records.insert(key.clone(), state);
         }
-        let missing: Vec<CloudSyncKey> = self.records.keys().filter(|key| !snapshot.items.contains_key(key)).cloned().collect();
+        let missing: Vec<CloudSyncKey> = self
+            .records
+            .keys()
+            .filter(|key| !snapshot.items.contains_key(key))
+            .cloned()
+            .collect();
         for key in missing {
-            let Some(state) = self.records.get(&key).cloned() else { continue };
+            let Some(state) = self.records.get(&key).cloned() else {
+                continue;
+            };
             if state.local_fingerprint.is_none() {
                 continue;
             }
@@ -681,7 +837,9 @@ impl Metadata {
             if state.is_some_and(|state| state.is_server_copy_unreadable) {
                 continue;
             }
-            if state.and_then(|state| state.server_fingerprint.as_deref()) != Some(item.fingerprint.as_str()) {
+            if state.and_then(|state| state.server_fingerprint.as_deref())
+                != Some(item.fingerprint.as_str())
+            {
                 saves.push(key.clone());
             }
         }
@@ -701,7 +859,9 @@ impl Metadata {
     pub fn forget_icloud(&mut self) {
         let keys: Vec<CloudSyncKey> = self.records.keys().cloned().collect();
         for key in keys {
-            let Some(state) = self.records.get(&key).cloned() else { continue };
+            let Some(state) = self.records.get(&key).cloned() else {
+                continue;
+            };
             let mut local = state;
             local.server_fingerprint = None;
             local.system_fields = None;
@@ -716,7 +876,12 @@ impl Metadata {
         self.last_sync_date = None;
     }
 
-    pub fn record_saved(&mut self, key: &CloudSyncKey, fingerprint: Option<&str>, system_fields: Option<&[u8]>) {
+    pub fn record_saved(
+        &mut self,
+        key: &CloudSyncKey,
+        fingerprint: Option<&str>,
+        system_fields: Option<&[u8]>,
+    ) {
         let mut state = self.records.get(key).cloned().unwrap_or_default();
         state.server_fingerprint = fingerprint.map(|text| text.to_string());
         state.system_fields = system_fields.map(|bytes| bytes.to_vec());
@@ -725,7 +890,9 @@ impl Metadata {
     }
 
     pub fn record_deleted_from_icloud(&mut self, key: &CloudSyncKey) {
-        let Some(state) = self.records.get(key).cloned() else { return };
+        let Some(state) = self.records.get(key).cloned() else {
+            return;
+        };
         let mut state = state;
         state.server_fingerprint = None;
         state.system_fields = None;
@@ -780,7 +947,14 @@ struct MetadataDtoOwned {
 
 impl Serialize for Metadata {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let records = self.records.iter().map(|(key, state)| MetadataEntry { key: key.clone(), state: state.clone() }).collect();
+        let records = self
+            .records
+            .iter()
+            .map(|(key, state)| MetadataEntry {
+                key: key.clone(),
+                state: state.clone(),
+            })
+            .collect();
         MetadataDto {
             records,
             has_observed_local_data: self.has_observed_local_data,
@@ -864,9 +1038,14 @@ pub fn merge(
         let mut state = metadata.records.get(&key).cloned().unwrap_or_default();
         let was_known = state.is_known_in_icloud();
         let previous_server = state.server_fingerprint.clone();
-        let remote = record.payload.as_deref().and_then(|payload| decode(payload, key.record_type).ok());
+        let remote = record
+            .payload
+            .as_deref()
+            .and_then(|payload| decode(payload, key.record_type).ok());
         let readable = record.schema_version <= SCHEMA_VERSION
-            && remote.as_ref().is_some_and(|value| same_record(&value.key(), &key));
+            && remote
+                .as_ref()
+                .is_some_and(|value| same_record(&value.key(), &key));
         if !readable {
             state.is_server_copy_unreadable = true;
             state.system_fields = record.system_fields.clone();
@@ -882,13 +1061,22 @@ pub fn merge(
 
         if let RemoteValue::Preferences { values, changed_at } = &remote {
             let local = SyncedPreferences::from_app(&working.preferences);
-            let merged = SyncedPreferences::merge(&local, &metadata.preference_changed_at, values, changed_at);
+            let merged = SyncedPreferences::merge(
+                &local,
+                &metadata.preference_changed_at,
+                values,
+                changed_at,
+            );
             if merged.values != local {
-                working.write(Entity::Preferences(merged.values.applied(&working.preferences)));
+                working.write(Entity::Preferences(
+                    merged.values.applied(&working.preferences),
+                ));
             }
             metadata.preference_changed_at = merged.changed_at.clone();
             metadata.observed_preferences = Some(merged.values.clone());
-            state.local_fingerprint = Some(fingerprint_of(&Entity::Preferences(working.preferences.clone())));
+            state.local_fingerprint = Some(fingerprint_of(&Entity::Preferences(
+                working.preferences.clone(),
+            )));
             state.local_changed_at = merged.changed_at.values().copied().max_by(f64::total_cmp);
             metadata.records.insert(key.clone(), state);
             if merged.values != *values {
@@ -898,7 +1086,12 @@ pub fn merge(
         }
 
         let Some(current) = working.local.get(&key).cloned() else {
-            if was_known && state.local_fingerprint.is_none() && state.local_changed_at.is_some_and(|deleted_at| deleted_at > record.modified_at) {
+            if was_known
+                && state.local_fingerprint.is_none()
+                && state
+                    .local_changed_at
+                    .is_some_and(|deleted_at| deleted_at > record.modified_at)
+            {
                 metadata.records.insert(key.clone(), state);
                 result.kept_local.push(key);
                 continue;
@@ -920,7 +1113,11 @@ pub fn merge(
             continue;
         }
         if previous_server.as_deref() != Some(local_fingerprint.as_str()) {
-            let local_time = modified_at(&current, state.local_changed_at, &metadata.preference_changed_at);
+            let local_time = modified_at(
+                &current,
+                state.local_changed_at,
+                &metadata.preference_changed_at,
+            );
             if local_time > record.modified_at {
                 metadata.records.insert(key.clone(), state);
                 result.kept_local.push(key);
@@ -952,7 +1149,11 @@ pub fn merge(
             continue;
         };
         let local_fingerprint = fingerprint_of(&current);
-        if state.as_ref().and_then(|item| item.server_fingerprint.as_deref()) == Some(local_fingerprint.as_str()) {
+        if state
+            .as_ref()
+            .and_then(|item| item.server_fingerprint.as_deref())
+            == Some(local_fingerprint.as_str())
+        {
             working.delete(key);
             metadata.records.remove(key);
         } else {
@@ -1009,7 +1210,12 @@ pub fn local_value(remote: &RemoteValue, current: Option<&Entity>) -> Entity {
     }
 }
 
-fn normalize_primaries(applied: &[CloudSyncKey], working: &mut Working, metadata: &mut Metadata, now: f64) {
+fn normalize_primaries(
+    applied: &[CloudSyncKey],
+    working: &mut Working,
+    metadata: &mut Metadata,
+    now: f64,
+) {
     let mut terms = BTreeMap::<String, ()>::new();
     let mut touches_degrees = false;
     for key in applied {
@@ -1026,7 +1232,9 @@ fn normalize_primaries(applied: &[CloudSyncKey], working: &mut Working, metadata
             .local
             .iter()
             .filter_map(|(key, entity)| match entity {
-                Entity::SchedulePlan(plan) if plan.term_code == *term && plan.is_primary => Some(key.clone()),
+                Entity::SchedulePlan(plan) if plan.term_code == *term && plan.is_primary => {
+                    Some(key.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -1045,7 +1253,12 @@ fn normalize_primaries(applied: &[CloudSyncKey], working: &mut Working, metadata
     }
 }
 
-fn demote_all_but_latest(primaries: &[CloudSyncKey], working: &mut Working, metadata: &mut Metadata, now: f64) {
+fn demote_all_but_latest(
+    primaries: &[CloudSyncKey],
+    working: &mut Working,
+    metadata: &mut Metadata,
+    now: f64,
+) {
     if primaries.len() < 2 {
         return;
     }
@@ -1059,7 +1272,9 @@ fn demote_all_but_latest(primaries: &[CloudSyncKey], working: &mut Working, meta
         if key == &keep {
             continue;
         }
-        let Some(entity) = working.local.get(key).cloned() else { continue };
+        let Some(entity) = working.local.get(key).cloned() else {
+            continue;
+        };
         let demoted = match entity {
             Entity::SchedulePlan(mut plan) => {
                 plan.is_primary = false;
@@ -1079,11 +1294,34 @@ fn demote_all_but_latest(primaries: &[CloudSyncKey], working: &mut Working, meta
     }
 }
 
-fn rank_after(metadata: &Metadata, working: &Working, candidate: &CloudSyncKey, current: &CloudSyncKey) -> bool {
-    let Some(candidate_entity) = working.local.get(candidate) else { return false };
-    let Some(current_entity) = working.local.get(current) else { return true };
-    let candidate_time = modified_at(candidate_entity, metadata.records.get(candidate).and_then(|state| state.local_changed_at), &metadata.preference_changed_at);
-    let current_time = modified_at(current_entity, metadata.records.get(current).and_then(|state| state.local_changed_at), &metadata.preference_changed_at);
+fn rank_after(
+    metadata: &Metadata,
+    working: &Working,
+    candidate: &CloudSyncKey,
+    current: &CloudSyncKey,
+) -> bool {
+    let Some(candidate_entity) = working.local.get(candidate) else {
+        return false;
+    };
+    let Some(current_entity) = working.local.get(current) else {
+        return true;
+    };
+    let candidate_time = modified_at(
+        candidate_entity,
+        metadata
+            .records
+            .get(candidate)
+            .and_then(|state| state.local_changed_at),
+        &metadata.preference_changed_at,
+    );
+    let current_time = modified_at(
+        current_entity,
+        metadata
+            .records
+            .get(current)
+            .and_then(|state| state.local_changed_at),
+        &metadata.preference_changed_at,
+    );
     if candidate_time != current_time {
         return candidate_time > current_time;
     }
@@ -1099,8 +1337,17 @@ struct Working {
 
 impl Working {
     fn new(snapshot: &Snapshot) -> Self {
-        let local = snapshot.items.iter().map(|(key, item)| (key.clone(), item.entity.clone())).collect();
-        Self { local, preferences: snapshot.preferences.clone(), written: HashMap::new(), deleted: HashSet::new() }
+        let local = snapshot
+            .items
+            .iter()
+            .map(|(key, item)| (key.clone(), item.entity.clone()))
+            .collect();
+        Self {
+            local,
+            preferences: snapshot.preferences.clone(),
+            written: HashMap::new(),
+            deleted: HashSet::new(),
+        }
     }
 
     fn write(&mut self, entity: Entity) {
@@ -1120,14 +1367,22 @@ impl Working {
     }
 }
 
-pub fn applying_cloud_changes(data: &UserData, saves: &[Entity], deletes: &[CloudSyncKey]) -> UserData {
+pub fn applying_cloud_changes(
+    data: &UserData,
+    saves: &[Entity],
+    deletes: &[CloudSyncKey],
+) -> UserData {
     let mut data = data.clone();
     if !deletes.is_empty() {
         let removed: HashSet<&CloudSyncKey> = deletes.iter().collect();
-        data.plans.retain(|plan| !removed.contains(&Entity::SchedulePlan(plan.clone()).key()));
-        data.degree_plans.retain(|plan| !removed.contains(&Entity::DegreePlan(plan.clone()).key()));
-        data.watchlist.retain(|item| !removed.contains(&Entity::WatchItem(item.clone()).key()));
-        data.saved.retain(|course| !removed.contains(&Entity::SavedCourse(course.clone()).key()));
+        data.plans
+            .retain(|plan| !removed.contains(&Entity::SchedulePlan(plan.clone()).key()));
+        data.degree_plans
+            .retain(|plan| !removed.contains(&Entity::DegreePlan(plan.clone()).key()));
+        data.watchlist
+            .retain(|item| !removed.contains(&Entity::WatchItem(item.clone()).key()));
+        data.saved
+            .retain(|course| !removed.contains(&Entity::SavedCourse(course.clone()).key()));
     }
     for entity in saves {
         match entity {
@@ -1146,19 +1401,35 @@ pub fn applying_cloud_changes(data: &UserData, saves: &[Entity], deletes: &[Clou
                 }
             }
             Entity::WatchItem(item) => {
-                if let Some(index) = data.watchlist.iter().position(|existing| existing.id() == item.id()) {
+                if let Some(index) = data
+                    .watchlist
+                    .iter()
+                    .position(|existing| existing.id() == item.id())
+                {
                     data.watchlist[index] = item.clone();
                 } else {
-                    let index = data.watchlist.iter().position(|existing| existing.added_at < item.added_at).unwrap_or(data.watchlist.len());
+                    let index = data
+                        .watchlist
+                        .iter()
+                        .position(|existing| existing.added_at < item.added_at)
+                        .unwrap_or(data.watchlist.len());
                     data.watchlist.insert(index, item.clone());
                 }
             }
             Entity::SavedCourse(course) => {
                 let id = format!("{}|{}", course.term_code, course.key);
-                if let Some(index) = data.saved.iter().position(|existing| format!("{}|{}", existing.term_code, existing.key) == id) {
+                if let Some(index) = data
+                    .saved
+                    .iter()
+                    .position(|existing| format!("{}|{}", existing.term_code, existing.key) == id)
+                {
                     data.saved[index] = course.clone();
                 } else {
-                    let index = data.saved.iter().position(|existing| existing.saved_at < course.saved_at).unwrap_or(data.saved.len());
+                    let index = data
+                        .saved
+                        .iter()
+                        .position(|existing| existing.saved_at < course.saved_at)
+                        .unwrap_or(data.saved.len());
                     data.saved.insert(index, course.clone());
                 }
             }
@@ -1189,13 +1460,23 @@ impl SyncPhase {
     pub fn summary(&self, now: f64) -> String {
         match self {
             Self::Off => "Off".into(),
-            Self::Unavailable(UnavailableReason::NoAccount) => "Sign in to iCloud in Settings to sync".into(),
-            Self::Unavailable(UnavailableReason::Restricted) => "iCloud is restricted on this device".into(),
-            Self::Unavailable(UnavailableReason::NotConfigured) => "iCloud sync isn't set up in this build".into(),
-            Self::Unavailable(UnavailableReason::TemporarilyUnavailable) => "Check your Apple Account in Settings to sync".into(),
+            Self::Unavailable(UnavailableReason::NoAccount) => {
+                "Sign in to iCloud in Settings to sync".into()
+            }
+            Self::Unavailable(UnavailableReason::Restricted) => {
+                "iCloud is restricted on this device".into()
+            }
+            Self::Unavailable(UnavailableReason::NotConfigured) => {
+                "iCloud sync isn't set up in this build".into()
+            }
+            Self::Unavailable(UnavailableReason::TemporarilyUnavailable) => {
+                "Check your Apple Account in Settings to sync".into()
+            }
             Self::Syncing => "Syncing…".into(),
             Self::UpToDate { last_sync: None } => "Up to date".into(),
-            Self::UpToDate { last_sync: Some(last) } => format!("Up to date · {}", relative_label(*last, now)),
+            Self::UpToDate {
+                last_sync: Some(last),
+            } => format!("Up to date · {}", relative_label(*last, now)),
             Self::Error(message) => message.clone(),
         }
     }
@@ -1212,7 +1493,11 @@ fn relative_label(date: f64, now: f64) -> String {
         format!("{} hr ago", (seconds / 3_600.0) as i64)
     } else {
         let days = (seconds / 86_400.0) as i64;
-        if days == 1 { "yesterday".into() } else { format!("{days} days ago") }
+        if days == 1 {
+            "yesterday".into()
+        } else {
+            format!("{days} days ago")
+        }
     }
 }
 
@@ -1237,7 +1522,12 @@ pub fn iso8601_to_unix(text: &str) -> Option<f64> {
     let mut clock = time.split(':');
     let hour: i64 = clock.next()?.parse().ok()?;
     let minute: i64 = clock.next()?.parse().ok()?;
-    let second: i64 = clock.next().unwrap_or("0").trim_end_matches("Z").parse().ok()?;
+    let second: i64 = clock
+        .next()
+        .unwrap_or("0")
+        .trim_end_matches("Z")
+        .parse()
+        .ok()?;
     Some((days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second) as f64)
 }
 
@@ -1250,7 +1540,9 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
     let day = day as u32;
     let era = if year_i >= 0 { year_i } else { year_i - 399 } / 400;
     let yoe = (year_i - era * 400) as u64;
-    let doy = (153 * u64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + u64::from(day) - 1;
+    let doy = (153 * u64::from(if month > 2 { month - 3 } else { month + 9 }) + 2) / 5
+        + u64::from(day)
+        - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe as i64 - 719_468
 }
@@ -1272,22 +1564,34 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 }
 
 fn hex_digest(data: &[u8]) -> String {
-    sha256(data).iter().map(|byte| format!("{byte:02x}")).collect()
+    sha256(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
     let mut hash = [
-        0x6a09e667_u32, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667_u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
     ];
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut msg = data.to_vec();
@@ -1299,12 +1603,24 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     for chunk in msg.chunks(64) {
         let mut words = [0_u32; 64];
         for i in 0..16 {
-            words[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+            words[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         for i in 16..64 {
-            let s0 = words[i - 15].rotate_right(7) ^ words[i - 15].rotate_right(18) ^ (words[i - 15] >> 3);
-            let s1 = words[i - 2].rotate_right(17) ^ words[i - 2].rotate_right(19) ^ (words[i - 2] >> 10);
-            words[i] = words[i - 16].wrapping_add(s0).wrapping_add(words[i - 7]).wrapping_add(s1);
+            let s0 = words[i - 15].rotate_right(7)
+                ^ words[i - 15].rotate_right(18)
+                ^ (words[i - 15] >> 3);
+            let s1 = words[i - 2].rotate_right(17)
+                ^ words[i - 2].rotate_right(19)
+                ^ (words[i - 2] >> 10);
+            words[i] = words[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[i - 7])
+                .wrapping_add(s1);
         }
         let mut a = hash[0];
         let mut b = hash[1];
@@ -1317,7 +1633,11 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ (!e & g);
-            let t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(words[i]);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(words[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let t2 = s0.wrapping_add(maj);

@@ -6,9 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
-use termorganize_core::banner::BannerClient;
+use termorganize_core::banner::{self, BannerClient};
 use termorganize_core::course_info::CourseInfo;
-use termorganize_core::offering::OfferingHistory;
 use termorganize_core::degree_audit::{AuditStatus, DegreeAudit, DegreeCourseAttributes};
 use termorganize_core::degree_format;
 use termorganize_core::index::CatalogIndex;
@@ -16,6 +15,7 @@ use termorganize_core::legal;
 use termorganize_core::links::AppLink;
 use termorganize_core::model::*;
 use termorganize_core::nl;
+use termorganize_core::offering::OfferingHistory;
 use termorganize_core::planlogic::{self, PrereqStatus};
 use termorganize_core::professors;
 use termorganize_core::program_parser;
@@ -71,6 +71,30 @@ struct State {
     term_labels: Vec<String>,
     /// Unordered pair ids the student turned down, newest last. Same store as the Mac prompt.
     dismissed_pairs: Vec<String>,
+    /// Watch items whose last Banner response did not include the CRN.
+    missing_watch: HashSet<String>,
+}
+
+/// Which text field should keep the caret after a rebuild.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeepFocus {
+    Search,
+    Subject,
+    Professors,
+    RoomBuilding,
+    RoomDate,
+}
+
+impl KeepFocus {
+    fn widget_name(self) -> &'static str {
+        match self {
+            Self::Search => "to-focus-search",
+            Self::Subject => "to-focus-subject",
+            Self::Professors => "to-focus-professors",
+            Self::RoomBuilding => "to-focus-rooms",
+            Self::RoomDate => "to-focus-room-date",
+        }
+    }
 }
 
 struct Shell {
@@ -84,10 +108,17 @@ struct Shell {
     guard: Cell<bool>,
     windows: RefCell<Vec<adw::Window>>,
     term_menu: gtk::DropDown,
+    keep_focus: Cell<Option<KeepFocus>>,
+}
+
+pub(crate) fn course_window_name(key: &CourseKey) -> String {
+    format!("course-{}-{}", key.subject, key.number)
 }
 
 pub fn run(open: Option<String>, smoke: bool) {
-    let app = adw::Application::builder().application_id("org.termorganize.TermOrganize").build();
+    let app = adw::Application::builder()
+        .application_id("org.termorganize.TermOrganize")
+        .build();
     let open = Rc::new(open);
     app.connect_startup(install_actions);
     app.connect_activate(move |app| {
@@ -162,7 +193,12 @@ fn install_actions(app: &adw::Application) {
 
 fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
     let Some(index) = load_index() else {
-        let window = adw::ApplicationWindow::builder().application(app).title("Term Organize").default_width(520).default_height(240).build();
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .title("Term Organize")
+            .default_width(520)
+            .default_height(240)
+            .build();
         let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-202710.catalog, or run Term Organize from the repository."));
         label.set_wrap(true);
         label.set_margin_top(24);
@@ -199,13 +235,14 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         room_query: String::new(),
         room_date: "2026-09-16".into(),
         requirements: HashMap::new(),
-        catalog_path: "undergraduate/computer-information-science/computer-science/computer-science-bs/".into(),
+        catalog_path: termorganize_core::banner::DEFAULT_CATALOG_PATH.into(),
         live_seats: HashMap::new(),
         offering: OfferingHistory::empty(),
         course_notes: HashMap::new(),
         term_codes: vec![],
         term_labels: vec![],
         dismissed_pairs: gap::load_dismissed(),
+        missing_watch: HashSet::new(),
     }));
     load_saved_requirements(&state);
 
@@ -215,14 +252,23 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
     for (icon, name) in AREAS {
         sidebar.append(&sidebar_row(icon, name));
     }
-    let sidebar_scroll = gtk::ScrolledWindow::builder().child(&sidebar).hscrollbar_policy(gtk::PolicyType::Never).build();
+    let sidebar_scroll = gtk::ScrolledWindow::builder()
+        .child(&sidebar)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
     fill(&sidebar_scroll);
-    let side_page = adw::NavigationPage::builder().title("Term Organize").child(&sidebar_scroll).build();
+    let side_page = adw::NavigationPage::builder()
+        .title("Term Organize")
+        .child(&sidebar_scroll)
+        .build();
     fill(&side_page);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     fill(&content);
-    let content_page = adw::NavigationPage::builder().title("Search").child(&content).build();
+    let content_page = adw::NavigationPage::builder()
+        .title("Search")
+        .child(&content)
+        .build();
     fill(&content_page);
 
     let split = adw::NavigationSplitView::new();
@@ -233,13 +279,20 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
     // Without this the split keeps its natural height and the page is a short strip.
     fill(&split);
 
-    let title = adw::WindowTitle::new("Search", "Unofficial · not affiliated with Northeastern or Sandbox");
+    let title = adw::WindowTitle::new(
+        "Search",
+        "Unofficial · not affiliated with Northeastern or Sandbox",
+    );
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
     let term = gtk::DropDown::from_strings(&[term_name.as_str()]);
-    term.set_tooltip_text(Some("Term. Cached terms open immediately. Any other Banner term is downloaded and kept."));
+    term.set_tooltip_text(Some(
+        "Term. Cached terms open immediately. Any other Banner term is downloaded and kept.",
+    ));
     header.pack_end(&term);
-    let menu_button = gtk::MenuButton::builder().icon_name("open-menu-symbolic").build();
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .build();
     menu_button.set_menu_model(Some(&menu_model()));
     header.pack_end(&menu_button);
 
@@ -274,6 +327,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         guard: Cell::new(false),
         windows: RefCell::new(Vec::new()),
         term_menu: term.clone(),
+        keep_focus: Cell::new(None),
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -328,12 +382,27 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
             apply_link(&shell, link);
         }
     }
-    if !shell.borrow().state.borrow().data.preferences.has_completed_onboarding {
+    if !shell
+        .borrow()
+        .state
+        .borrow()
+        .data
+        .preferences
+        .has_completed_onboarding
+    {
         greet(&shell);
     }
     install_drop(&shell);
     arm_seat_timer(&shell);
-    if !smoke && shell.borrow().state.borrow().data.preferences.background_refresh_enabled {
+    if !smoke
+        && shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .background_refresh_enabled
+    {
         request_background();
     }
     if smoke {
@@ -369,21 +438,31 @@ fn fill(widget: &impl IsA<gtk::Widget>) {
 }
 
 /// The main page should occupy the window below the menu and header, not a short strip.
-fn page_fills_window(window: &adw::ApplicationWindow, content: &gtk::Box) -> Result<String, String> {
+fn page_fills_window(
+    window: &adw::ApplicationWindow,
+    content: &gtk::Box,
+) -> Result<String, String> {
     let win_h = window.height();
     let content_h = content.height();
     let page = content.first_child();
     let page_h = page.as_ref().map(|child| child.height()).unwrap_or(0);
     // Widget height excludes CSS margins, which sit inside the content box.
-    let margin = page.as_ref().map(|child| child.margin_top() + child.margin_bottom()).unwrap_or(0);
+    let margin = page
+        .as_ref()
+        .map(|child| child.margin_top() + child.margin_bottom())
+        .unwrap_or(0);
     if win_h < 700 {
         return Err(format!("window height {win_h} is below 700"));
     }
     if content_h + 160 < win_h {
-        return Err(format!("content height {content_h} does not fill window height {win_h}"));
+        return Err(format!(
+            "content height {content_h} does not fill window height {win_h}"
+        ));
     }
     if page_h + margin + 4 < content_h {
-        return Err(format!("page height {page_h} plus margin {margin} does not fill content height {content_h}"));
+        return Err(format!(
+            "page height {page_h} plus margin {margin} does not fill content height {content_h}"
+        ));
     }
     Ok(format!("smoke: page fills window (window={win_h} content={content_h} page={page_h} margin={margin})"))
 }
@@ -437,12 +516,20 @@ fn wire_actions(shell: &Rc<RefCell<Shell>>) {
 
 fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
     let list = shell.borrow().sidebar.clone();
+    // Selecting the row that is already selected does not emit row-selected, so a
+    // Generate (or a new plan) on the current page would never redraw.
+    let already = list.selected_row().is_some_and(|row| row.index() == index);
     if let Some(row) = list.row_at_index(index) {
         list.select_row(Some(&row));
+    }
+    if already {
+        refresh(shell);
     }
 }
 
 fn refresh(shell: &Rc<RefCell<Shell>>) {
+    let saved_scroll = scroll_values(shell.borrow().content.upcast_ref());
+    let area_before = shell.borrow().state.borrow().area;
     let page = build_page(shell);
     fill(&page);
     let shell_ref = shell.borrow();
@@ -452,11 +539,21 @@ fn refresh(shell: &Rc<RefCell<Shell>>) {
     shell_ref.content.append(&page);
     let state = shell_ref.state.borrow();
     let (heading, sub) = if let Some(key) = &state.course {
-        (key.to_string(), state.index.course(key).map(|c| c.title.clone()).unwrap_or_default())
+        (
+            key.to_string(),
+            state
+                .index
+                .course(key)
+                .map(|c| c.title.clone())
+                .unwrap_or_default(),
+        )
     } else if let Some(name) = &state.professor {
         ("Professors".into(), name.clone())
     } else {
-        let name = AREAS.get(state.area as usize).map(|(_, n)| *n).unwrap_or("Term Organize");
+        let name = AREAS
+            .get(state.area as usize)
+            .map(|(_, n)| *n)
+            .unwrap_or("Term Organize");
         let next = up_next_summary(&state);
         let sub = if next.is_empty() {
             format!("{} · unofficial", state.index.catalog.term.name())
@@ -468,6 +565,123 @@ fn refresh(shell: &Rc<RefCell<Shell>>) {
     shell_ref.title.set_title(&heading);
     shell_ref.title.set_subtitle(&sub);
     adapt(&shell_ref.window, &shell_ref.split);
+    if let Some(which) = shell_ref.keep_focus.take() {
+        restore_focus(&page, which);
+    }
+    if area_before == shell_ref.state.borrow().area
+        && scroll_values(&page).len() == saved_scroll.len()
+        && saved_scroll.iter().any(|value| *value > 1.0)
+    {
+        let page = page.clone();
+        let tries = Rc::new(Cell::new(0));
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            tries.set(tries.get() + 1);
+            // The new page reports a zero scroll range until it is allocated.
+            let waiting = scroll_not_ready(&page, &saved_scroll) && tries.get() < 8;
+            if waiting {
+                glib::ControlFlow::Continue
+            } else {
+                apply_scroll(&page, &saved_scroll);
+                glib::ControlFlow::Break
+            }
+        });
+    }
+}
+
+fn scroll_values(root: &gtk::Widget) -> Vec<f64> {
+    let mut values = Vec::new();
+    collect_scroll(root, &mut values);
+    values
+}
+
+fn collect_scroll(widget: &gtk::Widget, values: &mut Vec<f64>) {
+    if let Some(scrolled) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+        values.push(scrolled.vadjustment().value());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        collect_scroll(&current, values);
+        child = current.next_sibling();
+    }
+}
+
+fn scroll_not_ready(root: &gtk::Widget, values: &[f64]) -> bool {
+    let mut index = 0;
+    let mut waiting = false;
+    fn walk(widget: &gtk::Widget, values: &[f64], index: &mut usize, waiting: &mut bool) {
+        if let Some(scrolled) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+            if let Some(value) = values.get(*index) {
+                let adjustment = scrolled.vadjustment();
+                let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                if *value > 1.0 && max + 1.0 < *value {
+                    *waiting = true;
+                }
+            }
+            *index += 1;
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            walk(&current, values, index, waiting);
+            child = current.next_sibling();
+        }
+    }
+    walk(root, values, &mut index, &mut waiting);
+    waiting
+}
+
+fn apply_scroll(root: &gtk::Widget, values: &[f64]) {
+    let mut index = 0;
+    fn walk(widget: &gtk::Widget, values: &[f64], index: &mut usize) {
+        if let Some(scrolled) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+            if let Some(value) = values.get(*index) {
+                let adjustment = scrolled.vadjustment();
+                let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                adjustment.set_value((*value).min(max));
+            }
+            *index += 1;
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            walk(&current, values, index);
+            child = current.next_sibling();
+        }
+    }
+    walk(root, values, &mut index);
+}
+
+fn restore_focus(root: &gtk::Widget, which: KeepFocus) {
+    let Some(widget) = find_named(root, which.widget_name()) else {
+        return;
+    };
+    glib::idle_add_local_once(move || {
+        if widget.parent().is_none() {
+            return;
+        }
+        if !widget.grab_focus() {
+            return;
+        }
+        if let Some(editable) = widget.dynamic_cast_ref::<gtk::Editable>() {
+            editable.set_position(-1);
+        }
+    });
+}
+
+fn find_named(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+    if widget.widget_name().as_str() == name {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_named(&current, name) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
+fn hold_focus(shell: &Rc<RefCell<Shell>>, which: KeepFocus) {
+    shell.borrow().keep_focus.set(Some(which));
 }
 
 fn adapt(window: &adw::ApplicationWindow, split: &adw::NavigationSplitView) {
@@ -499,7 +713,14 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let (query, filters, sort, hits) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let response = search::search(&SearchQuery { text: state.query.clone(), filters: state.filters.clone(), sort: state.sort }, &state.index);
+        let response = search::search(
+            &SearchQuery {
+                text: state.query.clone(),
+                filters: state.filters.clone(),
+                sort: state.sort,
+            },
+            &state.index,
+        );
         let total = response.results.len();
         let rows: Vec<(CourseKey, String, String, String)> = response
             .results
@@ -507,10 +728,20 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             .take(250)
             .map(|hit| {
                 let open = state.index.stats_for(&hit.course.key());
-                (hit.course.key(), hit.course.title.clone(), hit.course.credits_label(), format!("{} open", open.open_section_count))
+                (
+                    hit.course.key(),
+                    hit.course.title.clone(),
+                    hit.course.credits_label(),
+                    format!("{} open", open.open_section_count),
+                )
             })
             .collect();
-        (state.query.clone(), state.filters.clone(), state.sort, (rows, total, response.crn_match.map(|s| s.crn)))
+        (
+            state.query.clone(),
+            state.filters.clone(),
+            state.sort,
+            (rows, total, response.crn_match.map(|s| s.crn)),
+        )
     };
     let (rows, total, crn) = hits;
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -518,11 +749,20 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     root.set_margin_bottom(18);
     root.set_margin_start(18);
     root.set_margin_end(18);
-    let entry = gtk::SearchEntry::builder().placeholder_text("Course, professor, CRN, or shorthand like orgo").text(&query).build();
+    let entry = gtk::SearchEntry::builder()
+        .placeholder_text("Course, professor, CRN, or shorthand like orgo")
+        .text(&query)
+        .build();
+    entry.set_widget_name(KeepFocus::Search.widget_name());
     entry.connect_search_changed({
         let shell = shell.clone();
         move |entry| {
-            shell.borrow().state.borrow_mut().query = entry.text().to_string();
+            let text = entry.text().to_string();
+            if shell.borrow().state.borrow().query == text {
+                return;
+            }
+            shell.borrow().state.borrow_mut().query = text;
+            hold_focus(&shell, KeepFocus::Search);
             refresh(&shell);
         }
     });
@@ -546,7 +786,12 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
-    let subject = gtk::Entry::builder().placeholder_text("Subject").text(filters.subjects.iter().next().cloned().unwrap_or_default()).width_chars(8).build();
+    let subject = gtk::Entry::builder()
+        .placeholder_text("Subject")
+        .text(filters.subjects.iter().next().cloned().unwrap_or_default())
+        .width_chars(8)
+        .build();
+    subject.set_widget_name(KeepFocus::Subject.widget_name());
     subject.connect_changed({
         let shell = shell.clone();
         move |entry| {
@@ -560,11 +805,17 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             if !text.is_empty() {
                 filters.subjects.insert(text);
             }
+            let unchanged = shell.borrow().state.borrow().filters.subjects == filters.subjects;
+            if unchanged {
+                return;
+            }
             shell.borrow().state.borrow_mut().filters = filters;
+            hold_focus(&shell, KeepFocus::Subject);
             refresh(&shell);
         }
     });
-    let sort_box = gtk::DropDown::from_strings(&["Relevance", "Course number", "Title", "Open seats"]);
+    let sort_box =
+        gtk::DropDown::from_strings(&["Relevance", "Course number", "Title", "Open seats"]);
     sort_box.set_selected(match sort {
         SearchSort::Relevance => 0,
         SearchSort::CourseNumber => 1,
@@ -603,7 +854,11 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     root.upcast()
 }
 
-fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, String)], saved: bool) -> gtk::Widget {
+fn course_list(
+    shell: &Rc<RefCell<Shell>>,
+    rows: &[(CourseKey, String, String, String)],
+    saved: bool,
+) -> gtk::Widget {
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -663,7 +918,11 @@ fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, S
         list.append(&item);
     }
     if rows.is_empty() && !saved {
-        let label = gtk::Label::builder().label("Nothing matches. Try a course code, a shorter word, or clear a filter.").margin_top(24).margin_bottom(24).build();
+        let label = gtk::Label::builder()
+            .label("Nothing matches. Try a course code, a shorter word, or clear a filter.")
+            .margin_top(24)
+            .margin_bottom(24)
+            .build();
         let item = gtk::ListBoxRow::new();
         item.set_child(Some(&label));
         item.set_activatable(false);
@@ -682,11 +941,14 @@ fn course_list(shell: &Rc<RefCell<Shell>>, rows: &[(CourseKey, String, String, S
     if saved {
         let shell = shell.clone();
         let keys = keys.clone();
-        attach_delete_key(&list, Rc::new(move |index| {
-            if let Some(key) = keys.get(index as usize) {
-                unsave_course(&shell, key);
-            }
-        }));
+        attach_delete_key(
+            &list,
+            Rc::new(move |index| {
+                if let Some(key) = keys.get(index as usize) {
+                    unsave_course(&shell, key);
+                }
+            }),
+        );
     }
     gtk::ScrolledWindow::builder()
         .child(&list)
@@ -702,7 +964,10 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     let (course, sections) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        (state.index.course(key).cloned(), state.index.sections_for(key))
+        (
+            state.index.course(key).cloned(),
+            state.index.sections_for(key),
+        )
     };
     let Some(course) = course else {
         return gtk::Label::new(Some("That course isn’t in this term.")).upcast();
@@ -740,7 +1005,16 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     heading.set_xalign(0.0);
     heading.set_wrap(true);
     root.append(&heading);
-    root.append(&dim_label(&format!("{} · {}", course.credits_label(), course.nupaths().iter().map(|p| p.short()).collect::<Vec<_>>().join(" "))));
+    root.append(&dim_label(&format!(
+        "{} · {}",
+        course.credits_label(),
+        course
+            .nupaths()
+            .iter()
+            .map(|p| p.short())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )));
     if !course.description.is_empty() {
         let body = gtk::Label::new(Some(&course.description));
         body.set_wrap(true);
@@ -758,7 +1032,14 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     }
     if !course.postreqs.is_empty() {
         root.append(&heading_label("Leads to"));
-        root.append(&selectable(&course.postreqs.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")));
+        root.append(&selectable(
+            &course
+                .postreqs
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
     }
     root.append(&heading_label(&format!("{} sections", sections.len())));
     let list = gtk::ListBox::new();
@@ -773,7 +1054,10 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         row.set_margin_start(12);
         row.set_margin_end(12);
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        top.append(&gtk::Label::new(Some(&format!("CRN {} · {}", section.crn, section.section_number))));
+        top.append(&gtk::Label::new(Some(&format!(
+            "CRN {} · {}",
+            section.crn, section.section_number
+        ))));
         let (seats_n, wait_n) = shell
             .borrow()
             .state
@@ -783,12 +1067,17 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
             .copied()
             .map(|(s, w, _)| (s, w))
             .unwrap_or((section.seats_remaining, section.waitlist_remaining));
-        let seats = gtk::Label::new(Some(&format!("{seats_n} seats · waitlist {wait_n}")));
+        let seats = gtk::Label::new(Some(&seat_wait_label(seats_n, wait_n)));
         seats.set_hexpand(true);
         seats.set_xalign(1.0);
         top.append(&seats);
         row.append(&top);
-        let detail = dim_label(&format!("{} · {} · {}", section.schedule_summary(), section.instructor_label(), section.campus));
+        let detail = dim_label(&format!(
+            "{} · {} · {}",
+            section.schedule_summary(),
+            section.instructor_label(),
+            section.campus
+        ));
         detail.set_wrap(true);
         detail.set_max_width_chars(42);
         row.append(&detail);
@@ -804,7 +1093,8 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         let shell_watch = shell.clone();
         let section_watch = section.clone();
         let course_title = course.title.clone();
-        watch_button.connect_clicked(move |_| watch_section(&shell_watch, &section_watch, &course_title));
+        watch_button
+            .connect_clicked(move |_| watch_section(&shell_watch, &section_watch, &course_title));
         buttons.append(&copy);
         buttons.append(&watch_button);
         row.append(&buttons);
@@ -847,16 +1137,36 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let (subjects, selected, courses) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let subjects: Vec<(String, String)> = state.index.active_subjects.iter().map(|s| (s.code.clone(), s.name.clone())).collect();
-        let selected = state.subject.clone().or_else(|| subjects.first().map(|(c, _)| c.clone()));
+        let subjects: Vec<(String, String)> = state
+            .index
+            .active_subjects
+            .iter()
+            .map(|s| (s.code.clone(), s.name.clone()))
+            .collect();
+        let selected = state
+            .subject
+            .clone()
+            .or_else(|| subjects.first().map(|(c, _)| c.clone()));
         let mut courses = if let Some(code) = &selected {
-            state.index.courses.iter().filter(|c| &c.subject == code).map(|c| (c.key(), c.title.clone(), c.credits_label(), String::new())).collect::<Vec<_>>()
+            state
+                .index
+                .courses
+                .iter()
+                .filter(|c| &c.subject == code)
+                .map(|c| (c.key(), c.title.clone(), c.credits_label(), String::new()))
+                .collect::<Vec<_>>()
         } else {
             vec![]
         };
         match state.sort {
-            SearchSort::Title => courses.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()).then(a.0.cmp(&b.0))),
-            SearchSort::CourseNumber | SearchSort::Relevance | SearchSort::OpenSeats => courses.sort_by(|a, b| a.0.cmp(&b.0)),
+            SearchSort::Title => courses.sort_by(|a, b| {
+                a.1.to_ascii_lowercase()
+                    .cmp(&b.1.to_ascii_lowercase())
+                    .then(a.0.cmp(&b.0))
+            }),
+            SearchSort::CourseNumber | SearchSort::Relevance | SearchSort::OpenSeats => {
+                courses.sort_by(|a, b| a.0.cmp(&b.0))
+            }
         }
         courses.truncate(400);
         (subjects, selected, courses)
@@ -942,10 +1252,18 @@ fn saved_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             .saved
             .iter()
             .filter(|s| s.term_code == term)
-            .filter_map(|s| state.index.course(&s.key).map(|c| (c.key(), c.title.clone(), c.credits_label(), "Saved".into())))
+            .filter_map(|s| {
+                state
+                    .index
+                    .course(&s.key)
+                    .map(|c| (c.key(), c.title.clone(), c.credits_label(), "Saved".into()))
+            })
             .collect::<Vec<_>>()
     };
-    let root = page_column("Saved courses", "Courses you starred in this term. Delete removes one from the list.");
+    let root = page_column(
+        "Saved courses",
+        "Courses you starred in this term. Delete removes one from the list.",
+    );
     if rows.is_empty() {
         let status = adw::StatusPage::new();
         status.set_icon_name(Some("starred-symbolic"));
@@ -968,18 +1286,31 @@ fn professors_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             .index
             .instructors
             .iter()
-            .filter(|i| q.is_empty() || i.display_name.to_ascii_lowercase().contains(&q) || i.name.to_ascii_lowercase().contains(&q))
+            .filter(|i| {
+                q.is_empty()
+                    || i.display_name.to_ascii_lowercase().contains(&q)
+                    || i.name.to_ascii_lowercase().contains(&q)
+            })
             .take(200)
             .map(|i| (i.name.clone(), i.display_name.clone(), i.course_keys.len()))
             .collect();
         (state.query.clone(), people)
     };
     let root = page_column("Professors", "Everyone teaching a section this term.");
-    let entry = gtk::SearchEntry::builder().placeholder_text("Name").text(&query).build();
+    let entry = gtk::SearchEntry::builder()
+        .placeholder_text("Name")
+        .text(&query)
+        .build();
+    entry.set_widget_name(KeepFocus::Professors.widget_name());
     entry.connect_search_changed({
         let shell = shell.clone();
         move |entry| {
-            shell.borrow().state.borrow_mut().query = entry.text().to_string();
+            let text = entry.text().to_string();
+            if shell.borrow().state.borrow().query == text {
+                return;
+            }
+            shell.borrow().state.borrow_mut().query = text;
+            hold_focus(&shell, KeepFocus::Professors);
             refresh(&shell);
         }
     });
@@ -1028,12 +1359,23 @@ fn professors_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             }
         }
     });
-    root.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    root.append(
+        &gtk::ScrolledWindow::builder()
+            .child(&list)
+            .vexpand(true)
+            .build(),
+    );
     root.upcast()
 }
 
 fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
-    let name = shell.borrow().state.borrow().professor.clone().unwrap_or_default();
+    let name = shell
+        .borrow()
+        .state
+        .borrow()
+        .professor
+        .clone()
+        .unwrap_or_default();
     let page = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -1056,7 +1398,11 @@ fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         clamp.set_maximum_size(720);
         clamp.set_tightening_threshold(480);
         clamp.set_child(Some(&root));
-        return gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build().upcast();
+        return gtk::ScrolledWindow::builder()
+            .child(&clamp)
+            .vexpand(true)
+            .build()
+            .upcast();
     };
     root.append(&heading_label(&page.instructor.display_name));
     for course in &page.courses {
@@ -1065,7 +1411,11 @@ fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         for section in &course.sections {
             let row = adw::ActionRow::new();
             row.set_title(&format!("CRN {}", section.crn));
-            row.set_subtitle(&format!("{} · {}", section.schedule_summary(), section.seats_label()));
+            row.set_subtitle(&format!(
+                "{} · {}",
+                section.schedule_summary(),
+                section.seats_label()
+            ));
             row.set_subtitle_lines(2);
             group.add(&row);
         }
@@ -1075,7 +1425,11 @@ fn professor_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     clamp.set_maximum_size(720);
     clamp.set_tightening_threshold(480);
     clamp.set_child(Some(&root));
-    gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build().upcast()
+    gtk::ScrolledWindow::builder()
+        .child(&clamp)
+        .vexpand(true)
+        .build()
+        .upcast()
 }
 
 struct RoomBar {
@@ -1100,30 +1454,52 @@ fn room_bars(shell: &Rc<RefCell<Shell>>) -> (i32, String, String, Vec<RoomBar>, 
     let marker = today_marker(&date);
     let moment = marker.unwrap_or(rooms::Moment::FIRST_CLASS);
     let mut bars = Vec::new();
-    for room in rooms::search_rooms(&state.index.buildings, &state.room_query).into_iter().take(40) {
+    for room in rooms::search_rooms(&state.index.buildings, &state.room_query)
+        .into_iter()
+        .take(40)
+    {
         let bookings = rooms::bookings_of(&room, day, Some(date.as_str()));
         let status = rooms::status_of_bookings(&bookings, moment);
-        let stretches = rooms::free_stretches(&bookings, rooms::Moment::FIRST_CLASS, rooms::Moment::LAST_CLASS);
+        let stretches = rooms::free_stretches(
+            &bookings,
+            rooms::Moment::FIRST_CLASS,
+            rooms::Moment::LAST_CLASS,
+        );
         bars.push(RoomBar {
             label: room.label(),
             status: status.summary(),
             free: status.is_free(),
             free_spans: split_free(&stretches, marker),
-            classes: bookings.iter().map(|booking| (booking.start, booking.end, booking.course.to_string())).collect(),
+            classes: bookings
+                .iter()
+                .map(|booking| (booking.start, booking.end, booking.course.to_string()))
+                .collect(),
         });
     }
-    bars.sort_by(|left, right| right.free.cmp(&left.free).then_with(|| left.label.cmp(&right.label)));
+    bars.sort_by(|left, right| {
+        right
+            .free
+            .cmp(&left.free)
+            .then_with(|| left.label.cmp(&right.label))
+    });
     (day, state.room_query.clone(), date, bars, marker)
 }
 
 fn today_marker(date: &str) -> Option<i32> {
     let now = glib::DateTime::now_local().ok()?;
-    let today = format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day_of_month());
+    let today = format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        now.month(),
+        now.day_of_month()
+    );
     if date != today {
         return None;
     }
     let minutes = now.hour() * 60 + now.minute();
-    (rooms::Moment::FIRST_CLASS..rooms::Moment::LAST_CLASS).contains(&minutes).then_some(minutes)
+    (rooms::Moment::FIRST_CLASS..rooms::Moment::LAST_CLASS)
+        .contains(&minutes)
+        .then_some(minutes)
 }
 
 fn split_free(stretches: &[std::ops::Range<i32>], marker: Option<i32>) -> Vec<(i32, i32, bool)> {
@@ -1149,7 +1525,15 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let (day, query, date, bars, marker) = room_bars(shell);
     let root = page_column("Free rooms", "Each bar is one room from 7:00 AM to 10:00 PM. Green is free. Gray is a class. A blue line marks the current time when the date is today.");
     let controls = wrapping_box();
-    let days = gtk::DropDown::from_strings(&["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
+    let days = gtk::DropDown::from_strings(&[
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ]);
     days.set_selected(day as u32);
     days.connect_selected_notify({
         let shell = shell.clone();
@@ -1158,19 +1542,38 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
-    let date_entry = gtk::Entry::builder().text(&date).width_chars(12).tooltip_text("Date, YYYY-MM-DD").build();
+    let date_entry = gtk::Entry::builder()
+        .text(&date)
+        .width_chars(12)
+        .tooltip_text("Date, YYYY-MM-DD")
+        .build();
+    date_entry.set_widget_name(KeepFocus::RoomDate.widget_name());
     date_entry.connect_changed({
         let shell = shell.clone();
         move |entry| {
-            shell.borrow().state.borrow_mut().room_date = entry.text().to_string();
+            let text = entry.text().to_string();
+            if shell.borrow().state.borrow().room_date == text {
+                return;
+            }
+            shell.borrow().state.borrow_mut().room_date = text;
+            hold_focus(&shell, KeepFocus::RoomDate);
             refresh(&shell);
         }
     });
-    let search = gtk::SearchEntry::builder().placeholder_text("Building, like WVH").text(&query).build();
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Building, like WVH")
+        .text(&query)
+        .build();
+    search.set_widget_name(KeepFocus::RoomBuilding.widget_name());
     search.connect_search_changed({
         let shell = shell.clone();
         move |entry| {
-            shell.borrow().state.borrow_mut().room_query = entry.text().to_string();
+            let text = entry.text().to_string();
+            if shell.borrow().state.borrow().room_query == text {
+                return;
+            }
+            shell.borrow().state.borrow_mut().room_query = text;
+            hold_focus(&shell, KeepFocus::RoomBuilding);
             refresh(&shell);
         }
     });
@@ -1187,9 +1590,18 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         drawing.set_hexpand(true);
         drawing.set_vexpand(true);
         let dark = adw::StyleManager::default().is_dark();
-        let view = RoomCanvas { dark, marker, rows: bars };
+        let view = RoomCanvas {
+            dark,
+            marker,
+            rows: bars,
+        };
         drawing.set_draw_func(move |_, cr, width, height| draw_rooms(cr, width, height, &view));
-        root.append(&gtk::ScrolledWindow::builder().child(&drawing).vexpand(true).build());
+        root.append(
+            &gtk::ScrolledWindow::builder()
+                .child(&drawing)
+                .vexpand(true)
+                .build(),
+        );
     }
     root.upcast()
 }
@@ -1211,7 +1623,11 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let plans = gtk::ListBox::new();
     plans.add_css_class("navigation-sidebar");
     for (i, (id, name, count, primary)) in snapshot.plans.iter().enumerate() {
-        let label = gtk::Label::new(Some(&format!("{}{}", name, if *primary { " · primary" } else { "" })));
+        let label = gtk::Label::new(Some(&format!(
+            "{}{}",
+            name,
+            if *primary { " · primary" } else { "" }
+        )));
         label.set_xalign(0.0);
         label.set_margin_top(8);
         label.set_margin_bottom(8);
@@ -1235,11 +1651,14 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     {
         let ids: Rc<Vec<Uuid>> = Rc::new(snapshot.plans.iter().map(|(id, _, _, _)| *id).collect());
         let shell = shell.clone();
-        attach_delete_key(&plans, Rc::new(move |index| {
-            if let Some(id) = ids.get(index as usize) {
-                delete_schedule(&shell, *id);
-            }
-        }));
+        attach_delete_key(
+            &plans,
+            Rc::new(move |index| {
+                if let Some(id) = ids.get(index as usize) {
+                    delete_schedule(&shell, *id);
+                }
+            }),
+        );
     }
     plans.connect_row_selected({
         let shell = shell.clone();
@@ -1261,7 +1680,12 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             }
         }
     });
-    side.append(&gtk::ScrolledWindow::builder().child(&plans).vexpand(true).build());
+    side.append(
+        &gtk::ScrolledWindow::builder()
+            .child(&plans)
+            .vexpand(true)
+            .build(),
+    );
     paned.set_start_child(Some(&side));
 
     let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -1270,12 +1694,20 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     main.set_margin_start(12);
     main.set_margin_end(12);
     if snapshot.plan.is_none() {
-        main.append(&dim_label("Make a schedule for this term, then add courses from search or a degree plan."));
+        main.append(&dim_label(
+            "Make a schedule for this term, then add courses from search or a degree plan.",
+        ));
         paned.set_end_child(Some(&main));
         return paned.upcast();
     }
     let toolbar = wrapping_box();
-    for (label, action) in [("Generate", 0), ("Copy CRNs", 1), ("Export .ics", 2), ("Export image", 3), ("Autofill", 4)] {
+    for (label, action) in [
+        ("Generate", 0),
+        ("Copy CRNs", 1),
+        ("Export .ics", 2),
+        ("Export image", 3),
+        ("Autofill", 4),
+    ] {
         let button = gtk::Button::with_label(label);
         let shell = shell.clone();
         button.connect_clicked(move |_| match action {
@@ -1289,20 +1721,32 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     }
     main.append(&toolbar);
     main.append(&heading_label("Courses"));
-    main.append(&dim_label("Drop a course here from search or a degree plan. Return opens it. Delete removes it."));
+    main.append(&dim_label(
+        "Drop a course here from search or a degree plan. Return opens it. Delete removes it.",
+    ));
     let course_list = gtk::ListBox::new();
     course_list.add_css_class("boxed-list");
     course_list.set_selection_mode(gtk::SelectionMode::Single);
     course_list.set_activate_on_single_click(false);
     attach_schedule_drop(&course_list, shell);
-    let course_keys: Rc<Vec<String>> = Rc::new(snapshot.courses.iter().map(|(key, _)| key.clone()).collect());
+    let course_keys: Rc<Vec<String>> = Rc::new(
+        snapshot
+            .courses
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect(),
+    );
     for (key, required) in &snapshot.courses {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_top(6);
         row.set_margin_bottom(6);
         row.set_margin_start(8);
         row.set_margin_end(8);
-        let label = gtk::Label::new(Some(&format!("{}{}", key, if *required { "" } else { " · optional" })));
+        let label = gtk::Label::new(Some(&format!(
+            "{}{}",
+            key,
+            if *required { "" } else { " · optional" }
+        )));
         label.set_hexpand(true);
         label.set_xalign(0.0);
         row.append(&label);
@@ -1344,7 +1788,10 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         let shell = shell.clone();
         let course_keys = course_keys.clone();
         move |_, row| {
-            if let Some(key) = course_keys.get(row.index() as usize).and_then(|key| CourseKey::parse(key)) {
+            if let Some(key) = course_keys
+                .get(row.index() as usize)
+                .and_then(|key| CourseKey::parse(key))
+            {
                 gap::open_course_window(&shell, &key);
             }
         }
@@ -1359,7 +1806,9 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     });
     attach_schedule_drop(&main, shell);
     main.append(&course_list);
-    let add = gtk::Entry::builder().placeholder_text("Add a code, like CS 3000").build();
+    let add = gtk::Entry::builder()
+        .placeholder_text("Add a code, like CS 3000")
+        .build();
     add.connect_activate({
         let shell = shell.clone();
         move |entry| {
@@ -1375,9 +1824,14 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         main.append(&selectable(&snapshot.pref_summary));
     }
     if snapshot.generated.is_empty() {
-        main.append(&dim_label("Generate builds conflict-free combinations and ranks them."));
+        main.append(&dim_label(
+            "Generate builds conflict-free combinations and ranks them.",
+        ));
     } else {
-        main.append(&heading_label(&format!("{} schedules", snapshot.total_label)));
+        main.append(&heading_label(&format!(
+            "{} schedules",
+            snapshot.total_label
+        )));
         let list = gtk::ListBox::new();
         list.add_css_class("boxed-list");
         for (i, item) in snapshot.generated.iter().enumerate() {
@@ -1407,7 +1861,12 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
                 refresh(&shell);
             }
         });
-        main.append(&gtk::ScrolledWindow::builder().child(&list).min_content_height(140).build());
+        main.append(
+            &gtk::ScrolledWindow::builder()
+                .child(&list)
+                .min_content_height(140)
+                .build(),
+        );
     }
     if !snapshot.suggestions.is_empty() {
         main.append(&heading_label("Nothing fit. Try loosening one rule."));
@@ -1423,7 +1882,12 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let start_hour = snapshot.start_hour;
     let end_hour = snapshot.end_hour;
     let dark = adw::StyleManager::default().is_dark();
-    let view = WeekView { dark, show_weekends, start_hour, end_hour };
+    let view = WeekView {
+        dark,
+        show_weekends,
+        start_hour,
+        end_hour,
+    };
     drawing.set_draw_func(move |_, cr, width, height| draw_week(cr, width, height, &blocks, &view));
     main.append(&drawing);
     let scroll = gtk::ScrolledWindow::builder().child(&main).build();
@@ -1464,37 +1928,86 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
     let shell_ref = shell.borrow();
     let state = shell_ref.state.borrow();
     let term = state.index.catalog.term.code.clone();
-    let plans = state.data.plans.iter().filter(|p| p.term_code == term).map(|p| (p.id, p.name.clone(), p.courses.len(), p.is_primary)).collect::<Vec<_>>();
-    let plan = state.plan.and_then(|id| state.data.plans.iter().find(|p| p.id == id).cloned()).or_else(|| state.data.plans.iter().find(|p| p.term_code == term).cloned());
-    let courses = plan.as_ref().map(|p| p.courses.iter().map(|c| (c.key.to_string(), c.is_required)).collect()).unwrap_or_default();
-    let prefs = plan.as_ref().and_then(|p| p.preferences.clone()).unwrap_or_default();
+    let plans = state
+        .data
+        .plans
+        .iter()
+        .filter(|p| p.term_code == term)
+        .map(|p| (p.id, p.name.clone(), p.courses.len(), p.is_primary))
+        .collect::<Vec<_>>();
+    let plan = state
+        .plan
+        .and_then(|id| state.data.plans.iter().find(|p| p.id == id).cloned())
+        .or_else(|| {
+            state
+                .data
+                .plans
+                .iter()
+                .find(|p| p.term_code == term)
+                .cloned()
+        });
+    let courses = plan
+        .as_ref()
+        .map(|p| {
+            p.courses
+                .iter()
+                .map(|c| (c.key.to_string(), c.is_required))
+                .collect()
+        })
+        .unwrap_or_default();
+    let prefs = plan
+        .as_ref()
+        .and_then(|p| p.preferences.clone())
+        .unwrap_or_default();
     let generated = state
         .generated
         .iter()
         .take(12)
         .map(|g| SchedLine {
             crns: g.crns.join(", "),
-            reasons: g.reasons.iter().map(|r| r.text.clone()).collect::<Vec<_>>().join(" · "),
+            reasons: g
+                .reasons
+                .iter()
+                .map(|r| r.text.clone())
+                .collect::<Vec<_>>()
+                .join(" · "),
         })
         .collect();
     let picked = state.picked.min(state.generated.len().saturating_sub(1));
-    let sections = state.generated.get(picked).map(|g| g.sections.clone()).unwrap_or_default();
+    let sections = state
+        .generated
+        .get(picked)
+        .map(|g| g.sections.clone())
+        .unwrap_or_default();
     let mut blocks = Vec::new();
     for (i, section) in sections.iter().enumerate() {
         for meeting in section.weekly_meetings() {
-            let (Some(start), Some(end)) = (meeting.start, meeting.end) else { continue };
+            let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
+                continue;
+            };
             for day in meeting.days.indices() {
-                blocks.push(WeekBlock { day, start, end, label: format!("{} {}", section.course_key(), section.crn), color: i % 8 });
+                blocks.push(WeekBlock {
+                    day,
+                    start,
+                    end,
+                    label: format!("{} {}", section.course_key(), section.crn),
+                    color: i % 8,
+                });
             }
         }
     }
-    let suggestions = if state.generated.is_empty() && plan.as_ref().is_some_and(|p| !p.courses.is_empty()) {
-        let inputs = plan_inputs(&state);
-        let filters = plan.as_ref().map(|p| p.filters.clone()).unwrap_or_default();
-        schedule::suggest_relaxations(&inputs, &filters, &prefs, true).into_iter().take(4).map(|s| s.relaxation.title()).collect()
-    } else {
-        vec![]
-    };
+    let suggestions =
+        if state.generated.is_empty() && plan.as_ref().is_some_and(|p| !p.courses.is_empty()) {
+            let inputs = plan_inputs(&state);
+            let filters = plan.as_ref().map(|p| p.filters.clone()).unwrap_or_default();
+            schedule::suggest_relaxations(&inputs, &filters, &prefs, true)
+                .into_iter()
+                .take(4)
+                .map(|s| s.relaxation.title())
+                .collect()
+        } else {
+            vec![]
+        };
     ScheduleSnap {
         plans,
         plan,
@@ -1512,25 +2025,54 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
 }
 
 fn plan_inputs(state: &State) -> Vec<ScheduleCourseInput> {
-    let Some(id) = current_plan_id(state) else { return vec![] };
-    let Some(plan) = state.data.plans.iter().find(|p| p.id == id) else { return vec![] };
+    let Some(id) = current_plan_id(state) else {
+        return vec![];
+    };
+    let Some(plan) = state.data.plans.iter().find(|p| p.id == id) else {
+        return vec![];
+    };
     plan.courses
         .iter()
         .map(|c| {
-            let mut input = ScheduleCourseInput::new(c.key.clone(), c.is_required, state.index.sections_for(&c.key));
+            let mut input = ScheduleCourseInput::new(
+                c.key.clone(),
+                c.is_required,
+                state.index.sections_for(&c.key),
+            );
             input.excluded_crns = c.excluded_crns.clone();
             input
         })
         .collect()
 }
 
+/// The degree plan on screen. The page shows the first plan when none has been
+/// chosen yet, and Load requirements has to use that same plan.
+fn active_degree_id(state: &State) -> Option<Uuid> {
+    shown_degree_plan_id(state.degree, &state.data.degree_plans)
+}
+
 fn current_plan_id(state: &State) -> Option<Uuid> {
     let term = &state.index.catalog.term.code;
-    state.plan.filter(|id| state.data.plans.iter().any(|p| p.id == *id)).or_else(|| state.data.plans.iter().find(|p| &p.term_code == term).map(|p| p.id))
+    state
+        .plan
+        .filter(|id| state.data.plans.iter().any(|p| p.id == *id))
+        .or_else(|| {
+            state
+                .data
+                .plans
+                .iter()
+                .find(|p| &p.term_code == term)
+                .map(|p| p.id)
+        })
 }
 
 fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snap = degree_snapshot(shell);
+    if let Some(id) = snap.id {
+        if shell.borrow().state.borrow().degree != Some(id) {
+            shell.borrow().state.borrow_mut().degree = Some(id);
+        }
+    }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     install_proportional_pane(&paned, 0.24);
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -1575,11 +2117,14 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     {
         let plan_ids: Rc<Vec<Uuid>> = Rc::new(ids.clone());
         let shell = shell.clone();
-        attach_delete_key(&list, Rc::new(move |index| {
-            if let Some(id) = plan_ids.get(index as usize) {
-                delete_degree_plan_ui(&shell, *id);
-            }
-        }));
+        attach_delete_key(
+            &list,
+            Rc::new(move |index| {
+                if let Some(id) = plan_ids.get(index as usize) {
+                    delete_degree_plan_ui(&shell, *id);
+                }
+            }),
+        );
     }
     list.connect_row_selected({
         let shell = shell.clone();
@@ -1597,7 +2142,12 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             }
         }
     });
-    side.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    side.append(
+        &gtk::ScrolledWindow::builder()
+            .child(&list)
+            .vexpand(true)
+            .build(),
+    );
     paned.set_start_child(Some(&side));
 
     let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -1606,12 +2156,19 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     main.set_margin_start(18);
     main.set_margin_end(18);
     if snap.id.is_none() {
-        main.append(&dim_label("Import a degree audit “View Plan” PDF, or start an empty plan and add semesters."));
+        main.append(&dim_label(
+            "Import a degree audit “View Plan” PDF, or start an empty plan and add semesters.",
+        ));
         paned.set_end_child(Some(&main));
         return paned.upcast();
     }
     let tools = wrapping_box();
-    for (label, which) in [("Add semester", 0), ("Export PDF", 1), ("Autofill", 2), ("Load requirements", 3)] {
+    for (label, which) in [
+        ("Add semester", 0),
+        ("Export PDF", 1),
+        ("Autofill", 2),
+        ("Load requirements", 3),
+    ] {
         let button = gtk::Button::with_label(label);
         let shell = shell.clone();
         button.connect_clicked(move |_| match which {
@@ -1637,7 +2194,9 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     }
     let catalog = adw::PreferencesGroup::new();
     catalog.set_title("Catalog");
-    catalog.set_description(Some("A path from the university catalog, used when you load requirements."));
+    catalog.set_description(Some(
+        "A path from the university catalog, used when you load requirements.",
+    ));
     let path = adw::EntryRow::new();
     path.set_title("Path");
     path.set_text(&snap.catalog_path);
@@ -1662,7 +2221,9 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     main.append(&gap::petition_section(shell));
     main.append(&heading_label("Semesters"));
     main.append(&gap::semester_section(shell));
-    let add = gtk::Entry::builder().placeholder_text("Add CS 3000 to the last semester").build();
+    let add = gtk::Entry::builder()
+        .placeholder_text("Add CS 3000 to the last semester")
+        .build();
     add.connect_activate({
         let shell = shell.clone();
         move |entry| {
@@ -1675,7 +2236,12 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     clamp.set_maximum_size(880);
     clamp.set_tightening_threshold(520);
     clamp.set_child(Some(&main));
-    paned.set_end_child(Some(&gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build()));
+    paned.set_end_child(Some(
+        &gtk::ScrolledWindow::builder()
+            .child(&clamp)
+            .vexpand(true)
+            .build(),
+    ));
     paned.upcast()
 }
 
@@ -1692,49 +2258,114 @@ struct DegreeSnap {
 fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
     let shell_ref = shell.borrow();
     let state = shell_ref.state.borrow();
-    let plans = state.data.degree_plans.iter().map(|p| (p.id, p.name.clone())).collect::<Vec<_>>();
-    let id = state.degree.filter(|id| state.data.degree_plans.iter().any(|p| p.id == *id)).or_else(|| state.data.degree_plans.first().map(|p| p.id));
+    let plans = state
+        .data
+        .degree_plans
+        .iter()
+        .map(|p| (p.id, p.name.clone()))
+        .collect::<Vec<_>>();
+    let id = active_degree_id(&state);
     let Some(plan) = id.and_then(|id| state.data.degree_plans.iter().find(|p| p.id == id)) else {
-        return DegreeSnap { plans, id: None, title: String::new(), totals: String::new(), checks: vec![], audit: vec![], catalog_path: state.catalog_path.clone() };
+        return DegreeSnap {
+            plans,
+            id: None,
+            title: String::new(),
+            totals: String::new(),
+            checks: vec![],
+            audit: vec![],
+            catalog_path: state.catalog_path.clone(),
+        };
     };
     let mut checks = Vec::new();
-    let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(&CourseEquivalences::from_declarations(&plan.course_equivalences));
+    let equivalences = CourseEquivalences::from_cross_listed(&state.index).merging(
+        &CourseEquivalences::from_declarations(&plan.course_equivalences),
+    );
     let dupes = planlogic::duplicate_keys(plan);
     if !dupes.is_empty() {
-        checks.push(format!("Listed more than once: {}", dupes.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")));
+        checks.push(format!(
+            "Listed more than once: {}",
+            dupes
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     for (index, term) in plan.terms.iter().enumerate() {
         for course in &term.courses {
             let Some(key) = &course.key else { continue };
-            let lookup = |key: &CourseKey| state.course_notes.get(key).map(|info| info.prerequisites.clone());
-            let status = planlogic::prerequisite_status(key, index, plan, Some(&state.index), Some(&lookup), &equivalences);
+            let lookup = |key: &CourseKey| {
+                state
+                    .course_notes
+                    .get(key)
+                    .map(|info| info.prerequisites.clone())
+            };
+            let status = planlogic::prerequisite_status(
+                key,
+                index,
+                plan,
+                Some(&state.index),
+                Some(&lookup),
+                &equivalences,
+            );
             if let PrereqStatus::Missing(text) = status {
-                checks.push(format!("{} in {} is missing {text}", key, term.short_name()));
+                checks.push(format!(
+                    "{} in {} is missing {text}",
+                    key,
+                    term.short_name()
+                ));
             }
         }
     }
     let mut audit_lines = Vec::new();
     if let Some(requirements) = state.requirements.get(&plan.id) {
-        let audit = DegreeAudit::run(plan, requirements, &equivalences, &DegreeCourseAttributes::none());
-        audit_lines.push(format!("{}/{} requirements met · {:.0} completed hours, {:.0} planned", audit.satisfied_count(), audit.total_count(), audit.completed_hours, audit.planned_hours));
+        let audit = DegreeAudit::run(
+            plan,
+            requirements,
+            &equivalences,
+            &DegreeCourseAttributes::none(),
+        );
+        audit_lines.push(format!(
+            "{}/{} requirements met · {:.0} completed hours, {:.0} planned",
+            audit.satisfied_count(),
+            audit.total_count(),
+            audit.completed_hours,
+            audit.planned_hours
+        ));
         if let Some(hours) = audit.required_hours {
             audit_lines.push(format!("Catalog asks for {hours:.0} total semester hours"));
         }
-        for rule in audit.rule_results().into_iter().filter(|r| r.status == AuditStatus::Missing || r.status == AuditStatus::Partial).take(8) {
+        for rule in audit
+            .rule_results()
+            .into_iter()
+            .filter(|r| r.status == AuditStatus::Missing || r.status == AuditStatus::Partial)
+            .take(8)
+        {
             audit_lines.push(format!("{:?} · {}", rule.status, rule.rule.label));
         }
         for note in audit.note_checks.iter().take(4) {
             audit_lines.push(format!("{:?} · {}", note.status, note.note));
         }
         for sub in audit.unmatched_substitutions.iter().take(4) {
-            audit_lines.push(format!("Petition not matched: {}", if sub.rule_title.is_empty() { &sub.rule_id } else { &sub.rule_title }));
+            audit_lines.push(format!(
+                "Petition not matched: {}",
+                if sub.rule_title.is_empty() {
+                    &sub.rule_id
+                } else {
+                    &sub.rule_title
+                }
+            ));
         }
     }
     DegreeSnap {
         plans,
         id: Some(plan.id),
         title: plan.name.clone(),
-        totals: format!("{:.1} completed · {:.1} planned", plan.completed_credits(), plan.planned_credits()),
+        totals: format!(
+            "{:.1} completed · {:.1} planned",
+            plan.completed_credits(),
+            plan.planned_credits()
+        ),
         checks,
         audit: audit_lines,
         catalog_path: state.catalog_path.clone(),
@@ -1745,18 +2376,32 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let rows = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
+        let now = now_secs();
         state
             .data
             .watchlist
             .iter()
             .map(|w| {
-                let live = state.index.section_crn(&w.crn);
-                let seats = live.map(|s| s.seats_label()).unwrap_or_else(|| format!("{} seats last time", w.last_seats_remaining));
-                (w.crn.clone(), w.course_key.clone(), format!("{} · {}", w.course_key, w.course_title), seats, w.notify_on_waitlist)
+                let missing = state.missing_watch.contains(&w.id());
+                (
+                    w.crn.clone(),
+                    w.course_key.clone(),
+                    format!("{} · {}", w.course_key, w.course_title),
+                    watchlist::row_line(w, missing, now),
+                    w.notify_on_waitlist,
+                )
             })
             .collect::<Vec<_>>()
     };
     let root = page_column("Watchlist", "Seat alerts run while Term Organize is open, and termorganize --seat-watch can run from a timer.");
+    let check = gtk::Button::with_label("Check seats");
+    check.add_css_class("suggested-action");
+    check.set_halign(gtk::Align::Start);
+    check.connect_clicked({
+        let shell = shell.clone();
+        move |_| check_seats(&shell)
+    });
+    root.append(&check);
     if rows.is_empty() {
         let status = adw::StatusPage::new();
         status.set_icon_name(Some("alarm-symbolic"));
@@ -1770,7 +2415,11 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     list.set_activate_on_single_click(false);
-    let watched: Rc<Vec<(String, CourseKey)>> = Rc::new(rows.iter().map(|(crn, key, _, _, _)| (crn.clone(), key.clone())).collect());
+    let watched: Rc<Vec<(String, CourseKey)>> = Rc::new(
+        rows.iter()
+            .map(|(crn, key, _, _, _)| (crn.clone(), key.clone()))
+            .collect(),
+    );
     for (crn, key, title, seats, wait) in rows {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_top(8);
@@ -1779,7 +2428,12 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         row.set_margin_end(12);
         let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
         text.set_hexpand(true);
-        text.append(&gtk::Label::builder().label(format!("CRN {crn} · {title}")).xalign(0.0).build());
+        text.append(
+            &gtk::Label::builder()
+                .label(format!("CRN {crn} · {title}"))
+                .xalign(0.0)
+                .build(),
+        );
         text.append(&dim_label(&seats));
         row.append(&text);
         let toggle = gtk::CheckButton::with_label("Waitlist");
@@ -1833,7 +2487,12 @@ fn watch_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             }
         })
     });
-    root.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    root.append(
+        &gtk::ScrolledWindow::builder()
+            .child(&list)
+            .vexpand(true)
+            .build(),
+    );
     root.upcast()
 }
 
@@ -1853,8 +2512,17 @@ fn hour_span(blocks: &[WeekBlock], start_hour: i32, end_hour: i32) -> (i32, i32)
     if blocks.is_empty() {
         return (start_hour, end_hour.max(start_hour + 1));
     }
-    let min_start = blocks.iter().map(|block| block.start).min().unwrap_or(start_hour * 60) / 60;
-    let max_end_min = blocks.iter().map(|block| block.end).max().unwrap_or(end_hour * 60);
+    let min_start = blocks
+        .iter()
+        .map(|block| block.start)
+        .min()
+        .unwrap_or(start_hour * 60)
+        / 60;
+    let max_end_min = blocks
+        .iter()
+        .map(|block| block.end)
+        .max()
+        .unwrap_or(end_hour * 60);
     let max_end = (max_end_min + 59) / 60;
     let lower = start_hour.min(min_start).clamp(0, 23);
     let upper = end_hour.max(max_end).max(lower + 1).clamp(lower + 1, 24);
@@ -1868,10 +2536,21 @@ struct WeekView {
     end_hour: i32,
 }
 
-fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBlock], view: &WeekView) {
+fn draw_week(
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    blocks: &[WeekBlock],
+    view: &WeekView,
+) {
     let width = width as f64;
     let height = height as f64;
-    let WeekView { dark, show_weekends, start_hour, end_hour } = *view;
+    let WeekView {
+        dark,
+        show_weekends,
+        start_hour,
+        end_hour,
+    } = *view;
     if dark {
         cr.set_source_rgb(0.12, 0.12, 0.14);
     } else {
@@ -1905,12 +2584,24 @@ fn draw_week(cr: &gtk::cairo::Context, width: i32, height: i32, blocks: &[WeekBl
         cr.move_to(x + 6.0, 18.0);
         let _ = cr.show_text(DaySet::SHORT[*day as usize]);
     }
-    let palette = [(0.20, 0.45, 0.75), (0.15, 0.55, 0.40), (0.75, 0.40, 0.20), (0.55, 0.30, 0.65), (0.70, 0.25, 0.35), (0.20, 0.55, 0.60), (0.55, 0.50, 0.15), (0.35, 0.35, 0.40)];
+    let palette = [
+        (0.20, 0.45, 0.75),
+        (0.15, 0.55, 0.40),
+        (0.75, 0.40, 0.20),
+        (0.55, 0.30, 0.65),
+        (0.70, 0.25, 0.35),
+        (0.20, 0.55, 0.60),
+        (0.55, 0.50, 0.15),
+        (0.35, 0.35, 0.40),
+    ];
     for block in blocks {
-        let Some(index) = days.iter().position(|day| *day == block.day) else { continue };
+        let Some(index) = days.iter().position(|day| *day == block.day) else {
+            continue;
+        };
         let x = left + index as f64 * col + 3.0;
         let y = header + (block.start - start).max(0) as f64 / span * (height - header - 8.0);
-        let h = ((block.end - block.start).max(20) as f64 / span * (height - header - 8.0)).max(16.0);
+        let h =
+            ((block.end - block.start).max(20) as f64 / span * (height - header - 8.0)).max(16.0);
         let (r, g, b) = palette[block.color % palette.len()];
         cr.set_source_rgba(r, g, b, 0.9);
         cr.rectangle(x, y, col - 6.0, h);
@@ -2063,7 +2754,11 @@ fn install_proportional_pane(paned: &gtk::Paned, default_share: f64) {
             tries.set(tries.get() + 1);
             let width = paned.width();
             if width < 200 {
-                return if tries.get() < 8 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break };
+                return if tries.get() < 8 {
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                };
             }
             applying.set(true);
             paned.set_position((width as f64 * share.get()).round() as i32);
@@ -2137,7 +2832,9 @@ fn attach_context_menu(widget: &impl IsA<gtk::Widget>, entries: Vec<MenuAction>)
     let entries = Rc::new(entries);
     click.connect_pressed(move |gesture, _, x, y| {
         let _ = gesture.set_state(gtk::EventSequenceState::Claimed);
-        let Some(widget) = gesture.widget() else { return };
+        let Some(widget) = gesture.widget() else {
+            return;
+        };
         show_context_menu(&widget, x, y, &entries);
     });
     widget.add_controller(click);
@@ -2174,7 +2871,10 @@ fn show_context_menu(widget: &impl IsA<gtk::Widget>, x: f64, y: f64, entries: &[
 fn attach_delete_key(list: &gtk::ListBox, on_delete: Rc<dyn Fn(i32)>) {
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(move |controller, key, _, _| {
-        if !matches!(key, gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete | gtk::gdk::Key::BackSpace) {
+        if !matches!(
+            key,
+            gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete | gtk::gdk::Key::BackSpace
+        ) {
             return glib::Propagation::Proceed;
         }
         let Some(widget) = controller.widget() else {
@@ -2204,7 +2904,11 @@ fn column_headers(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_margin_start(12);
     row.set_margin_top(4);
-    for (label, sort) in [("Code", SearchSort::CourseNumber), ("Title", SearchSort::Title), ("Open seats", SearchSort::OpenSeats)] {
+    for (label, sort) in [
+        ("Code", SearchSort::CourseNumber),
+        ("Title", SearchSort::Title),
+        ("Open seats", SearchSort::OpenSeats),
+    ] {
         let button = gtk::Button::with_label(label);
         button.add_css_class("flat");
         button.set_tooltip_text(Some("Sort this column"));
@@ -2221,22 +2925,38 @@ fn column_headers(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 }
 
 fn attach_schedule_drop(widget: &impl IsA<gtk::Widget>, shell: &Rc<RefCell<Shell>>) {
-    let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+    let target = gtk::DropTarget::new(
+        glib::Type::STRING,
+        gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+    );
     target.connect_drop({
         let shell = shell.clone();
         move |_, value, _, _| {
-            let Ok(text) = value.get::<String>() else { return false };
+            let Ok(text) = value.get::<String>() else {
+                return false;
+            };
             if let Some(raw) = text.strip_prefix("key:") {
-                let Some(key) = CourseKey::parse(raw) else { return false };
+                let Some(key) = CourseKey::parse(raw) else {
+                    return false;
+                };
                 add_course_to_plan(&shell, &key);
                 return true;
             }
             if let Some(raw) = text.strip_prefix("id:") {
-                let Some(id) = Uuid::parse_str(raw).ok() else { return false };
+                let Some(id) = Uuid::parse_str(raw).ok() else {
+                    return false;
+                };
                 let key = {
                     let shell_ref = shell.borrow();
                     let state = shell_ref.state.borrow();
-                    state.data.degree_plans.iter().flat_map(|plan| plan.terms.iter()).flat_map(|term| term.courses.iter()).find(|course| course.id == id).and_then(|course| course.key.clone())
+                    state
+                        .data
+                        .degree_plans
+                        .iter()
+                        .flat_map(|plan| plan.terms.iter())
+                        .flat_map(|term| term.courses.iter())
+                        .find(|course| course.id == id)
+                        .and_then(|course| course.key.clone())
                 };
                 let Some(key) = key else { return false };
                 add_course_to_plan(&shell, &key);
@@ -2255,7 +2975,16 @@ fn new_schedule(shell: &Rc<RefCell<Shell>>) {
         let term = state.index.catalog.term.code.clone();
         let plan = SchedulePlan {
             id: Uuid::new_v4(),
-            name: format!("Schedule {}", state.data.plans.iter().filter(|p| p.term_code == term).count() + 1),
+            name: format!(
+                "Schedule {}",
+                state
+                    .data
+                    .plans
+                    .iter()
+                    .filter(|p| p.term_code == term)
+                    .count()
+                    + 1
+            ),
             term_code: term,
             courses: vec![],
             selected_crns: vec![],
@@ -2287,7 +3016,10 @@ fn new_degree(shell: &Rc<RefCell<Shell>>) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let id = state.data.add_degree_plan(DegreePlan { name, ..DegreePlan::default() });
+        let id = state.data.add_degree_plan(DegreePlan {
+            name,
+            ..DegreePlan::default()
+        });
         state.degree = Some(id);
         state.area = 6;
         persist(&state.data);
@@ -2326,7 +3058,12 @@ fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
             if !plan.contains(key) {
                 let color = plan.next_color_index();
-                plan.courses.push(PlanCourse { key: key.clone(), is_required: true, excluded_crns: HashSet::new(), color_index: color });
+                plan.courses.push(PlanCourse {
+                    key: key.clone(),
+                    is_required: true,
+                    excluded_crns: HashSet::new(),
+                    color_index: color,
+                });
                 plan.updated_at = now_secs();
             }
         }
@@ -2340,7 +3077,9 @@ fn remove_plan_course(shell: &Rc<RefCell<Shell>>, key: &str) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let Some(id) = current_plan_id(&state) else { return };
+        let Some(id) = current_plan_id(&state) else {
+            return;
+        };
         if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
             plan.courses.retain(|c| c.key.to_string() != key);
             plan.updated_at = now_secs();
@@ -2355,12 +3094,26 @@ fn delete_schedule(shell: &Rc<RefCell<Shell>>, id: Uuid) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let term = state.data.plans.iter().find(|plan| plan.id == id).map(|plan| plan.term_code.clone());
-        let was_primary = state.data.plans.iter().any(|plan| plan.id == id && plan.is_primary);
+        let term = state
+            .data
+            .plans
+            .iter()
+            .find(|plan| plan.id == id)
+            .map(|plan| plan.term_code.clone());
+        let was_primary = state
+            .data
+            .plans
+            .iter()
+            .any(|plan| plan.id == id && plan.is_primary);
         state.data.plans.retain(|plan| plan.id != id);
         if was_primary {
             if let Some(term) = term {
-                if let Some(plan) = state.data.plans.iter_mut().find(|plan| plan.term_code == term) {
+                if let Some(plan) = state
+                    .data
+                    .plans
+                    .iter_mut()
+                    .find(|plan| plan.term_code == term)
+                {
                     plan.is_primary = true;
                 }
             }
@@ -2391,8 +3144,20 @@ fn remove_degree_course(shell: &Rc<RefCell<Shell>>, id: Uuid) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let Some(plan_id) = state.degree.or_else(|| state.data.degree_plans.first().map(|plan| plan.id)) else { return };
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|plan| plan.id == plan_id) else { return };
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return;
+        };
         plan.completed.retain(|course| course.id != id);
         for term in &mut plan.terms {
             term.courses.retain(|course| course.id != id);
@@ -2408,7 +3173,10 @@ fn unsave_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         let term = state.index.catalog.term.code.clone();
-        state.data.saved.retain(|saved| !(saved.term_code == term && saved.key == *key));
+        state
+            .data
+            .saved
+            .retain(|saved| !(saved.term_code == term && saved.key == *key));
         persist(&state.data);
     }
     refresh(shell);
@@ -2426,7 +3194,13 @@ fn generate(shell: &Rc<RefCell<Shell>>) {
         if inputs.is_empty() {
             None
         } else {
-            let result = schedule::generate(&inputs, &filters, &prefs, schedule::ScheduleSort::Best, &schedule::Limits::default());
+            let result = schedule::generate(
+                &inputs,
+                &filters,
+                &prefs,
+                schedule::ScheduleSort::Best,
+                &schedule::Limits::default(),
+            );
             Some((result.schedules, result.total_found, result.diagnostics))
         }
     };
@@ -2468,7 +3242,11 @@ fn apply_nl(shell: &Rc<RefCell<Shell>>, text: &str) {
                 state.nl = text.to_string();
                 state.generated.clear();
             }
-            if note.is_empty() { "Preferences updated".into() } else { note }
+            if note.is_empty() {
+                "Preferences updated".into()
+            } else {
+                note
+            }
         }
         Err(error) => error.message().to_string(),
     };
@@ -2480,7 +3258,11 @@ fn copy_crns(shell: &Rc<RefCell<Shell>>) {
     let text = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        state.generated.get(state.picked).map(|g| schedule::copy_crns(&g.sections)).unwrap_or_default()
+        state
+            .generated
+            .get(state.picked)
+            .map(|g| schedule::copy_crns(&g.sections))
+            .unwrap_or_default()
     };
     if text.is_empty() {
         toast(shell, "Generate a schedule first");
@@ -2495,10 +3277,24 @@ fn export_ics(shell: &Rc<RefCell<Shell>>) {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
         let Some(schedule) = state.generated.get(state.picked) else {
+            drop(state);
+            drop(shell_ref);
+            toast(shell, "Generate a schedule first");
             return;
         };
-        let id = current_plan_id(&state).map(|id| id.to_string()).unwrap_or_else(|| "plan".into());
-        let name = current_plan_id(&state).and_then(|id| state.data.plans.iter().find(|p| p.id == id).map(|p| p.name.clone())).unwrap_or_else(|| "Schedule".into());
+        let id = current_plan_id(&state)
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "plan".into());
+        let name = current_plan_id(&state)
+            .and_then(|id| {
+                state
+                    .data
+                    .plans
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+            })
+            .unwrap_or_else(|| "Schedule".into());
         (schedule::ics(&id, &name, &schedule.sections), name)
     };
     save_text(shell, &format!("{name}.ics"), &body, "Calendar saved");
@@ -2508,7 +3304,10 @@ fn export_png(shell: &Rc<RefCell<Shell>>) {
     let bytes = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        state.generated.get(state.picked).map(|schedule| schedule::week_png(&schedule.sections))
+        state
+            .generated
+            .get(state.picked)
+            .map(|schedule| schedule::week_png(&schedule.sections))
     };
     let Some(bytes) = bytes else {
         toast(shell, "Generate a schedule first");
@@ -2521,10 +3320,17 @@ fn export_pdf(shell: &Rc<RefCell<Shell>>) {
     let (bytes, name) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let Some(id) = state.degree.or_else(|| state.data.degree_plans.first().map(|p| p.id)) else { return };
-        let Some(plan) = state.data.degree_plans.iter().find(|p| p.id == id) else { return };
+        let Some(id) = active_degree_id(&state) else {
+            return;
+        };
+        let Some(plan) = state.data.degree_plans.iter().find(|p| p.id == id) else {
+            return;
+        };
         let include = state.data.preferences.include_student_in_export;
-        (degree_format::pdf(plan, degree_format::now_unix(), include), format!("{}.pdf", plan.name))
+        (
+            degree_format::pdf(plan, degree_format::now_unix(), include),
+            format!("{}.pdf", plan.name),
+        )
     };
     save_bytes(shell, &name, &bytes, "Degree plan PDF saved");
 }
@@ -2533,7 +3339,10 @@ fn export_user(shell: &Rc<RefCell<Shell>>) {
     let text = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        store::export_json(&state.data, state.data.preferences.include_student_in_export)
+        store::export_json(
+            &state.data,
+            state.data.preferences.include_student_in_export,
+        )
     };
     save_text(shell, "term-organize.json", &text, "Data exported");
 }
@@ -2542,9 +3351,14 @@ fn add_semester(shell: &Rc<RefCell<Shell>>) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let Some(id) = state.degree.or_else(|| state.data.degree_plans.first().map(|p| p.id)) else { return };
+        let Some(id) = active_degree_id(&state) else {
+            return;
+        };
         if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
-            if let Some(next) = planlogic::next_semesters(plan, 1, 2026, 10).into_iter().next() {
+            if let Some(next) = planlogic::next_semesters(plan, 1, 2026, 10)
+                .into_iter()
+                .next()
+            {
                 plan.terms.push(next);
                 plan.sort_terms();
             }
@@ -2562,15 +3376,28 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let title = state.index.course(&key).map(|c| c.title.clone()).unwrap_or_else(|| key.to_string());
-        let credits = state.index.course(&key).map(|c| c.max_credits).unwrap_or(4.0);
-        let Some(id) = state.degree else { return };
+        let title = state
+            .index
+            .course(&key)
+            .map(|c| c.title.clone())
+            .unwrap_or_else(|| key.to_string());
+        let credits = state
+            .index
+            .course(&key)
+            .map(|c| c.max_credits)
+            .unwrap_or(4.0);
+        let Some(id) = active_degree_id(&state) else {
+            return;
+        };
+        state.degree = Some(id);
         if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
             if plan.terms.is_empty() {
                 plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
             }
             let last = plan.terms.len() - 1;
-            plan.terms[last].courses.push(DegreePlanCourse::catalog(key, title, credits));
+            plan.terms[last]
+                .courses
+                .push(DegreePlanCourse::catalog(key, title, credits));
         }
         persist(&state.data);
     }
@@ -2581,18 +3408,29 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
     let added = {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let Some(id) = state.degree else { return };
+        let Some(id) = active_degree_id(&state) else {
+            return;
+        };
+        state.degree = Some(id);
         let requirements = state.requirements.get(&id).cloned();
-        let index_courses: HashSet<CourseKey> = state.index.courses.iter().map(|c| c.key()).collect();
+        let index_courses: HashSet<CourseKey> =
+            state.index.courses.iter().map(|c| c.key()).collect();
         let year = state.index.catalog.term.calendar_year();
-        let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) else { return };
+        let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
         let mut have: HashSet<CourseKey> = plan.completed_keys().into_iter().collect();
         for term in &plan.terms {
             have.extend(term.courses.iter().filter_map(|c| c.key.clone()));
         }
         let mut missing = Vec::new();
         if let Some(requirements) = requirements {
-            let audit = DegreeAudit::run(plan, &requirements, &CourseEquivalences::none(), &DegreeCourseAttributes::none());
+            let audit = DegreeAudit::run(
+                plan,
+                &requirements,
+                &CourseEquivalences::none(),
+                &DegreeCourseAttributes::none(),
+            );
             for rule in audit.rule_results() {
                 if rule.status.is_satisfied() {
                     continue;
@@ -2613,12 +3451,17 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
         let last = plan.terms.len() - 1;
         for key in missing {
             let title = key.to_string();
-            plan.terms[last].courses.push(DegreePlanCourse::catalog(key, title, 4.0));
+            plan.terms[last]
+                .courses
+                .push(DegreePlanCourse::catalog(key, title, 4.0));
         }
         persist(&state.data);
         n
     };
-    toast(shell, &format!("Added {added} courses the audit still needs"));
+    toast(
+        shell,
+        &format!("Added {added} courses the audit still needs"),
+    );
     refresh(shell);
 }
 
@@ -2627,11 +3470,18 @@ fn autofill_schedule(shell: &Rc<RefCell<Shell>>) {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
         let term = state.index.catalog.term.clone();
-        planlogic::schedule_suggestions(&term, &state.data.degree_plans, &state.data.plans, current_plan_id(&state), &HashSet::new(), Some(&state.index))
-            .into_iter()
-            .next()
-            .map(|s| s.courses)
-            .unwrap_or_default()
+        planlogic::schedule_suggestions(
+            &term,
+            &state.data.degree_plans,
+            &state.data.plans,
+            current_plan_id(&state),
+            &HashSet::new(),
+            Some(&state.index),
+        )
+        .into_iter()
+        .next()
+        .map(|s| s.courses)
+        .unwrap_or_default()
     };
     if keys.is_empty() {
         toast(shell, "No degree-plan courses to add for this term");
@@ -2647,47 +3497,66 @@ fn load_requirements(shell: &Rc<RefCell<Shell>>) {
     let (path, id) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        (state.catalog_path.clone(), state.degree)
+        let id = active_degree_id(&state);
+        (state.catalog_path.clone(), id)
     };
     let Some(id) = id else {
         toast(shell, "Open a degree plan first");
         return;
     };
+    shell.borrow().state.borrow_mut().degree = Some(id);
     toast(shell, "Loading the catalog page…");
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     std::thread::spawn(move || {
-        let client = BannerClient { base: "https://catalog.northeastern.edu".into() };
+        let client = BannerClient {
+            base: "https://catalog.northeastern.edu".into(),
+        };
         let _ = tx.send(client.get(&path));
     });
     let shell = shell.clone();
-    glib::timeout_add_local(Duration::from_millis(200), move || {
-        match rx.try_recv() {
-            Ok(Ok(html)) => {
-                let year = CatalogYear::containing(2026, 10);
-                let program = CatalogProgram { title: "Imported program".into(), path: shell.borrow().state.borrow().catalog_path.clone() };
-                match program_parser::requirements_from_html(&html, year, program) {
-                    Some(requirements) => {
-                        shell.borrow().state.borrow_mut().requirements.insert(id, requirements.clone());
-                        let _ = save_requirements(id, &requirements);
-                        toast(&shell, &format!("{} sections of requirements", requirements.sections.len()));
-                        refresh(&shell);
-                    }
-                    None => toast(&shell, "That page didn’t contain a requirements table"),
+    glib::timeout_add_local(Duration::from_millis(200), move || match rx.try_recv() {
+        Ok(Ok(html)) => {
+            let year = CatalogYear::containing(2026, 10);
+            let program = CatalogProgram {
+                title: "Imported program".into(),
+                path: shell.borrow().state.borrow().catalog_path.clone(),
+            };
+            match program_parser::requirements_from_html(&html, year, program) {
+                Some(requirements) => {
+                    shell
+                        .borrow()
+                        .state
+                        .borrow_mut()
+                        .requirements
+                        .insert(id, requirements.clone());
+                    let _ = save_requirements(id, &requirements);
+                    toast(
+                        &shell,
+                        &format!("{} sections of requirements", requirements.sections.len()),
+                    );
+                    refresh(&shell);
                 }
-                glib::ControlFlow::Break
+                None => toast(&shell, "That page didn’t contain a requirements table"),
             }
-            Ok(Err(error)) => {
-                toast(&shell, &format!("Catalog unreachable ({error}). Open a saved HTML file instead."));
-                glib::ControlFlow::Break
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            glib::ControlFlow::Break
         }
+        Ok(Err(error)) => {
+            toast(
+                &shell,
+                &format!("Catalog unreachable ({error}). Open a saved HTML file instead."),
+            );
+            glib::ControlFlow::Break
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
     });
 }
 
 fn import_degree(shell: &Rc<RefCell<Shell>>) {
-    let dialog = gtk::FileDialog::builder().title("Import a degree audit PDF").accept_label("Import").build();
+    let dialog = gtk::FileDialog::builder()
+        .title("Import a degree audit PDF")
+        .accept_label("Import")
+        .build();
     let filter = gtk::FileFilter::new();
     filter.add_mime_type("application/pdf");
     filter.add_pattern("*.pdf");
@@ -2719,13 +3588,18 @@ fn import_degree(shell: &Rc<RefCell<Shell>>) {
 }
 
 fn import_pdf(path: &std::path::Path) -> Result<DegreePlan, String> {
-    let output = std::process::Command::new("pdftotext").args(["-layout", "-nopgbrk", path.to_str().unwrap_or(""), "-"]).output().map_err(|e| e.to_string())?;
+    let output = std::process::Command::new("pdftotext")
+        .args(["-layout", "-nopgbrk", path.to_str().unwrap_or(""), "-"])
+        .output()
+        .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     let name = path.file_name().and_then(|s| s.to_str());
-    degree_format::parse(&text, name).map(|r| r.plan).map_err(|e| e.to_string())
+    degree_format::parse(&text, name)
+        .map(|r| r.plan)
+        .map_err(|e| e.to_string())
 }
 
 fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
@@ -2733,8 +3607,17 @@ fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         let term = state.index.catalog.term.code.clone();
-        if !state.data.saved.iter().any(|s| s.term_code == term && s.key == *key) {
-            state.data.saved.push(SavedCourse { term_code: term, key: key.clone(), saved_at: now_secs() });
+        if !state
+            .data
+            .saved
+            .iter()
+            .any(|s| s.term_code == term && s.key == *key)
+        {
+            state.data.saved.push(SavedCourse {
+                term_code: term,
+                key: key.clone(),
+                saved_at: now_secs(),
+            });
             persist(&state.data);
         }
     }
@@ -2745,8 +3628,18 @@ fn remember_recent(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     let shell = shell.borrow();
     let mut state = shell.state.borrow_mut();
     let term = state.index.catalog.term.code.clone();
-    state.data.recents.retain(|r| !(r.term_code == term && r.key == *key));
-    state.data.recents.insert(0, RecentCourse { term_code: term, key: key.clone(), viewed_at: now_secs() });
+    state
+        .data
+        .recents
+        .retain(|r| !(r.term_code == term && r.key == *key));
+    state.data.recents.insert(
+        0,
+        RecentCourse {
+            term_code: term,
+            key: key.clone(),
+            viewed_at: now_secs(),
+        },
+    );
     state.data.recents.truncate(40);
     persist(&state.data);
 }
@@ -2756,7 +3649,11 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
         let shell = shell.borrow();
         let state = shell.state.borrow();
         let term = &state.index.catalog.term.code;
-        state.data.watchlist.iter().any(|w| &w.term_code == term && w.crn == section.crn)
+        state
+            .data
+            .watchlist
+            .iter()
+            .any(|w| &w.term_code == term && w.crn == section.crn)
     };
     if already {
         toast(shell, "Already watched");
@@ -2808,12 +3705,20 @@ fn remove_watch(shell: &Rc<RefCell<Shell>>, crn: &str) {
 
 fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
     match link {
-        AppLink::Course { subject, number, .. } => {
+        AppLink::Course {
+            subject, number, ..
+        } => {
             let key = CourseKey { subject, number };
             gap::open_course_window(shell, &key);
         }
         AppLink::Section { crn, .. } => {
-            let key = shell.borrow().state.borrow().index.section_crn(&crn).map(|s| s.course_key());
+            let key = shell
+                .borrow()
+                .state
+                .borrow()
+                .index
+                .section_crn(&crn)
+                .map(|s| s.course_key());
             if let Some(key) = key {
                 gap::open_course_window(shell, &key);
             }
@@ -2848,8 +3753,20 @@ fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
                 }
             } else if let Ok(html) = std::fs::read_to_string(&path) {
                 if let Some(id) = shell.borrow().state.borrow().degree {
-                    if let Some(requirements) = program_parser::requirements_from_html(&html, CatalogYear::containing(2026, 10), CatalogProgram { title: "File".into(), path }) {
-                        shell.borrow().state.borrow_mut().requirements.insert(id, requirements);
+                    if let Some(requirements) = program_parser::requirements_from_html(
+                        &html,
+                        CatalogYear::containing(2026, 10),
+                        CatalogProgram {
+                            title: "File".into(),
+                            path,
+                        },
+                    ) {
+                        shell
+                            .borrow()
+                            .state
+                            .borrow_mut()
+                            .requirements
+                            .insert(id, requirements);
                     }
                 }
             }
@@ -2870,8 +3787,20 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
     appearance.set_title("Appearance");
     let scheme = adw::ComboRow::new();
     scheme.set_title("Color scheme");
-    scheme.set_model(Some(&gtk::StringList::new(&["Follow system", "Light", "Dark"])));
-    let current = shell.borrow().state.borrow().data.preferences.color_scheme.clone().unwrap_or_else(|| "default".into());
+    scheme.set_model(Some(&gtk::StringList::new(&[
+        "Follow system",
+        "Light",
+        "Dark",
+    ])));
+    let current = shell
+        .borrow()
+        .state
+        .borrow()
+        .data
+        .preferences
+        .color_scheme
+        .clone()
+        .unwrap_or_else(|| "default".into());
     scheme.set_selected(match current.as_str() {
         "light" => 1,
         "dark" => 2,
@@ -2912,10 +3841,42 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
 
     let alerts = adw::PreferencesGroup::new();
     alerts.set_title("Notifications");
-    alerts.set_description(Some("Seat checks use the sections in the bundled snapshot unless a later refresh replaces them."));
+    alerts.set_description(Some(
+        "Check seats asks Banner for the sections you are watching. The timer does the same when automatic checks are on.",
+    ));
+    let auto = adw::SwitchRow::new();
+    auto.set_title("Check watched sections automatically");
+    auto.set_subtitle("Uses the interval below while Term Organize is open");
+    auto.set_active(
+        shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .auto_refresh_seats,
+    );
+    auto.connect_active_notify({
+        let shell = shell.clone();
+        move |row| {
+            let shell = shell.borrow();
+            let mut state = shell.state.borrow_mut();
+            state.data.preferences.auto_refresh_seats = row.is_active();
+            persist(&state.data);
+        }
+    });
+    alerts.add(&auto);
     let minutes = adw::SpinRow::with_range(5.0, 120.0, 5.0);
     minutes.set_title("Minutes between seat checks");
-    minutes.set_value(shell.borrow().state.borrow().data.preferences.seat_check_minutes as f64);
+    minutes.set_value(
+        shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .seat_check_minutes as f64,
+    );
     minutes.connect_changed({
         let shell = shell.clone();
         move |row| {
@@ -2934,7 +3895,15 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
     let include = adw::SwitchRow::new();
     include.set_title("Include student name and ID in exports");
     include.set_subtitle("They still stay off the sync folder");
-    include.set_active(shell.borrow().state.borrow().data.preferences.include_student_in_export);
+    include.set_active(
+        shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .include_student_in_export,
+    );
     include.connect_active_notify({
         let shell = shell.clone();
         move |row| {
@@ -2947,7 +3916,15 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
     data_group.add(&include);
     let sync_on = adw::SwitchRow::new();
     sync_on.set_title("Sync with a folder");
-    sync_on.set_active(shell.borrow().state.borrow().data.preferences.folder_sync_enabled);
+    sync_on.set_active(
+        shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .folder_sync_enabled,
+    );
     sync_on.connect_active_notify({
         let shell = shell.clone();
         move |row| {
@@ -2960,14 +3937,25 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
     data_group.add(&sync_on);
     let path_row = adw::EntryRow::new();
     path_row.set_title("Folder");
-    path_row.set_text(&shell.borrow().state.borrow().data.preferences.folder_sync_path.clone().unwrap_or_default());
+    path_row.set_text(
+        &shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .folder_sync_path
+            .clone()
+            .unwrap_or_default(),
+    );
     path_row.connect_changed({
         let shell = shell.clone();
         move |row| {
             let text = row.text().trim().to_string();
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
-            state.data.preferences.folder_sync_path = if text.is_empty() { None } else { Some(text) };
+            state.data.preferences.folder_sync_path =
+                if text.is_empty() { None } else { Some(text) };
             persist(&state.data);
         }
     });
@@ -3016,7 +4004,12 @@ fn open_about(shell: &Rc<RefCell<Shell>>) {
         .license_type(gtk::License::Agpl30Only)
         .website(legal::SOURCE_CODE_URL)
         .developers(vec!["Term Organize contributors"])
-        .comments(format!("{}\n\n{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::source_offer(), legal::SEARCHNEU_SUMMARY))
+        .comments(format!(
+            "{}\n\n{}\n\n{}",
+            legal::UNOFFICIAL_NOTICE,
+            legal::source_offer(),
+            legal::SEARCHNEU_SUMMARY
+        ))
         .build();
     dialog.present();
 }
@@ -3024,7 +4017,11 @@ fn open_about(shell: &Rc<RefCell<Shell>>) {
 fn greet(shell: &Rc<RefCell<Shell>>) {
     let window = shell.borrow().window.clone();
     let dialog = adw::AlertDialog::new(Some("Unofficial"), Some(legal::UNOFFICIAL_NOTICE));
-    dialog.set_body(&format!("{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::DATA_NOTICE));
+    dialog.set_body(&format!(
+        "{}\n\n{}",
+        legal::UNOFFICIAL_NOTICE,
+        legal::DATA_NOTICE
+    ));
     dialog.add_response("ok", "Continue");
     dialog.set_default_response(Some("ok"));
     dialog.set_close_response("ok");
@@ -3039,13 +4036,17 @@ fn greet(shell: &Rc<RefCell<Shell>>) {
 }
 
 fn import_user(shell: &Rc<RefCell<Shell>>) {
-    let dialog = gtk::FileDialog::builder().title("Import Term Organize data").build();
+    let dialog = gtk::FileDialog::builder()
+        .title("Import Term Organize data")
+        .build();
     let shell = shell.clone();
     let window = shell.borrow().window.clone();
     dialog.open(Some(&window), None::<&gio::Cancellable>, move |result| {
         let Ok(file) = result else { return };
         let Some(path) = file.path() else { return };
-        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
         let imported = store::import_json(&text);
         {
             let shell = shell.borrow();
@@ -3061,15 +4062,30 @@ fn import_user(shell: &Rc<RefCell<Shell>>) {
 fn arm_seat_timer(shell: &Rc<RefCell<Shell>>) {
     let shell = shell.clone();
     glib::timeout_add_local(Duration::from_secs(60), move || {
-        let minutes = shell.borrow().state.borrow().data.preferences.seat_check_minutes.max(1) as u64;
+        let minutes = shell
+            .borrow()
+            .state
+            .borrow()
+            .data
+            .preferences
+            .seat_check_minutes
+            .max(1) as u64;
         let due = {
             let shell_ref = shell.borrow();
             let state = shell_ref.state.borrow();
             if !state.data.preferences.auto_refresh_seats {
                 return glib::ControlFlow::Continue;
             }
-            state.data.watchlist.iter().any(|w| w.last_checked_at.unwrap_or(0.0) + minutes as f64 * 60.0 < now_secs())
-                || state.data.watchlist.iter().any(|w| w.last_checked_at.is_none())
+            state
+                .data
+                .watchlist
+                .iter()
+                .any(|w| w.last_checked_at.unwrap_or(0.0) + minutes as f64 * 60.0 < now_secs())
+                || state
+                    .data
+                    .watchlist
+                    .iter()
+                    .any(|w| w.last_checked_at.is_none())
         };
         if due {
             check_seats(&shell);
@@ -3079,21 +4095,111 @@ fn arm_seat_timer(shell: &Rc<RefCell<Shell>>) {
 }
 
 fn check_seats(shell: &Rc<RefCell<Shell>>) {
-    let alerts = {
-        let shell = shell.borrow();
-        let mut state = shell.state.borrow_mut();
-        let term = state.index.catalog.term.code.clone();
-        let mut live = HashMap::new();
-        live.insert(term, state.index.catalog.sections.clone());
-        let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
-        state.data.watchlist = report.items;
-        persist(&state.data);
-        report.alerts
-    };
-    for alert in alerts {
-        let _ = std::process::Command::new("notify-send").args(["--app-name=Term Organize", &alert.title(), &alert.body()]).status();
-        toast(shell, &alert.title());
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
     }
+    let (watched, snapshot, terms) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let watched = state.data.watchlist.clone();
+        if watched.is_empty() {
+            BUSY.store(false, Ordering::SeqCst);
+            drop(state);
+            drop(shell_ref);
+            toast(shell, "Nothing to check");
+            return;
+        }
+        let snapshot = state.index.catalog.sections.clone();
+        let mut terms: Vec<String> = watched.iter().map(|item| item.term_code.clone()).collect();
+        terms.sort();
+        terms.dedup();
+        (watched, snapshot, terms)
+    };
+    toast(shell, "Checking watched sections with Banner…");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = BannerClient::default();
+        let mut live = HashMap::new();
+        let mut error = None;
+        for term in &terms {
+            let items: Vec<_> = watched
+                .iter()
+                .filter(|item| &item.term_code == term)
+                .cloned()
+                .collect();
+            let mut keys: Vec<(String, String)> = items
+                .iter()
+                .map(|item| {
+                    (
+                        item.course_key.subject.clone(),
+                        item.course_key.number.clone(),
+                    )
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let pairs: Vec<(String, CourseKey)> = items
+                .iter()
+                .map(|item| (item.crn.clone(), item.course_key.clone()))
+                .collect();
+            match client.live_seats_for_keys(term, &keys) {
+                Ok(seats) => {
+                    live.insert(
+                        term.clone(),
+                        banner::sections_with_live_seats(&snapshot, &pairs, &seats),
+                    );
+                }
+                Err(message) => error = Some(message),
+            }
+        }
+        let _ = tx.send((live, error));
+    });
+    let shell = shell.clone();
+    glib::timeout_add_local(Duration::from_millis(200), move || match rx.try_recv() {
+        Ok((live, error)) => {
+            BUSY.store(false, Ordering::SeqCst);
+            if live.is_empty() {
+                toast(
+                    &shell,
+                    &format!(
+                        "Banner unreachable ({}). Showing the last check.",
+                        error.unwrap_or_else(|| "no response".into())
+                    ),
+                );
+                return glib::ControlFlow::Break;
+            }
+            let alerts = {
+                let shell_ref = shell.borrow();
+                let mut state = shell_ref.state.borrow_mut();
+                let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
+                state.missing_watch = report.missing_ids.iter().cloned().collect();
+                state.data.watchlist = report.items;
+                persist(&state.data);
+                report.alerts
+            };
+            if let Some(message) = error {
+                toast(
+                    &shell,
+                    &format!("Some terms could not be checked ({message})."),
+                );
+            }
+            for alert in alerts {
+                let _ = std::process::Command::new("notify-send")
+                    .args(["--app-name=Term Organize", &alert.title(), &alert.body()])
+                    .status();
+                toast(&shell, &alert.title());
+            }
+            refresh(&shell);
+            glib::ControlFlow::Break
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            BUSY.store(false, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        }
+    });
 }
 
 fn save_text(shell: &Rc<RefCell<Shell>>, name: &str, body: &str, message: &str) {
@@ -3102,7 +4208,10 @@ fn save_text(shell: &Rc<RefCell<Shell>>, name: &str, body: &str, message: &str) 
 }
 
 fn save_bytes(shell: &Rc<RefCell<Shell>>, name: &str, bytes: &[u8], message: &str) {
-    let dialog = gtk::FileDialog::builder().title("Save").initial_name(name).build();
+    let dialog = gtk::FileDialog::builder()
+        .title("Save")
+        .initial_name(name)
+        .build();
     let shell = shell.clone();
     let window = shell.borrow().window.clone();
     let bytes = bytes.to_vec();
@@ -3132,7 +4241,9 @@ fn pull_folder(data: &mut UserData) {
     if !data.preferences.folder_sync_enabled {
         return;
     }
-    let Some(dir) = data.preferences.folder_sync_path.clone() else { return };
+    let Some(dir) = data.preferences.folder_sync_path.clone() else {
+        return;
+    };
     let remote = PathBuf::from(&dir).join("user.json");
     let local = store::user_path();
     let remote_time = std::fs::metadata(&remote).and_then(|m| m.modified()).ok();
@@ -3173,11 +4284,23 @@ fn save_requirements(id: Uuid, requirements: &ProgramRequirements) -> Result<(),
 
 fn load_saved_requirements(state: &Rc<RefCell<State>>) {
     let dir = requirements_dir();
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut state = state.borrow_mut();
     for entry in entries.flatten() {
-        let Ok(id) = Uuid::parse_str(entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or("")) else { continue };
-        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        let Ok(id) = Uuid::parse_str(
+            entry
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(""),
+        ) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
         if let Ok(requirements) = serde_json::from_str::<ProgramRequirements>(&text) {
             state.requirements.insert(id, requirements);
         }
@@ -3257,7 +4380,11 @@ fn soft_wrap(text: &str, width: usize) -> String {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        let next = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        let next = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
         if current.is_empty() || next <= width {
             if !current.is_empty() {
                 current.push(' ');
@@ -3303,7 +4430,12 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     let campus_refs: Vec<&str> = campuses.iter().map(|s| s.as_str()).collect();
     let campus = gtk::DropDown::from_strings(&campus_refs);
     let selected_campus = filters.campuses.iter().next().cloned();
-    campus.set_selected(selected_campus.as_ref().and_then(|name| campuses.iter().position(|c| c == name)).unwrap_or(0) as u32);
+    campus.set_selected(
+        selected_campus
+            .as_ref()
+            .and_then(|name| campuses.iter().position(|c| c == name))
+            .unwrap_or(0) as u32,
+    );
     campus.connect_selected_notify({
         let shell = shell.clone();
         let campuses = campuses.clone();
@@ -3341,7 +4473,14 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     });
     let nupath = gtk::Entry::builder()
         .placeholder_text("NUpath, like WI")
-        .text(filters.nupaths.iter().map(|p| p.short()).collect::<Vec<_>>().join(", "))
+        .text(
+            filters
+                .nupaths
+                .iter()
+                .map(|p| p.short())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
         .width_chars(12)
         .build();
     nupath.connect_activate({
@@ -3360,7 +4499,14 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     });
     let level = gtk::Entry::builder()
         .placeholder_text("Level")
-        .text(filters.levels.iter().next().map(|n| n.to_string()).unwrap_or_default())
+        .text(
+            filters
+                .levels
+                .iter()
+                .next()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        )
         .width_chars(6)
         .build();
     level.connect_activate({
@@ -3401,7 +4547,11 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
             refresh(&shell);
         }
     });
-    let after = gtk::Entry::builder().placeholder_text("After 10:00").width_chars(10).text(filters.starts_after.map(clock_label).unwrap_or_default()).build();
+    let after = gtk::Entry::builder()
+        .placeholder_text("After 10:00")
+        .width_chars(10)
+        .text(filters.starts_after.map(clock_label).unwrap_or_default())
+        .build();
     after.connect_activate({
         let shell = shell.clone();
         move |entry| {
@@ -3411,7 +4561,11 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
             refresh(&shell);
         }
     });
-    let before = gtk::Entry::builder().placeholder_text("Before 17:00").width_chars(10).text(filters.ends_before.map(clock_label).unwrap_or_default()).build();
+    let before = gtk::Entry::builder()
+        .placeholder_text("Before 17:00")
+        .width_chars(10)
+        .text(filters.ends_before.map(clock_label).unwrap_or_default())
+        .build();
     before.connect_activate({
         let shell = shell.clone();
         move |entry| {
@@ -3423,7 +4577,13 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     });
     let days = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     days.add_css_class("linked");
-    for (day, bit) in [("M", DaySet::MONDAY), ("T", DaySet::TUESDAY), ("W", DaySet::WEDNESDAY), ("R", DaySet::THURSDAY), ("F", DaySet::FRIDAY)] {
+    for (day, bit) in [
+        ("M", DaySet::MONDAY),
+        ("T", DaySet::TUESDAY),
+        ("W", DaySet::WEDNESDAY),
+        ("R", DaySet::THURSDAY),
+        ("F", DaySet::FRIDAY),
+    ] {
         let button = gtk::ToggleButton::with_label(day);
         button.add_css_class("day-toggle");
         button.set_active(filters.allowed_days.is_some_and(|set| set.contains(bit)));
@@ -3462,7 +4622,12 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     let type_refs: Vec<&str> = class_types.iter().map(|name| name.as_str()).collect();
     let class_type = gtk::DropDown::from_strings(&type_refs);
     let selected_type = filters.class_types.iter().next().cloned();
-    class_type.set_selected(selected_type.as_ref().and_then(|name| class_types.iter().position(|item| item == name)).unwrap_or(0) as u32);
+    class_type.set_selected(
+        selected_type
+            .as_ref()
+            .and_then(|name| class_types.iter().position(|item| item == name))
+            .unwrap_or(0) as u32,
+    );
     class_type.set_tooltip_text(Some("Class type"));
     class_type.set_hexpand(true);
     class_type.connect_selected_notify({
@@ -3492,12 +4657,13 @@ fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk
     row.upcast()
 }
 
-
 fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePreferences)) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
-        let Some(id) = current_plan_id(&state) else { return };
+        let Some(id) = current_plan_id(&state) else {
+            return;
+        };
         if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
             let mut prefs = plan.preferences.clone().unwrap_or_default();
             change(&mut prefs);
@@ -3510,6 +4676,23 @@ fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePre
     refresh(shell);
 }
 
+fn replace_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let name = course_window_name(key);
+    let windows = shell.borrow().windows.borrow().clone();
+    for window in windows {
+        if window.widget_name().as_str() != name || !window.is_visible() {
+            continue;
+        }
+        let page = course_page(shell, key);
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(760);
+        clamp.set_tightening_threshold(480);
+        clamp.set_child(Some(&page));
+        let scroll = gtk::ScrolledWindow::builder().child(&clamp).build();
+        window.set_content(Some(&scroll));
+    }
+}
+
 fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     let term = {
         let shell_ref = shell.borrow();
@@ -3517,6 +4700,7 @@ fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         state.index.catalog.term.code.clone()
     };
     toast(shell, "Asking Banner for current seats…");
+    let key = key.clone();
     let subject = key.subject.clone();
     let number = key.number.clone();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -3531,15 +4715,26 @@ fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                 let shell = shell.borrow();
                 let mut state = shell.state.borrow_mut();
                 for seat in seats {
-                    state.live_seats.insert(seat.crn, (seat.seats_remaining, seat.waitlist_remaining, seat.seat_capacity));
+                    state.live_seats.insert(
+                        seat.crn,
+                        (
+                            seat.seats_remaining,
+                            seat.waitlist_remaining,
+                            seat.seat_capacity,
+                        ),
+                    );
                 }
             }
             toast(&shell, &format!("Updated {n} sections from Banner"));
+            replace_course_window(&shell, &key);
             refresh(&shell);
             glib::ControlFlow::Break
         }
         Ok(Err(error)) => {
-            toast(&shell, &format!("Banner unreachable ({error}). Showing the snapshot."));
+            toast(
+                &shell,
+                &format!("Banner unreachable ({error}). Showing the snapshot."),
+            );
             glib::ControlFlow::Break
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -3548,11 +4743,18 @@ fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
 }
 
 fn up_next_summary(state: &State) -> String {
-    let Ok(now) = glib::DateTime::now_local() else { return String::new() };
+    let Ok(now) = glib::DateTime::now_local() else {
+        return String::new();
+    };
     let glib_dow = now.day_of_week();
     let weekday = if glib_dow == 7 { 0 } else { glib_dow };
     let minutes = now.hour() * 60 + now.minute();
-    let iso = format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day_of_month());
+    let iso = format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        now.month(),
+        now.day_of_month()
+    );
     let sections = if let Some(schedule) = state.generated.get(state.picked) {
         schedule.sections.clone()
     } else {
@@ -3561,23 +4763,36 @@ fn up_next_summary(state: &State) -> String {
             .plan
             .and_then(|id| state.data.plans.iter().find(|p| p.id == id))
             .or_else(|| state.data.plans.iter().find(|p| &p.term_code == term));
-        let Some(plan) = plan else { return String::new() };
-        plan.selected_crns.iter().filter_map(|crn| state.index.section_crn(crn).cloned()).collect()
+        let Some(plan) = plan else {
+            return String::new();
+        };
+        plan.selected_crns
+            .iter()
+            .filter_map(|crn| state.index.section_crn(crn).cloned())
+            .collect()
     };
     if sections.is_empty() {
         return String::new();
     }
     let items = termorganize_core::upnext::occurrences(&sections, weekday, minutes, &iso);
     let summary = termorganize_core::upnext::summary(&items);
-    if summary == "No more classes today" { String::new() } else { format!("Up next: {summary}") }
+    if summary == "No more classes today" {
+        String::new()
+    } else {
+        format!("Up next: {summary}")
+    }
 }
 
 fn install_drop(shell: &Rc<RefCell<Shell>>) {
     let target = gtk::DropTarget::new(gio::File::static_type(), gtk::gdk::DragAction::COPY);
     let dropped = shell.clone();
     target.connect_drop(move |_, value, _, _| {
-        let Ok(file) = value.get::<gio::File>() else { return false };
-        let Some(path) = file.path() else { return false };
+        let Ok(file) = value.get::<gio::File>() else {
+            return false;
+        };
+        let Some(path) = file.path() else {
+            return false;
+        };
         match import_pdf(&path) {
             Ok(plan) => {
                 let shell_ref = dropped.borrow();
@@ -3634,7 +4849,10 @@ fn print_view(shell: &Rc<RefCell<Shell>>) {
 fn view_text(shell: &Rc<RefCell<Shell>>) -> String {
     let shell_ref = shell.borrow();
     let state = shell_ref.state.borrow();
-    let mut lines = vec![format!("Term Organize — {}", state.index.catalog.term.name()), legal::UNOFFICIAL_NOTICE.to_string()];
+    let mut lines = vec![
+        format!("Term Organize — {}", state.index.catalog.term.name()),
+        legal::UNOFFICIAL_NOTICE.to_string(),
+    ];
     if let Some(key) = &state.course {
         if let Some(course) = state.index.course(key) {
             lines.push(format!("{} {}", course.code(), course.title));
@@ -3651,8 +4869,15 @@ fn view_text(shell: &Rc<RefCell<Shell>>) -> String {
             }
         }
         6 => {
-            if let Some(plan) = state.degree.and_then(|id| state.data.degree_plans.iter().find(|p| p.id == id)) {
-                lines.push(degree_format::text(plan, degree_format::now_unix(), state.data.preferences.include_student_in_export));
+            if let Some(plan) = state
+                .degree
+                .and_then(|id| state.data.degree_plans.iter().find(|p| p.id == id))
+            {
+                lines.push(degree_format::text(
+                    plan,
+                    degree_format::now_unix(),
+                    state.data.preferences.include_student_in_export,
+                ));
             }
         }
         _ => {
@@ -3677,14 +4902,21 @@ fn request_background() {
     let exe = std::env::current_exe().ok();
     let Some(exe) = exe else { return };
     let command = [exe.to_string_lossy().to_string(), "--seat-watch".into()];
-    let commandline = glib::Variant::array_from_iter::<glib::Variant>(command.iter().map(|s| s.to_variant()));
+    let commandline =
+        glib::Variant::array_from_iter::<glib::Variant>(command.iter().map(|s| s.to_variant()));
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", "termorganize");
     options.insert("reason", "Check watched sections for open seats");
     options.insert("autostart", true);
     options.insert("commandline", &commandline);
     let params = glib::Variant::tuple_from_iter(["".to_variant(), options.end()]);
-    let _ = proxy.call_sync("RequestBackground", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE);
+    let _ = proxy.call_sync(
+        "RequestBackground",
+        Some(&params),
+        gio::DBusCallFlags::NONE,
+        1000,
+        gio::Cancellable::NONE,
+    );
 }
 
 fn parse_clock(text: &str) -> Option<i32> {
@@ -3698,7 +4930,11 @@ fn parse_clock(text: &str) -> Option<i32> {
         return Some(hour * 60 + minute);
     }
     let n: i32 = text.parse().ok()?;
-    if n <= 24 { Some(n * 60) } else { Some(minutes_from_hhmm(n)) }
+    if n <= 24 {
+        Some(n * 60)
+    } else {
+        Some(minutes_from_hhmm(n))
+    }
 }
 
 fn clock_label(minutes: i32) -> String {
@@ -3706,5 +4942,8 @@ fn clock_label(minutes: i32) -> String {
 }
 
 fn now_secs() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
