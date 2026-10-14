@@ -3013,10 +3013,10 @@ fn open_about(shell: &Rc<RefCell<Shell>>) {
         .application_icon("x-office-calendar")
         .version(env!("CARGO_PKG_VERSION"))
         .copyright(legal::APP_COPYRIGHT)
-        .license_type(gtk::License::Agpl30)
+        .license_type(gtk::License::Agpl30Only)
         .website(legal::SOURCE_CODE_URL)
         .developers(vec!["Term Organize contributors"])
-        .comments(format!("{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::SEARCHNEU_SUMMARY))
+        .comments(format!("{}\n\n{}\n\n{}", legal::UNOFFICIAL_NOTICE, legal::source_offer(), legal::SEARCHNEU_SUMMARY))
         .build();
     dialog.present();
 }
