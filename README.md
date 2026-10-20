@@ -21,7 +21,7 @@ cargo run --release
 
 `pdftotext` (from poppler-utils) imports a degree-audit “View Plan” PDF. Desktop notifications use `notify-send`.
 
-Set `TERMORGANIZE_DATA` to a directory whose `catalog/` folder contains the bundled `term-*.catalog` files if you are not running from this repository. When that folder has snapshots, they are the terms the app ships. User data is JSON under `$XDG_DATA_HOME/termorganize` (or `~/.local/share/termorganize`).
+Set `TERMORGANIZE_DATA` to a directory whose `catalog/` folder contains the bundled `term-*.catalog` files if you are not running from this repository. When that folder has snapshots, they are the terms the app ships. User data is JSON under `$XDG_DATA_HOME/termorganize` (or `~/.local/share/termorganize`). The Flatpak build stores that same folder at `~/.var/app/org.termorganize.TermOrganize/data/termorganize`. The app and `term-organize-mcp` share this file.
 
 ## Commands
 
@@ -57,6 +57,28 @@ The `.desktop` file registers `termorganize://`, `neuclasssearch://`, and PDF �
 
 A Flatpak manifest is `packaging/org.termorganize.TermOrganize.yml`.
 
+## Local MCP server
+
+`term-organize-mcp` speaks MCP over stdio (protocol `2025-06-18`) for the bundled Fall 2026 and Spring 2027 catalogs and for the degree plans in the local user file. It does not use the network. Tool names, parameters, and JSON shapes are documented in `docs/MCP.md`.
+
+```bash
+cargo run -p term-organize-mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`) and Cursor (`.cursor/mcp.json`) can both launch it:
+
+```json
+{
+  "mcpServers": {
+    "term-organize": {
+      "command": "/path/to/term-organize-mcp"
+    }
+  }
+}
+```
+
+`--read-only` or `TERM_ORGANIZE_MCP_READONLY=1` hides the plan write tools. `--data-dir` or `TERM_ORGANIZE_MCP_DATA` picks the user-file directory when you do not want the shared Flatpak or XDG location.
+
 ## Layout of the code
 
-`crates/core` is the catalog, search, schedule generator, degree audit, and file formats, with `cargo test`. `crates/app` is the GTK 4 / libadwaita window. `PARITY.md` maps each Swift area to the Rust file and says what is still missing.
+`crates/core` is the catalog, search, schedule generator, degree audit, plan file, and file formats, with `cargo test`. `crates/app` is the GTK 4 / libadwaita window. `crates/mcp` is the local MCP server. `PARITY.md` maps each Swift area to the Rust file and says what is still missing.

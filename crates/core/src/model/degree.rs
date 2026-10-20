@@ -100,6 +100,9 @@ pub struct DegreePlanCourse {
     pub title: String,
     #[serde(default)]
     pub credits: f64,
+    /// Section chosen in the bundled catalog, when the user picked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crn: Option<String>,
 }
 
 impl DegreePlanCourse {
@@ -111,6 +114,7 @@ impl DegreePlanCourse {
             label,
             title: title.into(),
             credits,
+            crn: None,
         }
     }
     pub fn other(label: impl Into<String>, title: impl Into<String>, credits: f64) -> Self {
@@ -120,6 +124,7 @@ impl DegreePlanCourse {
             label: label.into(),
             title: title.into(),
             credits,
+            crn: None,
         }
     }
 }

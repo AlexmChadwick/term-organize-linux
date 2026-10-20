@@ -2,7 +2,7 @@ use super::degree::{CourseEquivalence, DegreePlan, RequirementSubstitution};
 use super::preferences::SchedulePreferences;
 use super::section::{CourseKey, DaySet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +267,10 @@ pub struct UserData {
     /// Dismissed equivalence-suggestion pair ids.
     #[serde(default)]
     pub dismissed_equivalences: Vec<String>,
+    /// Optimistic concurrency counters for degree plans, keyed by plan id.
+    /// A missing id means revision 0. The app and the MCP server share this map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan_revisions: BTreeMap<String, u64>,
 }
 
 fn one() -> i32 {
@@ -285,6 +289,7 @@ impl Default for UserData {
             search_history: vec![],
             degree_plans: vec![],
             dismissed_equivalences: vec![],
+            plan_revisions: BTreeMap::new(),
         }
     }
 }
@@ -312,6 +317,16 @@ impl UserData {
         data.search_history = decode_each(obj.and_then(|o| o.get("searchHistory")));
         data.degree_plans = decode_each(obj.and_then(|o| o.get("degreePlans")));
         data.dismissed_equivalences = decode_each(obj.and_then(|o| o.get("dismissedEquivalences")));
+        if let Some(map) = obj
+            .and_then(|o| o.get("planRevisions"))
+            .and_then(|v| v.as_object())
+        {
+            for (id, value) in map {
+                if let Some(revision) = value.as_u64() {
+                    data.plan_revisions.insert(id.clone(), revision);
+                }
+            }
+        }
         data
     }
 }
