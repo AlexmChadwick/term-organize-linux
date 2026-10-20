@@ -73,6 +73,8 @@ struct State {
     dismissed_pairs: Vec<String>,
     /// Watch items whose last Banner response did not include the CRN.
     missing_watch: HashSet<String>,
+    /// `user.json` as it was when this window loaded it, or last saved it.
+    stamp: store::FileStamp,
 }
 
 /// Which text field should keep the caret after a rebuild.
@@ -109,6 +111,9 @@ struct Shell {
     windows: RefCell<Vec<adw::Window>>,
     term_menu: gtk::DropDown,
     keep_focus: Cell<Option<KeepFocus>>,
+    /// Owns the `user.json` monitor. Dropping it would stop reload events.
+    #[allow(dead_code)]
+    user_monitor: Option<gio::FileMonitor>,
 }
 
 pub(crate) fn course_window_name(key: &CourseKey) -> String {
@@ -209,7 +214,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         window.present();
         return;
     };
-    let mut data = store::load();
+    let (mut data, stamp) = store::load_stamped(&store::data_dir());
     if data.preferences.selected_term_code.is_none() {
         data.preferences.selected_term_code = Some(index.catalog.term.code.clone());
     }
@@ -243,6 +248,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         term_labels: vec![],
         dismissed_pairs: gap::load_dismissed(),
         missing_watch: HashSet::new(),
+        stamp,
     }));
     load_saved_requirements(&state);
 
@@ -328,6 +334,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         windows: RefCell::new(Vec::new()),
         term_menu: term.clone(),
         keep_focus: Cell::new(None),
+        user_monitor: None,
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -393,6 +400,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         greet(&shell);
     }
     install_drop(&shell);
+    watch_user_file(&shell);
     arm_seat_timer(&shell);
     if !smoke
         && shell
@@ -2999,7 +3007,7 @@ fn new_schedule(shell: &Rc<RefCell<Shell>>) {
         state.plan = Some(id);
         state.area = 5;
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
         id
     };
     let _ = id;
@@ -3022,7 +3030,7 @@ fn new_degree(shell: &Rc<RefCell<Shell>>) {
         });
         state.degree = Some(id);
         state.area = 6;
-        persist(&state.data);
+        persist(&mut state);
     }
     select_area(shell, 6);
 }
@@ -3068,7 +3076,7 @@ fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             }
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, &format!("Added {key}"));
 }
@@ -3085,7 +3093,7 @@ fn remove_plan_course(shell: &Rc<RefCell<Shell>>, key: &str) {
             plan.updated_at = now_secs();
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3122,7 +3130,7 @@ fn delete_schedule(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             state.plan = None;
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3135,7 +3143,7 @@ fn delete_degree_plan_ui(shell: &Rc<RefCell<Shell>>, id: Uuid) {
         if state.degree == Some(id) {
             state.degree = state.data.degree_plans.first().map(|plan| plan.id);
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3163,7 +3171,7 @@ fn remove_degree_course(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             term.courses.retain(|course| course.id != id);
         }
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3177,7 +3185,7 @@ fn unsave_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             .data
             .saved
             .retain(|saved| !(saved.term_code == term && saved.key == *key));
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3234,7 +3242,7 @@ fn apply_nl(shell: &Rc<RefCell<Shell>>, text: &str) {
                         note = prefs.summary_parts().join(" · ");
                         plan.preferences = Some(prefs);
                         plan.updated_at = now_secs();
-                        persist(&state.data);
+                        persist(&mut state);
                     }
                 } else {
                     note = "Make a schedule first".into();
@@ -3363,7 +3371,7 @@ fn add_semester(shell: &Rc<RefCell<Shell>>) {
                 plan.sort_terms();
             }
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3399,7 +3407,7 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, credits));
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3455,7 +3463,7 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, 4.0));
         }
-        persist(&state.data);
+        persist(&mut state);
         n
     };
     toast(
@@ -3576,7 +3584,7 @@ fn import_degree(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 drop(state);
                 drop(shell_ref);
                 select_area(&shell, 6);
@@ -3618,7 +3626,7 @@ fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                 key: key.clone(),
                 saved_at: now_secs(),
             });
-            persist(&state.data);
+            persist(&mut state);
         }
     }
     toast(shell, "Saved");
@@ -3641,7 +3649,7 @@ fn remember_recent(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         },
     );
     state.data.recents.truncate(40);
-    persist(&state.data);
+    persist(&mut state);
 }
 
 fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &str) {
@@ -3677,7 +3685,7 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
             notify_on_waitlist: false,
             last_notified_at: None,
         });
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, "Watching that section");
 }
@@ -3689,7 +3697,7 @@ fn set_waitlist(shell: &Rc<RefCell<Shell>>, crn: &str, on: bool) {
         if let Some(item) = state.data.watchlist.iter_mut().find(|w| w.crn == crn) {
             item.notify_on_waitlist = on;
         }
-        persist(&state.data);
+        persist(&mut state);
     }
 }
 
@@ -3698,7 +3706,7 @@ fn remove_watch(shell: &Rc<RefCell<Shell>>, crn: &str) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.watchlist.retain(|w| w.crn != crn);
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3749,7 +3757,7 @@ fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
                     let id = state.data.add_degree_plan(plan);
                     state.degree = Some(id);
                     state.area = 6;
-                    persist(&state.data);
+                    persist(&mut state);
                 }
             } else if let Ok(html) = std::fs::read_to_string(&path) {
                 if let Some(id) = shell.borrow().state.borrow().degree {
@@ -3819,7 +3827,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
                 let mut state = shell.state.borrow_mut();
                 state.data.preferences.color_scheme = value;
                 apply_scheme(&state.data.preferences);
-                persist(&state.data);
+                persist(&mut state);
             }
         }
     });
@@ -3833,7 +3841,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.show_weekends = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     appearance.add(&weekends);
@@ -3862,7 +3870,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.auto_refresh_seats = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&auto);
@@ -3883,7 +3891,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.seat_check_minutes = row.value() as i32;
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&minutes);
@@ -3910,7 +3918,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.include_student_in_export = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&include);
@@ -3931,7 +3939,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_enabled = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&sync_on);
@@ -3956,7 +3964,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_path =
                 if text.is_empty() { None } else { Some(text) };
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&path_row);
@@ -4030,7 +4038,7 @@ fn greet(shell: &Rc<RefCell<Shell>>) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.preferences.has_completed_onboarding = true;
-        persist(&state.data);
+        persist(&mut state);
     });
     dialog.present(Some(&window));
 }
@@ -4052,7 +4060,7 @@ fn import_user(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data = imported;
-            persist(&state.data);
+            persist(&mut state);
         }
         refresh(&shell);
         toast(&shell, "Data imported");
@@ -4176,7 +4184,7 @@ fn check_seats(shell: &Rc<RefCell<Shell>>) {
                 let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
                 state.missing_watch = report.missing_ids.iter().cloned().collect();
                 state.data.watchlist = report.items;
-                persist(&state.data);
+                persist(&mut state);
                 report.alerts
             };
             if let Some(message) = error {
@@ -4225,16 +4233,93 @@ fn save_bytes(shell: &Rc<RefCell<Shell>>, name: &str, bytes: &[u8], message: &st
     });
 }
 
-fn persist(data: &UserData) {
-    let _ = store::save(data);
-    if data.preferences.folder_sync_enabled {
-        if let Some(dir) = &data.preferences.folder_sync_path {
+fn persist(state: &mut State) {
+    if let Ok((data, stamp)) = store::save_merging(&store::data_dir(), &state.data, &state.stamp) {
+        state.data = data;
+        state.stamp = stamp;
+    }
+    if state.data.preferences.folder_sync_enabled {
+        if let Some(dir) = &state.data.preferences.folder_sync_path {
             let dir = PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
-            let text = store::export_json(data, false);
+            let text = store::export_json(&state.data, false);
             let _ = std::fs::write(dir.join("user.json"), text);
         }
     }
+}
+
+/// Reloads `user.json` when another process writes it. Events are debounced so a
+/// temp-file rename settles into one read.
+fn watch_user_file(shell: &Rc<RefCell<Shell>>) {
+    let path = store::user_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let directory = gio::File::for_path(parent);
+    let Ok(monitor) = directory.monitor_directory(
+        gio::FileMonitorFlags::WATCH_MOVES,
+        None::<&gio::Cancellable>,
+    ) else {
+        return;
+    };
+    let generation = Rc::new(Cell::new(0u64));
+    let shell_for_events = shell.clone();
+    let generation_for_events = generation.clone();
+    monitor.connect_changed(move |_, file, other, event| {
+        if !matches!(
+            event,
+            gio::FileMonitorEvent::Changed
+                | gio::FileMonitorEvent::ChangesDoneHint
+                | gio::FileMonitorEvent::Created
+                | gio::FileMonitorEvent::Deleted
+                | gio::FileMonitorEvent::Renamed
+                | gio::FileMonitorEvent::Moved
+                | gio::FileMonitorEvent::MovedIn
+        ) {
+            return;
+        }
+        let touches_user = basename_is_user_json(file) || other.is_some_and(basename_is_user_json);
+        if !touches_user {
+            return;
+        }
+        let next = generation_for_events.get().wrapping_add(1);
+        generation_for_events.set(next);
+        let generation = generation_for_events.clone();
+        let shell = shell_for_events.clone();
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            if generation.get() != next {
+                return glib::ControlFlow::Break;
+            }
+            apply_external_file(&shell);
+            glib::ControlFlow::Break
+        });
+    });
+    shell.borrow_mut().user_monitor = Some(monitor);
+}
+
+fn basename_is_user_json(file: &gio::File) -> bool {
+    file.basename()
+        .as_deref()
+        .is_some_and(|name| name == std::ffi::OsStr::new("user.json"))
+}
+
+fn apply_external_file(shell: &Rc<RefCell<Shell>>) {
+    let (data, stamp) = {
+        let shell = shell.borrow();
+        let state = shell.state.borrow();
+        (state.data.clone(), state.stamp.clone())
+    };
+    let Ok(Some((data, stamp))) = store::fold_external(&store::data_dir(), &data, &stamp) else {
+        return;
+    };
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        state.data = data;
+        state.stamp = stamp;
+    }
+    refresh(shell);
 }
 
 fn pull_folder(data: &mut UserData) {
@@ -4669,7 +4754,7 @@ fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePre
             change(&mut prefs);
             plan.preferences = Some(prefs.normalized());
             plan.updated_at = now_secs();
-            persist(&state.data);
+            persist(&mut state);
         }
         state.generated.clear();
     }
@@ -4800,7 +4885,7 @@ fn install_drop(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 std::mem::drop(state);
                 std::mem::drop(shell_ref);
                 select_area(&dropped, 6);

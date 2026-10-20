@@ -39,6 +39,8 @@ Override that choice in this order:
 
 Writes take `expected_revision`. The revision lives in `planRevisions` on the user file, next to the degree plan, and increases when the plan body changes. A save from the open app bumps it too, so a stale `expected_revision` fails with `revision_conflict` and the file is left as it was. Each save copies the previous `user.json` to `user.json.bak` (one rolling backup), writes `user.json.tmp`, and renames that into place.
 
+The desktop app also watches this file. Before it saves, it compares `planRevisions` with the copy it loaded, and the file's modification time plus a SHA-256 of the bytes. Plans only one side edited are merged. A plan both sides edited keeps the file already on disk, and the app's copy is saved beside it as `<name> (edited in app)`, so an MCP write is not replaced. A change while the window is open is reloaded through a debounced file monitor.
+
 MCP plans are the app's degree plans (`degree_plans` in `user.json`). A chosen section is stored as `crn` on the course. The app loader reads that field back.
 
 ## Client config

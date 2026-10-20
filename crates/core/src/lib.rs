@@ -23,6 +23,7 @@ pub mod html;
 pub mod index;
 pub mod legal;
 pub mod links;
+pub mod merge;
 pub mod model;
 pub mod nl;
 pub mod nupath;

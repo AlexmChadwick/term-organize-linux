@@ -245,7 +245,7 @@ impl Default for AppPreferences {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserData {
     #[serde(default = "one")]

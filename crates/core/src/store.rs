@@ -6,7 +6,10 @@
 //! `TERMORGANIZE_DATA` is unset, [`data_dir`] uses whichever of those already has
 //! `user.json` (the newer file if both do).
 
+use crate::merge;
 use crate::model::{DegreePlan, UserData};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -69,6 +72,71 @@ pub fn load() -> UserData {
     load_user(&data_dir())
 }
 
+/// The file the app loaded, plus the SHA-256 and modification time of those bytes.
+///
+/// A later save treats the file as unchanged when the hash still matches. A newer
+/// modification time with the same hash is the same file. A different `planRevisions`
+/// map is an outside edit even before the hash is consulted.
+#[derive(Clone, Debug)]
+pub struct FileStamp {
+    pub baseline: UserData,
+    pub hash: String,
+    pub mtime: Option<SystemTime>,
+}
+
+impl FileStamp {
+    pub fn empty() -> Self {
+        Self {
+            baseline: UserData::default(),
+            hash: String::new(),
+            mtime: None,
+        }
+    }
+}
+
+pub fn load_stamped(dir: &Path) -> (UserData, FileStamp) {
+    let stamp = read_stamp(dir);
+    (stamp.baseline.clone(), stamp)
+}
+
+pub fn read_stamp(dir: &Path) -> FileStamp {
+    match inspect(dir) {
+        Ok(disk) if disk.unreadable => FileStamp {
+            baseline: UserData::default(),
+            hash: disk.hash,
+            mtime: disk.mtime,
+        },
+        Ok(disk) => FileStamp {
+            baseline: disk.data.unwrap_or_default(),
+            hash: disk.hash,
+            mtime: disk.mtime,
+        },
+        Err(_) => FileStamp::empty(),
+    }
+}
+
+/// True when `user.json` changed since `stamp` was taken.
+///
+/// `planRevisions` differing from the loaded file is a change. So is a different
+/// SHA-256. A newer modification time with the same hash is not: the bytes are
+/// the file the app already loaded.
+pub(crate) fn file_changed(
+    stamp: &FileStamp,
+    hash: &str,
+    mtime: Option<SystemTime>,
+    revisions: &BTreeMap<String, u64>,
+) -> bool {
+    if revisions != &stamp.baseline.plan_revisions {
+        return true;
+    }
+    if hash == stamp.hash {
+        let _ = mtime;
+        return false;
+    }
+    let _ = mtime != stamp.mtime;
+    true
+}
+
 pub fn load_user(dir: &Path) -> UserData {
     let Ok(text) = std::fs::read_to_string(dir.join("user.json")) else {
         return UserData::default();
@@ -94,16 +162,190 @@ pub(crate) fn save_user_locked(dir: &Path, data: &UserData) -> Result<(), String
     let mut data = data.clone();
     keep_one_primary(&mut data);
     bump_plan_revisions(&mut data, &previous);
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    commit_user(dir, &data).map(|_| ())
+}
+
+/// Save `local` into `dir`. When the file changed since `stamp`, plans edited on
+/// only one side are combined. A plan edited on both sides keeps the copy on disk,
+/// and the app's copy is stored as "<name> (edited in app)".
+pub fn save_merging(
+    dir: &Path,
+    local: &UserData,
+    stamp: &FileStamp,
+) -> Result<(UserData, FileStamp), String> {
+    let _lock = UserLock::acquire(dir)?;
+    save_merging_locked(dir, local, stamp)
+}
+
+/// Reload an outside write, or merge it when the open window also has edits.
+///
+/// `None` means the bytes still match the stamp, so memory stays as it is.
+/// `Some` is the data and stamp to adopt. A dirty window is merged into the file
+/// before that pair is returned.
+pub fn fold_external(
+    dir: &Path,
+    memory: &UserData,
+    stamp: &FileStamp,
+) -> Result<Option<(UserData, FileStamp)>, String> {
+    let _lock = UserLock::acquire(dir)?;
+    let disk = inspect(dir)?;
+    if disk.unreadable {
+        return Ok(None);
+    }
+    let changed = match &disk.data {
+        None => !stamp.hash.is_empty(),
+        Some(data) => file_changed(stamp, &disk.hash, disk.mtime, &data.plan_revisions),
+    };
+    if !changed {
+        return Ok(None);
+    }
+    let Some(disk_data) = disk.data else {
+        return Ok(Some((UserData::default(), FileStamp::empty())));
+    };
+    if memory == &stamp.baseline {
+        return Ok(Some((
+            disk_data.clone(),
+            FileStamp {
+                baseline: disk_data,
+                hash: disk.hash,
+                mtime: disk.mtime,
+            },
+        )));
+    }
+    save_merging_locked(dir, memory, stamp).map(Some)
+}
+
+fn save_merging_locked(
+    dir: &Path,
+    local: &UserData,
+    stamp: &FileStamp,
+) -> Result<(UserData, FileStamp), String> {
+    let mut last_error = String::from("could not read user.json");
+    for _ in 0..3 {
+        let disk = match inspect(dir) {
+            Ok(disk) => disk,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        if disk.unreadable {
+            return Err(
+                "user.json on disk is not valid JSON, so it was left unchanged".to_string(),
+            );
+        }
+        let changed = match &disk.data {
+            None => !stamp.hash.is_empty(),
+            Some(data) => file_changed(stamp, &disk.hash, disk.mtime, &data.plan_revisions),
+        };
+        let mut data = local.clone();
+        if changed {
+            if let Some(disk_data) = &disk.data {
+                data = merge::merge(&stamp.baseline, local, disk_data);
+            }
+        }
+        keep_one_primary(&mut data);
+        let previous = disk.data.clone().unwrap_or_default();
+        bump_plan_revisions(&mut data, &previous);
+        let bytes = match commit_user(dir, &data) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        return Ok((
+            data.clone(),
+            FileStamp {
+                baseline: data,
+                hash: sha256_hex(&bytes),
+                mtime: file_mtime(&dir.join("user.json")),
+            },
+        ));
+    }
+    Err(last_error)
+}
+
+struct DiskFile {
+    hash: String,
+    mtime: Option<SystemTime>,
+    data: Option<UserData>,
+    unreadable: bool,
+}
+
+fn inspect(dir: &Path) -> Result<DiskFile, String> {
+    let path = dir.join("user.json");
+    if !path.is_file() {
+        return Ok(DiskFile {
+            hash: String::new(),
+            mtime: None,
+            data: None,
+            unreadable: false,
+        });
+    }
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    let hash = sha256_hex(&bytes);
+    let mtime = file_mtime(&path);
+    match parsed_user(&bytes) {
+        Ok(data) => Ok(DiskFile {
+            hash,
+            mtime,
+            data: Some(data),
+            unreadable: false,
+        }),
+        Err(()) => Ok(DiskFile {
+            hash,
+            mtime,
+            data: None,
+            unreadable: true,
+        }),
+    }
+}
+
+fn parsed_user(bytes: &[u8]) -> Result<UserData, ()> {
+    if serde_json::from_slice::<serde_json::Value>(bytes).is_err() {
+        return Err(());
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let mut data = UserData::from_json_lossy(&text);
+    keep_one_primary(&mut data);
+    Ok(data)
+}
+
+fn commit_user(dir: &Path, data: &UserData) -> Result<Vec<u8>, String> {
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    let text = serde_json::to_string_pretty(data).map_err(|error| error.to_string())?;
+    let bytes = text.into_bytes();
     let path = dir.join("user.json");
     let backup = dir.join("user.json.bak");
     if path.is_file() {
-        std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
+        std::fs::copy(&path, &backup).map_err(|error| error.to_string())?;
     }
     let tmp = dir.join("user.json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    std::fs::write(&tmp, &bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+    let written = std::fs::read(&path).map_err(|error| error.to_string())?;
+    if written != bytes {
+        return Err("user.json changed while it was being saved".to_string());
+    }
+    Ok(bytes)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 pub fn plan_revision(data: &UserData, id: uuid::Uuid) -> u64 {
@@ -266,5 +508,379 @@ pub fn floor_user_dates(value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DegreePlan;
+    use std::fs;
+    use std::time::Duration;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "termorganize-merge-{}-{}-{label}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn degree(name: &str) -> DegreePlan {
+        DegreePlan {
+            name: name.to_string(),
+            ..DegreePlan::default()
+        }
+    }
+
+    fn set_mtime(path: &Path, time: SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    fn names(data: &UserData) -> Vec<String> {
+        data.degree_plans
+            .iter()
+            .map(|plan| plan.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn revision_or_hash_marks_an_outside_edit_and_mtime_alone_does_not() {
+        let mut stamp = FileStamp::empty();
+        stamp.hash = "abc".to_string();
+        stamp.mtime = Some(SystemTime::UNIX_EPOCH);
+        stamp.baseline.plan_revisions.insert("plan".to_string(), 1);
+        let same_rev = stamp.baseline.plan_revisions.clone();
+        let later = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30));
+        assert!(
+            !file_changed(&stamp, "abc", later, &same_rev),
+            "a newer mtime with the same hash is the file the app loaded"
+        );
+        assert!(
+            file_changed(&stamp, "def", stamp.mtime, &same_rev),
+            "a different hash is an outside edit even when the mtime matches"
+        );
+        let mut bumped = same_rev.clone();
+        bumped.insert("plan".to_string(), 2);
+        assert!(
+            file_changed(&stamp, "abc", stamp.mtime, &bumped),
+            "a new planRevisions entry is an outside edit"
+        );
+    }
+
+    #[test]
+    fn different_plans_merge_and_the_same_plan_is_copied() {
+        let dir = temp_dir("plans");
+        let mut app = UserData::default();
+        let mine = app.add_degree_plan(degree("Mine"));
+        let shared = app.add_degree_plan(degree("Shared"));
+        let schedule = app.create_plan("Week", "202710").id;
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+        let kept_revision = plan_revision(&app, mine);
+
+        let mut mcp = load_user(&dir);
+        mcp.add_degree_plan(degree("From MCP"));
+        mcp.degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == shared)
+            .unwrap()
+            .name = "Shared from MCP".to_string();
+        mcp.create_plan("Other week", "202730");
+        save_user(&dir, &mcp).unwrap();
+        let disk_shared_revision = plan_revision(&load_user(&dir), shared);
+
+        let mut editing = app.clone();
+        editing
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == mine)
+            .unwrap()
+            .name = "Mine renamed".to_string();
+        editing
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == shared)
+            .unwrap()
+            .name = "Shared from app".to_string();
+        editing
+            .plans
+            .iter_mut()
+            .find(|plan| plan.id == schedule)
+            .unwrap()
+            .name = "Week from app".to_string();
+        let (saved, _) = save_merging(&dir, &editing, &stamp).unwrap();
+
+        assert_eq!(
+            saved
+                .degree_plans
+                .iter()
+                .find(|plan| plan.id == mine)
+                .unwrap()
+                .name,
+            "Mine renamed"
+        );
+        assert!(names(&saved).iter().any(|name| name == "From MCP"));
+        assert_eq!(
+            saved
+                .degree_plans
+                .iter()
+                .find(|plan| plan.id == shared)
+                .unwrap()
+                .name,
+            "Shared from MCP"
+        );
+        assert_eq!(plan_revision(&saved, shared), disk_shared_revision);
+        assert!(saved.degree_plans.iter().any(|plan| {
+            plan.name == "Shared from app (edited in app)" && plan.id != shared && !plan.is_primary
+        }));
+        assert_eq!(
+            saved
+                .plans
+                .iter()
+                .find(|plan| plan.id == schedule)
+                .unwrap()
+                .name,
+            "Week from app"
+        );
+        assert!(saved.plans.iter().any(|plan| plan.name == "Other week"));
+        assert_eq!(plan_revision(&saved, mine), kept_revision + 1);
+
+        let text = fs::read_to_string(dir.join("user.json")).unwrap();
+        let loaded = UserData::from_json_lossy(&text);
+        assert_eq!(loaded.degree_plans.len(), saved.degree_plans.len());
+        assert!(loaded
+            .degree_plans
+            .iter()
+            .any(|plan| plan.name == "Shared from app (edited in app)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schedule_edited_on_both_sides_keeps_the_disk_copy() {
+        let dir = temp_dir("schedule");
+        let mut app = UserData::default();
+        let schedule = app.create_plan("Week", "202710").id;
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+
+        let mut mcp = load_user(&dir);
+        mcp.plans
+            .iter_mut()
+            .find(|plan| plan.id == schedule)
+            .unwrap()
+            .name = "Week from MCP".to_string();
+        save_user(&dir, &mcp).unwrap();
+
+        let mut editing = app;
+        editing
+            .plans
+            .iter_mut()
+            .find(|plan| plan.id == schedule)
+            .unwrap()
+            .name = "Week from app".to_string();
+        let (saved, _) = save_merging(&dir, &editing, &stamp).unwrap();
+        assert_eq!(
+            saved
+                .plans
+                .iter()
+                .find(|plan| plan.id == schedule)
+                .unwrap()
+                .name,
+            "Week from MCP"
+        );
+        assert!(saved.plans.iter().any(|plan| {
+            plan.name == "Week from app (edited in app)" && plan.id != schedule && !plan.is_primary
+        }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untouched_save_does_not_fork_and_an_outside_delete_is_kept() {
+        let dir = temp_dir("delete");
+        let mut app = UserData::default();
+        let kept = app.add_degree_plan(degree("Kept"));
+        let dropped = app.add_degree_plan(degree("Dropped"));
+        let (mut app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+        app.degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == kept)
+            .unwrap()
+            .program = Some("CS".to_string());
+        let (app, stamp) = save_merging(&dir, &app, &stamp).unwrap();
+        assert_eq!(app.degree_plans.len(), 2);
+        assert!(names(&app)
+            .iter()
+            .all(|name| !name.contains("edited in app")));
+
+        let mut mcp = load_user(&dir);
+        mcp.delete_degree_plan(dropped);
+        save_user(&dir, &mcp).unwrap();
+
+        let mut editing = app.clone();
+        editing.preferences.preferred_campus = Some("Boston".to_string());
+        let (saved, _) = save_merging(&dir, &editing, &stamp).unwrap();
+        assert_eq!(
+            saved.preferences.preferred_campus.as_deref(),
+            Some("Boston")
+        );
+        assert!(saved.degree_plans.iter().all(|plan| plan.id != dropped));
+        assert_eq!(
+            saved
+                .degree_plans
+                .iter()
+                .find(|plan| plan.id == kept)
+                .unwrap()
+                .name,
+            "Kept"
+        );
+        assert!(names(&saved)
+            .iter()
+            .all(|name| !name.contains("edited in app")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_edit_of_a_deleted_plan_is_saved_as_a_copy() {
+        let dir = temp_dir("deleted");
+        let mut app = UserData::default();
+        let plan = app.add_degree_plan(degree("Shared"));
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+
+        let mut mcp = load_user(&dir);
+        mcp.delete_degree_plan(plan);
+        save_user(&dir, &mcp).unwrap();
+
+        let mut editing = app;
+        editing
+            .degree_plans
+            .iter_mut()
+            .find(|item| item.id == plan)
+            .unwrap()
+            .name = "Still editing".to_string();
+        let (saved, _) = save_merging(&dir, &editing, &stamp).unwrap();
+        assert!(saved.degree_plans.iter().all(|item| item.id != plan));
+        assert!(saved
+            .degree_plans
+            .iter()
+            .any(|item| item.name == "Still editing (edited in app)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_bytes_with_a_new_mtime_do_not_fork_a_copy() {
+        let dir = temp_dir("mtime");
+        let mut app = UserData::default();
+        app.add_degree_plan(degree("Kept"));
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+        let path = dir.join("user.json");
+        set_mtime(
+            &path,
+            stamp.mtime.unwrap_or(SystemTime::UNIX_EPOCH) + Duration::from_secs(3600),
+        );
+        let (saved, _) = save_merging(&dir, &app, &stamp).unwrap();
+        assert_eq!(saved.degree_plans.len(), 1);
+        assert_eq!(saved.degree_plans[0].name, "Kept");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hash_change_at_the_same_mtime_still_merges() {
+        let dir = temp_dir("hash");
+        let mut app = UserData::default();
+        let mine = app.add_degree_plan(degree("Mine"));
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+        let mtime = stamp.mtime.expect("saved file has an mtime");
+
+        let mut mcp = load_user(&dir);
+        mcp.add_degree_plan(degree("From MCP"));
+        save_user(&dir, &mcp).unwrap();
+        set_mtime(&dir.join("user.json"), mtime);
+
+        let mut editing = app;
+        editing
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == mine)
+            .unwrap()
+            .name = "Mine renamed".to_string();
+        let (saved, _) = save_merging(&dir, &editing, &stamp).unwrap();
+        assert_eq!(
+            saved
+                .degree_plans
+                .iter()
+                .find(|plan| plan.id == mine)
+                .unwrap()
+                .name,
+            "Mine renamed"
+        );
+        assert!(names(&saved).iter().any(|name| name == "From MCP"));
+        assert!(names(&saved)
+            .iter()
+            .all(|name| !name.contains("edited in app")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_window_reloads_an_outside_write_and_merges_when_dirty() {
+        let dir = temp_dir("reload");
+        let mut app = UserData::default();
+        let shared = app.add_degree_plan(degree("Shared"));
+        let (app, stamp) = save_merging(&dir, &app, &FileStamp::empty()).unwrap();
+
+        let mut mcp = load_user(&dir);
+        mcp.add_degree_plan(degree("From MCP"));
+        save_user(&dir, &mcp).unwrap();
+        let (data, _) = fold_external(&dir, &app, &stamp)
+            .unwrap()
+            .expect("an outside plan should reload");
+        assert!(names(&data).iter().any(|name| name == "From MCP"));
+
+        let mut mcp = load_user(&dir);
+        mcp.degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == shared)
+            .unwrap()
+            .name = "Shared from MCP".to_string();
+        save_user(&dir, &mcp).unwrap();
+        let mut dirty = app;
+        dirty
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == shared)
+            .unwrap()
+            .name = "Shared from app".to_string();
+        let (data, _) = fold_external(&dir, &dirty, &stamp)
+            .unwrap()
+            .expect("a dirty window should merge the outside edit");
+        assert_eq!(
+            data.degree_plans
+                .iter()
+                .find(|plan| plan.id == shared)
+                .unwrap()
+                .name,
+            "Shared from MCP"
+        );
+        assert!(data
+            .degree_plans
+            .iter()
+            .any(|plan| plan.name == "Shared from app (edited in app)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_file_is_left_in_place() {
+        let dir = temp_dir("bad");
+        fs::write(dir.join("user.json"), b"not json").unwrap();
+        let stamp = read_stamp(&dir);
+        let error = save_merging(&dir, &UserData::default(), &stamp).unwrap_err();
+        assert!(error.contains("not valid JSON"));
+        assert_eq!(fs::read(dir.join("user.json")).unwrap(), b"not json");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

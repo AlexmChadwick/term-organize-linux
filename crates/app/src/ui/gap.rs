@@ -289,7 +289,7 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         state.course = None;
         state.offering = OfferingHistory::empty();
         state.course_notes.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     let terms = known_terms(&shell.borrow().state.borrow().index);
     apply_term_model(shell, &terms, &code);
@@ -952,7 +952,7 @@ fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position
             return false;
         }
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
         true
     };
     if moved {
@@ -981,7 +981,7 @@ fn apply_move(shell: &Rc<RefCell<Shell>>, suggestion: &reorder::Suggestion) {
         };
         reorder::apply(suggestion, plan);
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, &suggestion.title);
     refresh(shell);
@@ -1139,7 +1139,7 @@ fn answer_petition(shell: &Rc<RefCell<Shell>>, id: Uuid, choice: CourseNumberCho
         };
         plan.set_course_numbers(limit, id);
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -2116,7 +2116,7 @@ fn declare_equivalence(shell: &Rc<RefCell<Shell>>, taken: &CourseKey, counts_as:
                 note: String::new(),
             });
             plan.updated_at = Some(now_secs().to_string());
-            persist(&state.data);
+            persist(&mut state);
         }
     }
     refresh(shell);
