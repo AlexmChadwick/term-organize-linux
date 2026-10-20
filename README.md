@@ -55,7 +55,41 @@ update-desktop-database ~/.local/share/applications || true
 
 The `.desktop` file registers `termorganize://`, `neuclasssearch://`, and PDF “Open with”. While the app is open it also asks the portal Background API for permission to autostart `termorganize --seat-watch`. The systemd timer is the reliable 15-minute check when the portal request is denied.
 
-A Flatpak manifest is `packaging/org.termorganize.TermOrganize.yml`.
+A Flatpak manifest is `packaging/org.termorganize.TermOrganize.yml`. `packaging/build-release.sh` vendors crates and builds the release Flatpak and AppImage.
+
+## Downloads
+
+Pushing a tag that matches `v*` (for example `v1.1.0`) runs `.github/workflows/release.yml`. The workflow does not run on pull requests or branch pushes. It uploads a **draft** GitHub release, which is not published. A tag that contains `-rc` is also marked as a prerelease. The draft contains `TermOrganize-<tag>-x86_64.flatpak`, `TermOrganize-<tag>-x86_64.AppImage`, `SHA256SUMS`, `SHA256SUMS.asc`, and the public key `term-organize-release-key.asc`.
+
+Releases are signed by **Term Organize Releases (unofficial)**, fingerprint `5276 3E58 9A37 573E 2C75 5AE2 A120 52B3 ED28 4C89`.
+
+### Verify
+
+```bash
+gpg --import term-organize-release-key.asc
+gpg --fingerprint 52763E589A37573E2C755AE2A12052B3ED284C89
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+Trust the key only when that fingerprint matches.
+
+### Install
+
+Flatpak, using the GNOME 47 runtime:
+
+```bash
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user ./TermOrganize-v1.1.0-x86_64.flatpak
+flatpak run org.termorganize.TermOrganize
+```
+
+AppImage. GTK 4 and libadwaita are bundled. Degree-plan PDF import still needs `pdftotext` on the host.
+
+```bash
+chmod +x TermOrganize-v1.1.0-x86_64.AppImage
+./TermOrganize-v1.1.0-x86_64.AppImage
+```
 
 ## Layout of the code
 
