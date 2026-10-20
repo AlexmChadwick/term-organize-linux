@@ -199,7 +199,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
             .default_width(520)
             .default_height(240)
             .build();
-        let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-202710.catalog, or run Term Organize from the repository."));
+        let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-*.catalog, or run Term Organize from the repository."));
         label.set_wrap(true);
         label.set_margin_top(24);
         label.set_margin_bottom(24);

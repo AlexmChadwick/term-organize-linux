@@ -27,6 +27,7 @@ modules:
       - cargo build --release --locked --manifest-path Cargo.toml
       - install -Dm755 target/release/termorganize /app/bin/termorganize
       - install -Dm644 data/catalog/term-202710.catalog /app/share/termorganize/catalog/term-202710.catalog
+      - install -Dm644 data/catalog/term-202730.catalog /app/share/termorganize/catalog/term-202730.catalog
       - install -Dm644 data/legal/LICENSE.txt /app/share/termorganize/LICENSE.txt
       - install -Dm644 packaging/org.termorganize.TermOrganize.desktop /app/share/applications/org.termorganize.TermOrganize.desktop
       - install -Dm644 packaging/org.termorganize.TermOrganize.metainfo.xml /app/share/metainfo/org.termorganize.TermOrganize.metainfo.xml

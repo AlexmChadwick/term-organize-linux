@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::degree_audit::{
     self, alternative_entries, collapsed_entries, counting_caption, counting_note, has_header_row,
     is_replaced, is_shown, listing, note_entries, option_entries, requirement_name, row_caption,
@@ -3622,7 +3622,7 @@ fn autofillPrefersTheExactTermThenTheClosest() {
 }
 
 fn bundled_index() -> CatalogIndex {
-    let path = bundled_catalog_path().expect("bundled catalog");
+    let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
     let mut catalog = archive::read(&path).expect("read catalog");
     catalog.recompute_postreqs();
     CatalogIndex::build(catalog)
