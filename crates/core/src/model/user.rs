@@ -109,6 +109,9 @@ pub struct PlanCourse {
     pub excluded_crns: HashSet<String>,
     #[serde(default)]
     pub color_index: i32,
+    /// Section the user picked. Empty means the schedule may choose one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_crn: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -404,6 +407,7 @@ impl UserData {
             is_required: true,
             excluded_crns: HashSet::new(),
             color_index,
+            pinned_crn: None,
         });
         true
     }

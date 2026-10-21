@@ -169,6 +169,61 @@ fn unique(texts: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// A non-empty CRN the user chose. Blank strings are not a choice.
+pub fn chosen_crn(crn: Option<&str>) -> Option<&str> {
+    crn.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// Both entries name a section, and the sections are different.
+pub fn distinct_chosen_crns(left: Option<&str>, right: Option<&str>) -> bool {
+    match (chosen_crn(left), chosen_crn(right)) {
+        (Some(left), Some(right)) => left != right,
+        _ => false,
+    }
+}
+
+pub fn same_chosen_crn(left: Option<&str>, right: Option<&str>) -> bool {
+    match (chosen_crn(left), chosen_crn(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Another copy of a course is allowed only when every copy, including the new
+/// one, has its own manually chosen CRN and those CRNs differ.
+pub fn repeated_course_allowed<'a>(
+    existing: impl IntoIterator<Item = Option<&'a str>>,
+    incoming: Option<&str>,
+) -> bool {
+    let existing: Vec<Option<&str>> = existing.into_iter().collect();
+    if existing.is_empty() {
+        return true;
+    }
+    let Some(incoming) = chosen_crn(incoming) else {
+        return false;
+    };
+    if existing
+        .iter()
+        .any(|crn| chosen_crn(*crn) == Some(incoming))
+    {
+        return false;
+    }
+    existing.iter().all(|crn| chosen_crn(*crn).is_some())
+}
+
+fn repeats_course(key: &CourseKey, earlier: &DegreePlanCourse, course: &DegreePlanCourse) -> bool {
+    if earlier.key.as_ref() != Some(key) {
+        return false;
+    }
+    if same_chosen_crn(earlier.crn.as_deref(), course.crn.as_deref()) {
+        return true;
+    }
+    if distinct_chosen_crns(earlier.crn.as_deref(), course.crn.as_deref()) {
+        return false;
+    }
+    !counts_separately(earlier, course)
+}
+
 pub fn duplicate_keys(plan: &DegreePlan) -> HashSet<CourseKey> {
     let planned: Vec<&DegreePlanCourse> =
         plan.terms.iter().flat_map(|t| t.courses.iter()).collect();
@@ -177,11 +232,11 @@ pub fn duplicate_keys(plan: &DegreePlan) -> HashSet<CourseKey> {
         let Some(key) = &course.key else { continue };
         let repeats_planned = planned[..index]
             .iter()
-            .any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
+            .any(|other| repeats_course(key, other, course));
         let repeats_completed = plan
             .completed
             .iter()
-            .any(|other| other.key.as_ref() == Some(key) && !counts_separately(other, course));
+            .any(|other| repeats_course(key, other, course));
         if repeats_planned || repeats_completed {
             duplicates.insert(key.clone());
         }
@@ -201,6 +256,8 @@ pub struct ScheduleSuggestion {
     pub detail: String,
     pub is_exact_term: bool,
     pub courses: Vec<CourseKey>,
+    /// Chosen section for each course, when the degree plan has one.
+    pub crns: Vec<Option<String>>,
     pub unavailable: Vec<CourseKey>,
 }
 
@@ -234,29 +291,47 @@ pub fn schedule_suggestions(
     let mut exact = vec![];
     let mut closest = vec![];
     for plan in plans {
-        let done = plan.completed_keys();
         let mut candidates = vec![];
         for plan_term in &plan.terms {
-            let mut seen = HashSet::new();
-            let keys: Vec<CourseKey> = plan_term
-                .courses
-                .iter()
-                .filter_map(|c| c.key.clone())
-                .filter(|k| !done.contains(k) && !already.contains(k) && seen.insert(k.clone()))
-                .collect();
-            if keys.is_empty() {
+            let mut accepted: Vec<(CourseKey, Option<String>)> = Vec::new();
+            for course in &plan_term.courses {
+                let Some(key) = &course.key else { continue };
+                let earlier = plan
+                    .completed
+                    .iter()
+                    .filter(|other| other.key.as_ref() == Some(key))
+                    .map(|other| other.crn.as_deref())
+                    .chain(
+                        accepted
+                            .iter()
+                            .filter(|(prior, _)| prior == key)
+                            .map(|(_, crn)| crn.as_deref()),
+                    )
+                    .chain(already.iter().filter(|prior| *prior == key).map(|_| None));
+                if !repeated_course_allowed(earlier, course.crn.as_deref()) {
+                    continue;
+                }
+                accepted.push((key.clone(), course.crn.clone()));
+            }
+            if accepted.is_empty() {
                 continue;
             }
             let distance = (plan_term.month_index() - target).abs();
-            candidates.push((plan_term, keys, distance));
+            candidates.push((plan_term, accepted, distance));
         }
-        let Some((plan_term, keys, distance)) = candidates
+        let Some((plan_term, accepted, distance)) = candidates
             .into_iter()
             .min_by(|a, b| a.2.cmp(&b.2).then(b.0.sort_key().cmp(&a.0.sort_key())))
         else {
             continue;
         };
+        let keys: Vec<CourseKey> = accepted.iter().map(|(key, _)| key.clone()).collect();
         let (offered, unavailable) = split_offered(&keys, term, index);
+        let offered_crns: Vec<Option<String>> = accepted
+            .iter()
+            .filter(|(key, _)| offered.contains(key))
+            .map(|(_, crn)| crn.clone())
+            .collect();
         if offered.is_empty() && unavailable.is_empty() {
             continue;
         }
@@ -274,6 +349,7 @@ pub fn schedule_suggestions(
             },
             is_exact_term: is_exact,
             courses: offered,
+            crns: offered_crns,
             unavailable,
         };
         if is_exact {
@@ -295,13 +371,25 @@ pub fn schedule_suggestions(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for plan in schedules.into_iter().take(2) {
-        let keys: Vec<CourseKey> = plan
-            .courses
-            .iter()
-            .map(|c| c.key.clone())
-            .filter(|k| !already.contains(k))
-            .collect();
-        if keys.is_empty() {
+        let mut accepted: Vec<(CourseKey, Option<String>)> = Vec::new();
+        for course in &plan.courses {
+            let earlier = accepted
+                .iter()
+                .filter(|(prior, _)| prior == &course.key)
+                .map(|(_, crn)| crn.as_deref())
+                .chain(
+                    already
+                        .iter()
+                        .filter(|prior| *prior == &course.key)
+                        .map(|_| None),
+                );
+            let pin = course.pinned_crn.clone();
+            if !repeated_course_allowed(earlier, pin.as_deref()) {
+                continue;
+            }
+            accepted.push((course.key.clone(), pin));
+        }
+        if accepted.is_empty() {
             continue;
         }
         copies.push(ScheduleSuggestion {
@@ -314,7 +402,8 @@ pub fn schedule_suggestions(
                 "Another schedule for this term".into()
             },
             is_exact_term: true,
-            courses: keys,
+            courses: accepted.iter().map(|(key, _)| key.clone()).collect(),
+            crns: accepted.into_iter().map(|(_, crn)| crn).collect(),
             unavailable: vec![],
         });
     }
@@ -606,6 +695,8 @@ pub fn schedule_for_semester(
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: index as i32,
+
+                pinned_crn: None,
             })
             .collect(),
         selected_crns: vec![],

@@ -2031,18 +2031,7 @@ fn plan_inputs(state: &State) -> Vec<ScheduleCourseInput> {
     let Some(plan) = state.data.plans.iter().find(|p| p.id == id) else {
         return vec![];
     };
-    plan.courses
-        .iter()
-        .map(|c| {
-            let mut input = ScheduleCourseInput::new(
-                c.key.clone(),
-                c.is_required,
-                state.index.sections_for(&c.key),
-            );
-            input.excluded_crns = c.excluded_crns.clone();
-            input
-        })
-        .collect()
+    schedule::inputs_for(plan, &state.index)
 }
 
 /// The degree plan on screen. The page shows the first plan when none has been
@@ -3028,6 +3017,10 @@ fn new_degree(shell: &Rc<RefCell<Shell>>) {
 }
 
 fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    add_pinned_course(shell, key, None);
+}
+
+fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&str>) {
     let known = shell.borrow().state.borrow().index.course(key).is_some();
     if !known {
         toast(shell, "That course isn’t in this term");
@@ -3056,14 +3049,27 @@ fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         }
         let id = current_plan_id(&state).unwrap();
         if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
-            if !plan.contains(key) {
+            let existing = plan
+                .courses
+                .iter()
+                .filter(|course| &course.key == key)
+                .map(|course| course.pinned_crn.as_deref())
+                .collect::<Vec<_>>();
+            if planlogic::repeated_course_allowed(existing, crn) {
                 let color = plan.next_color_index();
+                let pin = planlogic::chosen_crn(crn).map(|text| text.to_string());
                 plan.courses.push(PlanCourse {
                     key: key.clone(),
                     is_required: true,
                     excluded_crns: HashSet::new(),
                     color_index: color,
+                    pinned_crn: pin.clone(),
                 });
+                if let Some(pin) = pin {
+                    if !plan.selected_crns.iter().any(|item| item == &pin) {
+                        plan.selected_crns.push(pin);
+                    }
+                }
                 plan.updated_at = now_secs();
             }
         }
@@ -3480,15 +3486,16 @@ fn autofill_schedule(shell: &Rc<RefCell<Shell>>) {
         )
         .into_iter()
         .next()
-        .map(|s| s.courses)
+        .map(|suggestion| (suggestion.courses, suggestion.crns))
         .unwrap_or_default()
     };
-    if keys.is_empty() {
+    if keys.0.is_empty() {
         toast(shell, "No degree-plan courses to add for this term");
         return;
     }
-    for key in &keys {
-        add_course_to_plan(shell, key);
+    for (offset, key) in keys.0.iter().enumerate() {
+        let crn = keys.1.get(offset).and_then(|crn| crn.as_deref());
+        add_pinned_course(shell, key, crn);
     }
     refresh(shell);
 }

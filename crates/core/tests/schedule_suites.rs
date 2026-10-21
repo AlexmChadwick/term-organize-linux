@@ -246,6 +246,8 @@ fn plan_with(codes: &[&str], selected: &[&str]) -> SchedulePlan {
             is_required: true,
             excluded_crns: HashSet::new(),
             color_index: offset as i32,
+
+            pinned_crn: None,
         });
     }
     plan.selected_crns = selected.iter().map(|crn| (*crn).to_string()).collect();
@@ -1175,6 +1177,8 @@ fn plansSavedBeforePreferencesExistStillLoad() {
         is_required: true,
         excluded_crns: HashSet::new(),
         color_index: 0,
+
+        pinned_crn: None,
     }];
     let mut value = serde_json::to_value(&plan).unwrap();
     assert!(
@@ -3385,12 +3389,16 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
             is_required: true,
             excluded_crns: HashSet::new(),
             color_index: 0,
+
+            pinned_crn: None,
         },
         PlanCourse {
             key: key("MATH", "2331"),
             is_required: false,
             excluded_crns: HashSet::new(),
             color_index: 1,
+
+            pinned_crn: None,
         },
     ];
     let context = schedule::preferences_context(&plan, Some(index));
@@ -3430,6 +3438,8 @@ fn excludedSectionsDontOfferTheirInstructors() {
         is_required: true,
         excluded_crns: HashSet::new(),
         color_index: 0,
+
+        pinned_crn: None,
     }];
     let everyone = schedule::preferences_context(&plan, Some(index)).instructors;
     plan.courses[0].excluded_crns = index

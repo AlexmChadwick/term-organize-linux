@@ -524,7 +524,35 @@ pub fn apply_course_refresh(
         .map(|s| (s.crn.clone(), s.clone()))
         .collect();
     let fresh = make_sections(banner, &previous);
-    catalog.sections.retain(|s| &s.course_key() != course);
+    let topics = catalog
+        .courses
+        .iter()
+        .any(|listed| &listed.key() == course && listed.special_topics)
+        || banner.iter().any(|section| {
+            section
+                .section_attributes
+                .as_ref()
+                .is_some_and(|attributes| {
+                    attributes.iter().any(|attribute| attribute.code == "TOPC")
+                })
+                || section
+                    .course_title
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains("special topics")
+        });
+    if topics {
+        // Sections that share a number are different topics. A refresh replaces
+        // the CRNs it names and leaves every other CRN of that number in place.
+        let replaced: std::collections::HashSet<String> =
+            fresh.iter().map(|section| section.crn.clone()).collect();
+        catalog
+            .sections
+            .retain(|section| &section.course_key() != course || !replaced.contains(&section.crn));
+    } else {
+        catalog.sections.retain(|s| &s.course_key() != course);
+    }
     catalog.sections.extend(fresh);
     catalog.sections.sort_by(|a, b| {
         a.course_key()

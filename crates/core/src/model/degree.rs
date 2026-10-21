@@ -100,6 +100,10 @@ pub struct DegreePlanCourse {
     pub title: String,
     #[serde(default)]
     pub credits: f64,
+    /// Section chosen for this row. Special topics that share a number stay
+    /// distinct when each row has a different CRN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crn: Option<String>,
 }
 
 impl DegreePlanCourse {
@@ -111,6 +115,7 @@ impl DegreePlanCourse {
             label,
             title: title.into(),
             credits,
+            crn: None,
         }
     }
     pub fn other(label: impl Into<String>, title: impl Into<String>, credits: f64) -> Self {
@@ -120,6 +125,7 @@ impl DegreePlanCourse {
             label: label.into(),
             title: title.into(),
             credits,
+            crn: None,
         }
     }
 }

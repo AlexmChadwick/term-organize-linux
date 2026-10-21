@@ -871,12 +871,16 @@ fn prerequisite_summaries_and_autofill() {
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 0,
+
+                pinned_crn: None,
             },
             PlanCourse {
                 key: CourseKey::parse("MATH 2331").unwrap(),
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 1,
+
+                pinned_crn: None,
             },
         ],
         selected_crns: vec![],
