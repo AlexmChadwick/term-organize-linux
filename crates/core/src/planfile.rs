@@ -4,7 +4,7 @@
 //! Unofficial. Not affiliated with, endorsed by, or sponsored by Northeastern University or Sandbox.
 
 use crate::model::{DegreePlan, DegreePlanTerm, PlanSeason, UserData};
-use crate::store::{load_user, plan_revision, save_user_locked, UserLock};
+use crate::store::{load_user_checked, plan_revision, save_user_locked, UserLock};
 use crate::sync;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,7 +28,7 @@ pub fn create_plan(
         return Err(PlanFileError::Rejected("A plan needs a name.".into()));
     }
     let _lock = UserLock::acquire(dir).map_err(PlanFileError::Io)?;
-    let mut data = load_user(dir);
+    let mut data = read_user(dir)?;
     let now = now_iso();
     let mut plan = DegreePlan {
         name: name.to_string(),
@@ -41,7 +41,7 @@ pub fn create_plan(
     plan.sort_terms();
     let id = data.add_degree_plan(plan);
     save_user_locked(dir, &data).map_err(PlanFileError::Io)?;
-    let stored = load_user(dir);
+    let stored = read_user(dir)?;
     let saved = stored
         .degree_plans
         .iter()
@@ -58,7 +58,7 @@ pub fn update_plan(
     mutate: impl FnOnce(&mut DegreePlan) -> Result<(), String>,
 ) -> Result<(DegreePlan, u64), PlanFileError> {
     let _lock = UserLock::acquire(dir).map_err(PlanFileError::Io)?;
-    let mut data = load_user(dir);
+    let mut data = read_user(dir)?;
     let actual = plan_revision(&data, id);
     if actual != expected_revision {
         return Err(PlanFileError::RevisionConflict { actual });
@@ -72,7 +72,7 @@ pub fn update_plan(
     plan.updated_at = Some(now_iso());
     plan.sort_terms();
     save_user_locked(dir, &data).map_err(PlanFileError::Io)?;
-    let stored = load_user(dir);
+    let stored = read_user(dir)?;
     let saved = stored
         .degree_plans
         .iter()
@@ -84,7 +84,7 @@ pub fn update_plan(
 
 pub fn delete_plan(dir: &Path, id: Uuid, expected_revision: u64) -> Result<(), PlanFileError> {
     let _lock = UserLock::acquire(dir).map_err(PlanFileError::Io)?;
-    let mut data = load_user(dir);
+    let mut data = read_user(dir)?;
     if !data.degree_plans.iter().any(|plan| plan.id == id) {
         return Err(PlanFileError::NotFound);
     }
@@ -97,8 +97,8 @@ pub fn delete_plan(dir: &Path, id: Uuid, expected_revision: u64) -> Result<(), P
     Ok(())
 }
 
-pub fn read_user(dir: &Path) -> UserData {
-    load_user(dir)
+pub fn read_user(dir: &Path) -> Result<UserData, PlanFileError> {
+    load_user_checked(dir).map_err(PlanFileError::Io)
 }
 
 pub fn term_name(season: PlanSeason, year: i32) -> String {

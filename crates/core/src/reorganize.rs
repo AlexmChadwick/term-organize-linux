@@ -8,13 +8,16 @@
 //! using the catalogs handed to it (for the MCP server, the bundled Fall 2026 and Spring 2027
 //! snapshots) as the offering history.
 
+use crate::equivalences::CourseEquivalences;
 use crate::index::CatalogIndex;
 use crate::model::{
-    CourseKey, DegreePlan, DegreePlanCourse, PlanSeason, ScheduleFilters, SchedulePreferences, Term,
+    CourseKey, DegreePlan, DegreePlanCourse, PlanSeason, Requisite, ScheduleFilters,
+    SchedulePreferences, Term,
 };
 use crate::offering::{self, OfferingHistory};
+use crate::planlogic::{self, PrereqStatus};
 use crate::schedule::{self, Limits, ScheduleCourseInput, ScheduleSort};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const MAX_MOVES: usize = 32;
 pub const NOTE: &str = "Courses move only among terms already on the plan, so the plan does not gain a semester after the last one. Offering checks use the catalogs passed in (the bundled snapshots for the MCP server). This whole-plan pass is separate from the one-semester reorder.";
@@ -50,9 +53,17 @@ pub struct CourseMove {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedCourse {
+    pub subject: String,
+    pub number: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReorganizeOutcome {
     pub terms: Vec<PlanSlot>,
     pub moves: Vec<CourseMove>,
+    pub unresolved: Vec<UnresolvedCourse>,
     pub notes: Vec<String>,
 }
 
@@ -60,9 +71,11 @@ pub struct ReorganizeOutcome {
 pub struct DegreeReorganize {
     pub plan: DegreePlan,
     pub moves: Vec<CourseMove>,
+    pub unresolved: Vec<UnresolvedCourse>,
     pub notes: Vec<String>,
 }
 
+#[derive(Clone)]
 struct WorkTerm {
     label: String,
     season: PlanSeason,
@@ -144,8 +157,23 @@ pub fn reorganize(plan: &[PlanSlot], catalogs: &[CatalogIndex]) -> ReorganizeOut
     }
 
     let mut moves = Vec::new();
-    move_unoffered(&mut terms, catalogs, &history, &mut moves, &mut notes);
-    move_clashes(&mut terms, catalogs, &history, &mut moves, &mut notes);
+    let mut unresolved = Vec::new();
+    move_unoffered(
+        &mut terms,
+        catalogs,
+        &history,
+        &mut moves,
+        &mut unresolved,
+        &mut notes,
+    );
+    move_clashes(
+        &mut terms,
+        catalogs,
+        &history,
+        &mut moves,
+        &mut unresolved,
+        &mut notes,
+    );
 
     ReorganizeOutcome {
         terms: terms
@@ -156,6 +184,7 @@ pub fn reorganize(plan: &[PlanSlot], catalogs: &[CatalogIndex]) -> ReorganizeOut
             })
             .collect(),
         moves,
+        unresolved,
         notes,
     }
 }
@@ -185,6 +214,7 @@ pub fn reorganize_degree_plan(plan: &DegreePlan, catalogs: &[CatalogIndex]) -> D
         return DegreeReorganize {
             plan: plan.clone(),
             moves: Vec::new(),
+            unresolved: outcome.unresolved,
             notes: outcome.notes,
         };
     }
@@ -220,6 +250,7 @@ pub fn reorganize_degree_plan(plan: &DegreePlan, catalogs: &[CatalogIndex]) -> D
     DegreeReorganize {
         plan: next,
         moves: outcome.moves,
+        unresolved: outcome.unresolved,
         notes: outcome.notes,
     }
 }
@@ -278,6 +309,7 @@ fn move_unoffered(
     catalogs: &[CatalogIndex],
     history: &OfferingHistory,
     moves: &mut Vec<CourseMove>,
+    unresolved: &mut Vec<UnresolvedCourse>,
     notes: &mut Vec<String>,
 ) {
     for index in 0..terms.len() {
@@ -292,7 +324,7 @@ fn move_unoffered(
                 "{} {} has no sections in {}.",
                 key.subject, key.number, terms[index].label
             );
-            if relocate(
+            if let Err(blocked) = relocate(
                 terms,
                 catalogs,
                 history,
@@ -301,13 +333,15 @@ fn move_unoffered(
                 &reason,
                 moves,
             ) {
+                unresolved.push(UnresolvedCourse {
+                    subject: key.subject,
+                    number: key.number,
+                    reason: blocked.clone(),
+                });
+                notes.push(blocked);
+                course_index += 1;
                 continue;
             }
-            notes.push(format!(
-                "{} {} stays in {} because no other term on the plan offers it.",
-                key.subject, key.number, terms[index].label
-            ));
-            course_index += 1;
         }
     }
 }
@@ -317,6 +351,7 @@ fn move_clashes(
     catalogs: &[CatalogIndex],
     history: &OfferingHistory,
     moves: &mut Vec<CourseMove>,
+    unresolved: &mut Vec<UnresolvedCourse>,
     notes: &mut Vec<String>,
 ) {
     for _ in 0..MAX_MOVES {
@@ -324,7 +359,7 @@ fn move_clashes(
             break;
         }
         if let Some((term_index, course_index, reason)) = first_crn_clash(terms, catalogs) {
-            if !relocate(
+            if let Err(blocked) = relocate(
                 terms,
                 catalogs,
                 history,
@@ -333,13 +368,19 @@ fn move_clashes(
                 &reason,
                 moves,
             ) {
-                notes.push(reason);
+                let key = course_key(&terms[term_index].courses[course_index]);
+                unresolved.push(UnresolvedCourse {
+                    subject: key.subject,
+                    number: key.number,
+                    reason: blocked.clone(),
+                });
+                notes.push(blocked);
                 break;
             }
             continue;
         }
         if let Some((term_index, course_index, reason)) = first_generated_clash(terms, catalogs) {
-            if !relocate(
+            if let Err(blocked) = relocate(
                 terms,
                 catalogs,
                 history,
@@ -348,7 +389,13 @@ fn move_clashes(
                 &reason,
                 moves,
             ) {
-                notes.push(reason);
+                let key = course_key(&terms[term_index].courses[course_index]);
+                unresolved.push(UnresolvedCourse {
+                    subject: key.subject,
+                    number: key.number,
+                    reason: blocked.clone(),
+                });
+                notes.push(blocked);
                 break;
             }
             continue;
@@ -473,15 +520,13 @@ fn relocate(
     course_index: usize,
     reason: &str,
     moves: &mut Vec<CourseMove>,
-) -> bool {
+) -> Result<(), String> {
     if moves.len() >= MAX_MOVES || course_index >= terms[from].courses.len() {
-        return false;
+        return Err("No further courses can move.".into());
     }
     let course = terms[from].courses[course_index].clone();
     let key = course_key(&course);
-    let Some(dest) = destination(terms, catalogs, history, from, &key) else {
-        return false;
-    };
+    let dest = destination(terms, catalogs, history, from, &key)?;
     let crn = crn_for_destination(&course, &key, &terms[dest], catalogs);
     let mut moved = course;
     moved.crn = crn;
@@ -494,7 +539,7 @@ fn relocate(
         to: terms[dest].label.clone(),
         reason: reason.to_string(),
     });
-    true
+    Ok(())
 }
 
 fn destination(
@@ -503,7 +548,7 @@ fn destination(
     history: &OfferingHistory,
     from: usize,
     key: &CourseKey,
-) -> Option<usize> {
+) -> Result<usize, String> {
     let origin = terms[from].sort;
     let mut candidates: Vec<usize> = (0..terms.len()).filter(|index| *index != from).collect();
     candidates.sort_by_key(|index| {
@@ -514,13 +559,122 @@ fn destination(
             (1, -delta)
         }
     });
-    candidates.into_iter().find(|index| {
-        is_offered(key, &terms[*index], catalogs, history)
-            && !terms[*index]
-                .courses
-                .iter()
-                .any(|course| course_key(course) == *key)
-    })
+    let mut blocked: Option<String> = None;
+    for index in candidates {
+        if !is_offered(key, &terms[index], catalogs, history) {
+            continue;
+        }
+        if terms[index]
+            .courses
+            .iter()
+            .any(|course| course_key(course) == *key)
+        {
+            continue;
+        }
+        if let Some(reason) = prerequisite_block(terms, catalogs, from, index, key) {
+            if blocked.is_none() {
+                blocked = Some(reason);
+            }
+            continue;
+        }
+        return Ok(index);
+    }
+    Err(blocked.unwrap_or_else(|| {
+        format!(
+            "{} {} stays in {} because no other term on the plan offers it.",
+            key.subject, key.number, terms[from].label
+        )
+    }))
+}
+
+/// A move is legal when the course's catalog prerequisites are met by courses
+/// in earlier terms, and when no other course on the plan goes from met to
+/// missing. Prerequisites that are not on the plan stay unmet, so the course
+/// does not move. Corequisites are not part of this check.
+fn prerequisite_block(
+    terms: &[WorkTerm],
+    catalogs: &[CatalogIndex],
+    from: usize,
+    dest: usize,
+    key: &CourseKey,
+) -> Option<String> {
+    let equivalences = CourseEquivalences::none();
+    let before = prerequisite_checks(terms, catalogs, &equivalences);
+    let simulated = simulate_move(terms, from, dest, key);
+    let after = prerequisite_checks(&simulated, catalogs, &equivalences);
+    if let Some(PrereqStatus::Missing(text)) = after.get(key) {
+        return Some(format!(
+            "{} {} is offered in {}, but prerequisites are not met by earlier courses on the plan: {text}.",
+            key.subject, key.number, terms[dest].label
+        ));
+    }
+    for (other, status) in &before {
+        if other == key {
+            continue;
+        }
+        if let PrereqStatus::Met = status {
+            if let Some(PrereqStatus::Missing(text)) = after.get(other) {
+                return Some(format!(
+                    "Moving {} {} to {} would break prerequisite order for {other}: {text}.",
+                    key.subject, key.number, terms[dest].label
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn simulate_move(terms: &[WorkTerm], from: usize, dest: usize, key: &CourseKey) -> Vec<WorkTerm> {
+    let mut terms = terms.to_vec();
+    let Some(position) = terms[from]
+        .courses
+        .iter()
+        .position(|course| course_key(course) == *key)
+    else {
+        return terms;
+    };
+    let course = terms[from].courses.remove(position);
+    terms[dest].courses.push(course);
+    terms
+}
+
+fn prerequisite_checks(
+    terms: &[WorkTerm],
+    catalogs: &[CatalogIndex],
+    equivalences: &CourseEquivalences,
+) -> HashMap<CourseKey, PrereqStatus> {
+    let mut order: Vec<usize> = (0..terms.len()).collect();
+    order.sort_by_key(|index| terms[*index].sort);
+    let mut taken = HashSet::new();
+    let mut checks = HashMap::new();
+    for index in order {
+        for course in &terms[index].courses {
+            let key = course_key(course);
+            let status = match known_prereq(catalogs, &key) {
+                Some(requisite) => planlogic::status(requisite, &taken, equivalences),
+                None => PrereqStatus::Unknown,
+            };
+            checks.insert(key, status);
+        }
+        for course in &terms[index].courses {
+            taken.insert(course_key(course));
+        }
+    }
+    checks
+}
+
+fn known_prereq<'a>(
+    catalogs: &'a [CatalogIndex],
+    key: &CourseKey,
+) -> Option<Option<&'a Requisite>> {
+    for index in catalogs {
+        if let Some(course) = index.course(key) {
+            if course.details_loaded {
+                return Some(course.prereqs.as_ref());
+            }
+        }
+    }
+    None
 }
 
 fn crn_for_destination(

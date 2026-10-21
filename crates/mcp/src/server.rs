@@ -32,14 +32,8 @@ pub struct TermOrganize {
 
 impl TermOrganize {
     pub fn new(data_dir: PathBuf, read_only: bool) -> Self {
-        let mut tool_router = Self::tool_router();
-        if read_only {
-            for name in WRITE_TOOLS {
-                tool_router.disable_route(*name);
-            }
-        }
         Self {
-            tool_router,
+            tool_router: Self::tool_router(),
             data_dir,
             read_only,
         }
@@ -50,7 +44,11 @@ impl TermOrganize {
     }
 
     pub fn tool_definitions(&self) -> Vec<rmcp::model::Tool> {
-        self.tool_router.list_all()
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| !(self.read_only && WRITE_TOOLS.contains(&tool.name.as_ref())))
+            .collect()
     }
 }
 
@@ -146,7 +144,7 @@ impl TermOrganize {
         &self,
         Parameters(args): Parameters<tools::ReorganizeArgs>,
     ) -> CallToolResult {
-        finish(tools::reorganize_plan(args))
+        finish(tools::reorganize_plan(&self.data_dir, args))
     }
 
     #[tool(
@@ -158,7 +156,7 @@ impl TermOrganize {
         )
     )]
     fn list_plans(&self) -> CallToolResult {
-        CallToolResult::structured(tools::list_plans(&self.data_dir))
+        finish(tools::list_plans(&self.data_dir))
     }
 
     #[tool(
@@ -278,6 +276,45 @@ impl TermOrganize {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for TermOrganize {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult::with_all_items(
+            self.tool_definitions(),
+        ))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        if self.read_only && WRITE_TOOLS.contains(&name) {
+            return None;
+        }
+        self.tool_router.get(name).cloned()
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let name = request.name.as_ref();
+        if self.read_only && WRITE_TOOLS.contains(&name) {
+            return Ok(finish(Err(ToolError::read_only(
+                "This server is running with --read-only, so write tools are not available.",
+            )))
+            .into());
+        }
+        if !self.tool_router.has_route(name) {
+            return Ok(finish(Err(ToolError::unknown_tool(format!(
+                "Unknown tool \"{name}\"."
+            ))))
+            .into());
+        }
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(context).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(

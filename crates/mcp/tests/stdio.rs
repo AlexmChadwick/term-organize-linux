@@ -98,7 +98,7 @@ fn stdio_initialize_lists_tools_and_creates_a_plan() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|term| term["code"].as_str().unwrap())
+        .map(|term| term["term"].as_str().unwrap())
         .collect();
     assert_eq!(codes, ["202730", "202710"]);
 
@@ -117,6 +117,83 @@ fn stdio_initialize_lists_tools_and_creates_a_plan() {
     assert_eq!(plan["revision"], 1);
     assert!(plan["id"].as_str().unwrap().len() > 8);
 
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_only_call_returns_read_only_and_hides_writes() {
+    let dir = temp_dir();
+    let bin = std::env::var("CARGO_BIN_EXE_term_organize_mcp")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_term-organize-mcp"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/term-organize-mcp")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let mut child = Command::new(bin)
+        .args(["--read-only", "--data-dir"])
+        .arg(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn term-organize-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let mut send = |message: Value| {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    };
+    send(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "term-organize-test", "version": "0.0.0" }
+        }
+    }));
+    let _initialized = wait_id(&rx, 1);
+    send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let listed = wait_id(&rx, 2);
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"list_plans"));
+    assert!(!names.contains(&"create_plan"));
+    send(json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": { "name": "create_plan", "arguments": { "name": "Nope" } }
+    }));
+    let called = wait_id(&rx, 3);
+    assert_eq!(called["result"]["isError"], true);
+    let body = structured(&called);
+    assert_eq!(body["error"]["code"], "read_only");
+    assert!(!body["error"]["message"].as_str().unwrap().is_empty());
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();

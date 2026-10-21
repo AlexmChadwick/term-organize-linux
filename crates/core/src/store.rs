@@ -138,12 +138,54 @@ pub(crate) fn file_changed(
 }
 
 pub fn load_user(dir: &Path) -> UserData {
-    let Ok(text) = std::fs::read_to_string(dir.join("user.json")) else {
-        return UserData::default();
+    load_user_checked(dir).unwrap_or_else(|_| UserData::default())
+}
+
+/// Read `user.json` for a plan tool.
+///
+/// A missing file is an empty user. A file that exists but cannot be read,
+/// is not JSON, or has a newer `version` than this build understands is an
+/// error. Callers must not replace that file.
+pub fn load_user_checked(dir: &Path) -> Result<UserData, String> {
+    let path = dir.join("user.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UserData::default());
+        }
+        Err(error) => {
+            return Err(format!("{} could not be read ({error})", path.display()));
+        }
     };
-    let mut data = UserData::from_json_lossy(&text);
+    parse_user_text(&path, &text)
+}
+
+fn parse_user_text(path: &Path, text: &str) -> Result<UserData, String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| format!("{} is malformed JSON ({error})", path.display()))?;
+    let Some(object) = value.as_object() else {
+        return Err(format!(
+            "{} is malformed JSON (expected an object)",
+            path.display()
+        ));
+    };
+    if let Some(version) = object.get("version") {
+        let Some(version) = version.as_i64() else {
+            return Err(format!(
+                "{} is malformed JSON (version is not an integer)",
+                path.display()
+            ));
+        };
+        if version > i64::from(crate::model::USER_FILE_VERSION) {
+            return Err(format!(
+                "{} has unknown newer version {version}",
+                path.display()
+            ));
+        }
+    }
+    let mut data = UserData::from_json_lossy(text);
     keep_one_primary(&mut data);
-    data
+    Ok(data)
 }
 
 pub fn save(data: &UserData) -> Result<(), String> {
@@ -158,7 +200,7 @@ pub fn save_user(dir: &Path, data: &UserData) -> Result<(), String> {
 }
 
 pub(crate) fn save_user_locked(dir: &Path, data: &UserData) -> Result<(), String> {
-    let previous = load_user(dir);
+    let previous = load_user_checked(dir)?;
     let mut data = data.clone();
     keep_one_primary(&mut data);
     bump_plan_revisions(&mut data, &previous);
@@ -303,8 +345,17 @@ fn inspect(dir: &Path) -> Result<DiskFile, String> {
 }
 
 fn parsed_user(bytes: &[u8]) -> Result<UserData, ()> {
-    if serde_json::from_slice::<serde_json::Value>(bytes).is_err() {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    if !value.is_object() {
         return Err(());
+    }
+    if let Some(version) = value.get("version") {
+        let Some(version) = version.as_i64() else {
+            return Err(());
+        };
+        if version > i64::from(crate::model::USER_FILE_VERSION) {
+            return Err(());
+        }
     }
     let text = String::from_utf8_lossy(bytes);
     let mut data = UserData::from_json_lossy(&text);

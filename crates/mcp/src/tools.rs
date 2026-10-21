@@ -28,20 +28,18 @@ pub struct ToolError {
 
 impl ToolError {
     pub fn to_value(&self) -> Value {
-        let mut value = json!({
-            "error": self.error,
-            "message": self.message,
-        });
-        if let Some(revision) = self.revision {
-            value["revision"] = json!(revision);
-        }
-        value
+        json!({
+            "error": {
+                "code": self.error,
+                "message": nonempty(&self.message),
+            }
+        })
     }
 
-    fn rejected(message: impl Into<String>) -> Self {
+    fn invalid(message: impl Into<String>) -> Self {
         Self {
-            error: "rejected",
-            message: message.into(),
+            error: "invalid_argument",
+            message: nonempty(&message.into()),
             revision: None,
         }
     }
@@ -49,7 +47,7 @@ impl ToolError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             error: "not_found",
-            message: message.into(),
+            message: nonempty(&message.into()),
             revision: None,
         }
     }
@@ -57,8 +55,24 @@ impl ToolError {
     fn conflict(actual: u64) -> Self {
         Self {
             error: "revision_conflict",
-            message: "The plan changed. Reload it and try again.".into(),
+            message: format!("The plan changed (revision {actual}). Reload it and try again."),
             revision: Some(actual),
+        }
+    }
+
+    pub fn read_only(message: impl Into<String>) -> Self {
+        Self {
+            error: "read_only",
+            message: nonempty(&message.into()),
+            revision: None,
+        }
+    }
+
+    pub fn unknown_tool(message: impl Into<String>) -> Self {
+        Self {
+            error: "unknown_tool",
+            message: nonempty(&message.into()),
+            revision: None,
         }
     }
 
@@ -66,13 +80,22 @@ impl ToolError {
         match error {
             PlanFileError::NotFound => Self::not_found("No degree plan has that id."),
             PlanFileError::RevisionConflict { actual } => Self::conflict(actual),
-            PlanFileError::Rejected(message) => Self::rejected(message),
+            PlanFileError::Rejected(message) => Self::invalid(message),
             PlanFileError::Io(message) => Self {
-                error: "io",
-                message,
+                error: "storage_error",
+                message: nonempty(&message),
                 revision: None,
             },
         }
+    }
+}
+
+fn nonempty(message: &str) -> String {
+    let message = message.trim();
+    if message.is_empty() {
+        "The request could not be completed.".to_string()
+    } else {
+        message.to_string()
     }
 }
 
@@ -144,7 +167,10 @@ pub struct PlanInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReorganizeArgs {
-    pub plan: PlanInput,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub plan: Option<PlanInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -225,7 +251,7 @@ pub fn list_terms() -> Value {
         .iter()
         .map(|index| {
             json!({
-                "code": index.catalog.term.code,
+                "term": index.catalog.term.code,
                 "name": index.catalog.term.name(),
             })
         })
@@ -272,7 +298,7 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
         }
     }
     Ok(json!({
-        "term": { "code": index.catalog.term.code, "name": parsed.label },
+        "term": { "term": index.catalog.term.code, "name": parsed.label },
         "courses": courses,
     }))
 }
@@ -280,7 +306,7 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
 pub fn get_course(args: CourseArgs) -> Result<Value, ToolError> {
     let (index, parsed) = index_for(&args.term)?;
     let course = find_course(index, &args.subject, &args.number).ok_or_else(|| {
-        ToolError::rejected(format!(
+        ToolError::invalid(format!(
             "No course {} {} in {}.",
             args.subject.trim().to_ascii_uppercase(),
             args.number.trim(),
@@ -293,7 +319,7 @@ pub fn get_course(args: CourseArgs) -> Result<Value, ToolError> {
         .map(section_json)
         .collect();
     let mut value = course_json(course);
-    value["term"] = json!({ "code": index.catalog.term.code, "name": parsed.label });
+    value["term"] = json!({ "term": index.catalog.term.code, "name": parsed.label });
     value["sections"] = json!(sections);
     Ok(value)
 }
@@ -321,7 +347,7 @@ pub fn check_schedule(args: CheckArgs) -> Result<Value, ToolError> {
         }
     }
     Ok(json!({
-        "term": { "code": index.catalog.term.code, "name": parsed.label },
+        "term": { "term": index.catalog.term.code, "name": parsed.label },
         "clashes": clashes,
         "unknown_crns": unknown,
     }))
@@ -330,14 +356,14 @@ pub fn check_schedule(args: CheckArgs) -> Result<Value, ToolError> {
 pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
     let (index, parsed) = index_for(&args.term)?;
     if args.courses.is_empty() {
-        return Err(ToolError::rejected(
+        return Err(ToolError::invalid(
             "suggest_schedule needs at least one course.",
         ));
     }
     let mut inputs = Vec::new();
     for course in &args.courses {
         let found = find_course(index, &course.subject, &course.number).ok_or_else(|| {
-            ToolError::rejected(format!(
+            ToolError::invalid(format!(
                 "No course {} {} in {}.",
                 course.subject, course.number, parsed.label
             ))
@@ -346,14 +372,14 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
         if let Some(crn) = course.crn.as_deref() {
             sections.retain(|section| section.crn == crn);
             if sections.is_empty() {
-                return Err(ToolError::rejected(format!(
+                return Err(ToolError::invalid(format!(
                     "CRN {crn} is not a section of {} {} in {}.",
                     found.subject, found.number, parsed.label
                 )));
             }
         }
         if sections.is_empty() {
-            return Err(ToolError::rejected(format!(
+            return Err(ToolError::invalid(format!(
                 "{} {} has no sections in {}.",
                 found.subject, found.number, parsed.label
             )));
@@ -392,15 +418,34 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
         })
         .collect();
     Ok(json!({
-        "term": { "code": index.catalog.term.code, "name": parsed.label },
+        "term": { "term": index.catalog.term.code, "name": parsed.label },
         "schedules": schedules,
     }))
 }
 
-pub fn reorganize_plan(args: ReorganizeArgs) -> Result<Value, ToolError> {
-    let slots: Vec<PlanSlot> = args
-        .plan
-        .terms
+pub fn reorganize_plan(dir: &Path, args: ReorganizeArgs) -> Result<Value, ToolError> {
+    if args.plan_id.is_some() && args.plan.is_some() {
+        return Err(ToolError::invalid("Pass plan_id or plan, not both."));
+    }
+    let slots = if let Some(plan_id) = args.plan_id.as_deref() {
+        let id = parse_id(plan_id)?;
+        let data = planfile::read_user(dir).map_err(ToolError::from_plan)?;
+        let plan = data
+            .degree_plans
+            .iter()
+            .find(|plan| plan.id == id)
+            .ok_or_else(|| ToolError::not_found("No degree plan has that id."))?;
+        slots_from_degree(plan)
+    } else if let Some(plan) = args.plan {
+        slots_from_input(plan)
+    } else {
+        return Err(ToolError::invalid("reorganize_plan needs plan_id or plan."));
+    };
+    outcome_json(&reorganize::reorganize(&slots, catalogs()))
+}
+
+fn slots_from_input(plan: PlanInput) -> Vec<PlanSlot> {
+    plan.terms
         .into_iter()
         .map(|term| PlanSlot {
             term: term.term,
@@ -414,26 +459,58 @@ pub fn reorganize_plan(args: ReorganizeArgs) -> Result<Value, ToolError> {
                 })
                 .collect(),
         })
-        .collect();
-    let outcome = reorganize::reorganize(&slots, catalogs());
+        .collect()
+}
+
+fn slots_from_degree(plan: &DegreePlan) -> Vec<PlanSlot> {
+    plan.terms
+        .iter()
+        .map(|term| PlanSlot {
+            term: term_code(term).unwrap_or_else(|| term.name()),
+            courses: term
+                .courses
+                .iter()
+                .filter_map(|course| {
+                    let key = course.key.clone()?;
+                    Some(SlotCourse {
+                        subject: key.subject,
+                        number: key.number,
+                        crn: course.crn.clone(),
+                    })
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn outcome_json(outcome: &reorganize::ReorganizeOutcome) -> Result<Value, ToolError> {
     Ok(json!({
+        "moves": outcome.moves.iter().map(move_json).collect::<Vec<_>>(),
+        "unresolved": outcome.unresolved.iter().map(|item| json!({
+            "subject": item.subject,
+            "number": item.number,
+            "reason": item.reason,
+        })).collect::<Vec<_>>(),
         "plan": {
             "terms": outcome.terms.iter().map(|term| json!({
                 "term": term.term,
-                "courses": term.courses.iter().map(|course| json!({
-                    "subject": course.subject,
-                    "number": course.number,
-                    "crn": course.crn,
-                })).collect::<Vec<_>>(),
+                "courses": term.courses.iter().map(|course| {
+                    let mut row = json!({
+                        "subject": course.subject,
+                        "number": course.number,
+                    });
+                    if let Some(crn) = &course.crn {
+                        row["crn"] = json!(crn);
+                    }
+                    row
+                }).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         },
-        "moves": outcome.moves.iter().map(move_json).collect::<Vec<_>>(),
-        "notes": outcome.notes,
     }))
 }
 
-pub fn list_plans(dir: &Path) -> Value {
-    let data = planfile::read_user(dir);
+pub fn list_plans(dir: &Path) -> Result<Value, ToolError> {
+    let data = planfile::read_user(dir).map_err(ToolError::from_plan)?;
     let plans: Vec<Value> = data
         .degree_plans
         .iter()
@@ -442,15 +519,15 @@ pub fn list_plans(dir: &Path) -> Value {
                 "id": plan.id.to_string(),
                 "name": plan.name,
                 "terms": plan.terms.iter().map(|term| json!({
+                    "term": term_code(term).unwrap_or_else(|| term.name()),
                     "name": term.name(),
-                    "code": term_code(term),
                 })).collect::<Vec<_>>(),
                 "updated_at": plan.updated_at,
                 "revision": plan_revision(&data, plan.id),
             })
         })
         .collect();
-    json!({ "plans": plans })
+    Ok(json!({ "plans": plans }))
 }
 
 pub fn get_plan(dir: &Path, plan_id: &str) -> Result<Value, ToolError> {
@@ -472,7 +549,7 @@ pub fn rename_plan(dir: &Path, args: RenameArgs) -> Result<Value, ToolError> {
     let id = parse_id(&args.plan_id)?;
     let name = args.name.trim().to_string();
     if name.is_empty() {
-        return Err(ToolError::rejected("A plan needs a name."));
+        return Err(ToolError::invalid("A plan needs a name."));
     }
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
         plan.name = name.clone();
@@ -539,7 +616,7 @@ pub fn move_course(dir: &Path, args: MoveCourseArgs) -> Result<Value, ToolError>
     let course = require_offered(dest_index, &to.label, &args.subject, &args.number)?;
     let key = course.key();
     if from.season == to.season && from.year == to.year {
-        return Err(ToolError::rejected("from_term and to_term are the same."));
+        return Err(ToolError::invalid("from_term and to_term are the same."));
     }
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
         let from_index = plan
@@ -583,7 +660,7 @@ pub fn set_section(dir: &Path, args: SetSectionArgs) -> Result<Value, ToolError>
     let (index, parsed) = index_for(&args.term)?;
     let course = require_offered(index, &parsed.label, &args.subject, &args.number)?;
     let crn = checked_crn(index, course, Some(&args.crn), &parsed.label)?
-        .ok_or_else(|| ToolError::rejected("A CRN is required."))?;
+        .ok_or_else(|| ToolError::invalid("A CRN is required."))?;
     let key = course.key();
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
         let term = term_on_plan(plan, parsed.season, parsed.year)?;
@@ -601,7 +678,7 @@ pub fn set_section(dir: &Path, args: SetSectionArgs) -> Result<Value, ToolError>
 
 pub fn apply_reorganize(dir: &Path, args: RevisionArgs) -> Result<Value, ToolError> {
     let id = parse_id(&args.plan_id)?;
-    let data = planfile::read_user(dir);
+    let data = planfile::read_user(dir).map_err(ToolError::from_plan)?;
     let plan = data
         .degree_plans
         .iter()
@@ -628,7 +705,15 @@ pub fn apply_reorganize(dir: &Path, args: RevisionArgs) -> Result<Value, ToolErr
     }
     let mut value = plan_value(dir, id)?;
     value["moves"] = json!(moves);
-    value["notes"] = json!(result.notes);
+    value["unresolved"] = json!(result
+        .unresolved
+        .iter()
+        .map(|item| json!({
+            "subject": item.subject,
+            "number": item.number,
+            "reason": item.reason,
+        }))
+        .collect::<Vec<_>>());
     Ok(value)
 }
 
@@ -649,14 +734,14 @@ fn move_json(item: &reorganize::CourseMove) -> Value {
     json!({
         "subject": item.subject,
         "number": item.number,
-        "from": item.from,
-        "to": item.to,
+        "from_term": item.from,
+        "to_term": item.to,
         "reason": item.reason,
     })
 }
 
 fn plan_value(dir: &Path, id: Uuid) -> Result<Value, ToolError> {
-    let data = planfile::read_user(dir);
+    let data = planfile::read_user(dir).map_err(ToolError::from_plan)?;
     let plan = data
         .degree_plans
         .iter()
@@ -675,8 +760,10 @@ fn plan_value(dir: &Path, id: Uuid) -> Result<Value, ToolError> {
 fn term_json(term: &DegreePlanTerm) -> Value {
     let index = reorganize::catalog_for_term(catalogs(), term.season, term.year);
     json!({
+        "term": index
+            .map(|catalog| catalog.catalog.term.code.clone())
+            .unwrap_or_else(|| term.name()),
         "name": term.name(),
-        "code": index.map(|catalog| catalog.catalog.term.code.clone()),
         "courses": term.courses.iter().map(|course| course_row(course, index)).collect::<Vec<_>>(),
     })
 }
@@ -765,7 +852,7 @@ fn index_for(term: &str) -> Result<(&'static CatalogIndex, reorganize::ParsedTer
     let parsed = parse_label(term)?;
     let index =
         reorganize::catalog_for_term(catalogs(), parsed.season, parsed.year).ok_or_else(|| {
-            ToolError::rejected(format!(
+            ToolError::invalid(format!(
                 "No bundled catalog for {}. This server reads Fall 2026 and Spring 2027 only.",
                 parsed.label
             ))
@@ -775,11 +862,11 @@ fn index_for(term: &str) -> Result<(&'static CatalogIndex, reorganize::ParsedTer
 
 fn parse_label(term: &str) -> Result<reorganize::ParsedTerm, ToolError> {
     reorganize::parse_term_label(term)
-        .ok_or_else(|| ToolError::rejected(format!("Unrecognized term \"{}\".", term.trim())))
+        .ok_or_else(|| ToolError::invalid(format!("Unrecognized term \"{}\".", term.trim())))
 }
 
 fn parse_id(raw: &str) -> Result<Uuid, ToolError> {
-    Uuid::parse_str(raw.trim()).map_err(|_| ToolError::rejected("plan_id is not a UUID."))
+    Uuid::parse_str(raw.trim()).map_err(|_| ToolError::invalid("plan_id is not a UUID."))
 }
 
 fn find_course<'a>(index: &'a CatalogIndex, subject: &str, number: &str) -> Option<&'a Course> {
@@ -797,14 +884,14 @@ fn require_offered<'a>(
     number: &str,
 ) -> Result<&'a Course, ToolError> {
     let course = find_course(index, subject, number).ok_or_else(|| {
-        ToolError::rejected(format!(
+        ToolError::invalid(format!(
             "No course {} {} in {label}.",
             subject.trim().to_ascii_uppercase(),
             number.trim()
         ))
     })?;
     if index.sections_for(&course.key()).is_empty() {
-        return Err(ToolError::rejected(format!(
+        return Err(ToolError::invalid(format!(
             "{} {} has no sections in {label}.",
             course.subject, course.number
         )));
@@ -822,7 +909,7 @@ fn checked_crn(
         return Ok(None);
     };
     if !crn_belongs(index, &course.key(), Some(crn)) {
-        return Err(ToolError::rejected(format!(
+        return Err(ToolError::invalid(format!(
             "CRN {crn} is not a section of {} {} in {label}.",
             course.subject, course.number
         )));
@@ -884,7 +971,7 @@ fn constraints(
     let mut days = DaySet(0);
     for name in &raw.days_off {
         let day = parse_day(name)
-            .ok_or_else(|| ToolError::rejected(format!("Unrecognized day off \"{name}\".")))?;
+            .ok_or_else(|| ToolError::invalid(format!("Unrecognized day off \"{name}\".")))?;
         days.0 |= day.0;
     }
     if !days.is_empty() {
@@ -895,8 +982,14 @@ fn constraints(
     Ok((filters, preferences))
 }
 
+/// `HH:MM` on a 24-hour clock, or an explicit 12-hour time with `am` or `pm`.
+/// `8am` and `8:00 AM` are 08:00. A bare `8`, or any other shape, is rejected.
 fn parse_clock(raw: &str) -> Result<i32, ToolError> {
+    let invalid = || ToolError::invalid(format!("Unrecognized time \"{raw}\"."));
     let text = raw.trim().to_ascii_lowercase().replace('.', "");
+    if text.is_empty() {
+        return Err(invalid());
+    }
     let (clock, afternoon) = if let Some(rest) = text.strip_suffix("am") {
         (rest.trim(), Some(false))
     } else if let Some(rest) = text.strip_suffix("pm") {
@@ -904,37 +997,51 @@ fn parse_clock(raw: &str) -> Result<i32, ToolError> {
     } else {
         (text.as_str(), None)
     };
+    if clock.is_empty()
+        || clock
+            .chars()
+            .any(|character| !character.is_ascii_digit() && character != ':')
+    {
+        return Err(invalid());
+    }
     let mut parts = clock.split(':');
-    let hour: i32 = parts
-        .next()
-        .unwrap_or("")
-        .trim()
-        .parse()
-        .map_err(|_| ToolError::rejected(format!("Unrecognized time \"{raw}\".")))?;
-    let minute: i32 = parts.next().unwrap_or("0").trim().parse().unwrap_or(-1);
-    if parts.next().is_some() || !(0..60).contains(&minute) {
-        return Err(ToolError::rejected(format!("Unrecognized time \"{raw}\".")));
+    let hour_text = parts.next().unwrap_or("");
+    let minute_text = match (parts.next(), afternoon) {
+        (Some(minute), _) => minute,
+        (None, Some(_)) => "00",
+        (None, None) => return Err(invalid()),
+    };
+    if parts.next().is_some()
+        || hour_text.is_empty()
+        || minute_text.len() != 2
+        || !minute_text
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        || !hour_text
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let hour: i32 = hour_text.parse().map_err(|_| invalid())?;
+    let minute: i32 = minute_text.parse().map_err(|_| invalid())?;
+    if !(0..60).contains(&minute) {
+        return Err(invalid());
     }
     let hour = match afternoon {
-        Some(false) => {
-            if hour == 12 {
-                0
-            } else {
-                hour
-            }
-        }
-        Some(true) => {
-            if hour == 12 {
-                12
-            } else {
-                hour + 12
-            }
-        }
-        None => hour,
+        Some(false) => match hour {
+            12 => 0,
+            1..=11 => hour,
+            _ => return Err(invalid()),
+        },
+        Some(true) => match hour {
+            12 => 12,
+            1..=11 => hour + 12,
+            _ => return Err(invalid()),
+        },
+        None if (0..24).contains(&hour) => hour,
+        None => return Err(invalid()),
     };
-    if !(0..24).contains(&hour) {
-        return Err(ToolError::rejected(format!("Unrecognized time \"{raw}\".")));
-    }
     Ok(hour * 60 + minute)
 }
 
@@ -950,4 +1057,23 @@ fn parse_day(raw: &str) -> Option<DaySet> {
         _ => return None,
     };
     Some(DaySet(1 << index))
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::parse_clock;
+
+    #[test]
+    fn eight_am_is_explicit_and_other_shapes_are_rejected() {
+        assert_eq!(parse_clock("8am").unwrap(), 8 * 60);
+        assert_eq!(parse_clock("8:00 AM").unwrap(), 8 * 60);
+        assert_eq!(parse_clock("08:00").unwrap(), 8 * 60);
+        assert_eq!(parse_clock("17:00").unwrap(), 17 * 60);
+        assert_eq!(parse_clock("9:00 PM").unwrap(), 21 * 60);
+        for raw in ["8", "eight", "8:00:00", "25:00", ""] {
+            let error = parse_clock(raw).unwrap_err();
+            assert_eq!(error.error, "invalid_argument");
+            assert!(!error.message.is_empty(), "{raw}");
+        }
+    }
 }

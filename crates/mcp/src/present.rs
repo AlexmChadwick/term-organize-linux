@@ -104,9 +104,8 @@ mod tests {
         let kept = kept_email("person@gmail.com faculty@northeastern.edu other@kent.edu").unwrap();
         assert_eq!(kept, "faculty@northeastern.edu");
         assert!(kept_email("person@gmail.com").is_none());
-        assert_eq!(
-            kept_email("lab@mail.neu.edu"),
-            Some("lab@mail.neu.edu".into())
-        );
+        assert!(kept_email("lab@mail.neu.edu").is_none());
+        assert!(kept_email("albanese.d@husky.neu.edu").is_none());
+        assert!(kept_email("viola@ccs.neu.edu").is_none());
     }
 }

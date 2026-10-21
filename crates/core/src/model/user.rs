@@ -273,14 +273,16 @@ pub struct UserData {
     pub plan_revisions: BTreeMap<String, u64>,
 }
 
+pub const USER_FILE_VERSION: i32 = 1;
+
 fn one() -> i32 {
-    1
+    USER_FILE_VERSION
 }
 
 impl Default for UserData {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: USER_FILE_VERSION,
             preferences: AppPreferences::default(),
             saved: vec![],
             recents: vec![],

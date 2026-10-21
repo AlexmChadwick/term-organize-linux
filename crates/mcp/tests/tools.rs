@@ -39,7 +39,7 @@ fn every_catalog_tool_reads_the_bundled_terms() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|term| term["code"].as_str().unwrap())
+        .map(|term| term["term"].as_str().unwrap())
         .collect();
     assert_eq!(codes, ["202730", "202710"]);
 
@@ -92,27 +92,31 @@ fn every_catalog_tool_reads_the_bundled_terms() {
     .unwrap();
     assert!(!suggested["schedules"].as_array().unwrap().is_empty());
 
-    let reorganized = tools::reorganize_plan(tools::ReorganizeArgs {
-        plan: tools::PlanInput {
-            terms: vec![
-                tools::TermInput {
-                    term: "Fall 2026".into(),
-                    courses: vec![tools::CourseRef {
-                        subject: "CS".into(),
-                        number: "2100".into(),
-                        crn: None,
-                    }],
-                },
-                tools::TermInput {
-                    term: "Spring 2027".into(),
-                    courses: vec![],
-                },
-            ],
+    let reorganized = tools::reorganize_plan(
+        std::path::Path::new("."),
+        tools::ReorganizeArgs {
+            plan_id: None,
+            plan: Some(tools::PlanInput {
+                terms: vec![
+                    tools::TermInput {
+                        term: "Fall 2026".into(),
+                        courses: vec![tools::CourseRef {
+                            subject: "CS".into(),
+                            number: "2100".into(),
+                            crn: None,
+                        }],
+                    },
+                    tools::TermInput {
+                        term: "Spring 2027".into(),
+                        courses: vec![],
+                    },
+                ],
+            }),
         },
-    })
+    )
     .unwrap();
     assert!(reorganized["moves"].as_array().unwrap().is_empty());
-    assert!(!reorganized["notes"].as_array().unwrap().is_empty());
+    assert!(reorganized["unresolved"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -132,6 +136,14 @@ fn bundled_instructor_emails_stay_on_northeastern_domains() {
                         "{} leaked {email}",
                         section.crn
                     );
+                    let domain = email.rsplit_once('@').unwrap().1.to_ascii_lowercase();
+                    assert!(
+                        domain == "northeastern.edu" || domain == "neu.edu",
+                        "{} leaked subdomain {email}",
+                        section.crn
+                    );
+                    assert!(!email.to_ascii_lowercase().contains("husky.neu.edu"));
+                    assert!(!email.to_ascii_lowercase().contains("ccs.neu.edu"));
                 }
             }
         }
@@ -279,7 +291,9 @@ fn write_tools_round_trip_through_the_app_loader() {
         },
     )
     .unwrap_err();
-    assert_eq!(unknown.error, "rejected");
+    assert_eq!(unknown.error, "invalid_argument");
+    assert!(!unknown.message.is_empty());
+    assert!(unknown.to_value()["error"]["code"].as_str().unwrap() == "invalid_argument");
     assert_eq!(
         store::load_user(&dir).degree_plans[0].terms[0]
             .courses
@@ -298,7 +312,10 @@ fn write_tools_round_trip_through_the_app_loader() {
     .unwrap_err();
     assert_eq!(refused.error, "confirm_required");
     assert_eq!(
-        tools::list_plans(&dir)["plans"].as_array().unwrap().len(),
+        tools::list_plans(&dir).unwrap()["plans"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
 
@@ -311,7 +328,7 @@ fn write_tools_round_trip_through_the_app_loader() {
         },
     )
     .unwrap();
-    assert!(tools::list_plans(&dir)["plans"]
+    assert!(tools::list_plans(&dir).unwrap()["plans"]
         .as_array()
         .unwrap()
         .is_empty());
@@ -423,6 +440,104 @@ fn read_only_hides_writes_and_annotations_match_the_spec() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn shared_reorganize_fixture_matches_the_bundled_catalog() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/mcp-reorganize-fixture.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("fixture")).expect("fixture json");
+    let plan: tools::PlanInput = serde_json::from_value(fixture["plan"].clone()).expect("plan");
+    let outcome = tools::reorganize_plan(
+        std::path::Path::new("."),
+        tools::ReorganizeArgs {
+            plan_id: None,
+            plan: Some(plan),
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome["moves"], fixture["expected"]["moves"]);
+    assert_eq!(outcome["unresolved"], fixture["expected"]["unresolved"]);
+    let spring = outcome["plan"]["terms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|term| term["term"] == "202730")
+        .unwrap();
+    let numbers: Vec<&str> = spring["courses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|course| course["number"].as_str().unwrap())
+        .collect();
+    assert_eq!(numbers, ["2701"]);
+}
+
+#[test]
+fn bare_hour_is_an_invalid_time_and_eight_am_is_parsed() {
+    let rejected = tools::suggest_schedule(tools::SuggestArgs {
+        term: "Fall 2026".into(),
+        courses: vec![tools::CourseRef {
+            subject: "CS".into(),
+            number: "2100".into(),
+            crn: None,
+        }],
+        constraints: Some(tools::Constraints {
+            no_classes_before: Some("8".into()),
+            no_classes_after: None,
+            days_off: vec![],
+        }),
+    })
+    .unwrap_err();
+    assert_eq!(rejected.error, "invalid_argument");
+    assert!(!rejected.message.is_empty());
+
+    let parsed = tools::suggest_schedule(tools::SuggestArgs {
+        term: "Fall 2026".into(),
+        courses: vec![tools::CourseRef {
+            subject: "CS".into(),
+            number: "2100".into(),
+            crn: None,
+        }],
+        constraints: Some(tools::Constraints {
+            no_classes_before: Some("8am".into()),
+            no_classes_after: Some("21:00".into()),
+            days_off: vec![],
+        }),
+    })
+    .unwrap();
+    assert!(parsed["schedules"].is_array());
+}
+
+#[test]
+fn a_plan_file_that_cannot_be_read_is_a_storage_error() {
+    let dir = temp_dir("storage");
+    let path = dir.join("user.json");
+    fs::write(&path, b"{not json").unwrap();
+    let error = tools::list_plans(&dir).unwrap_err();
+    assert_eq!(error.error, "storage_error");
+    assert!(error.message.contains(path.to_str().unwrap()));
+    assert!(error.message.contains("malformed JSON"));
+    assert!(!error.message.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), b"{not json");
+
+    fs::write(&path, br#"{"version": 9, "degreePlans": []}"#).unwrap();
+    let newer = tools::create_plan(
+        &dir,
+        tools::CreatePlanArgs {
+            name: "Should not replace".into(),
+            terms: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(newer.error, "storage_error");
+    assert!(newer.message.contains("unknown newer version"));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        br#"{"version": 9, "degreePlans": []}"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn spring_only_course() -> CourseKey {
     let catalogs = term_organize_mcp::catalogs::catalogs();
     let spring = catalogs
@@ -438,7 +553,8 @@ fn spring_only_course() -> CourseKey {
         .courses
         .iter()
         .find(|course| {
-            !spring.sections_for(&course.key()).is_empty()
+            course.prereqs.is_none()
+                && !spring.sections_for(&course.key()).is_empty()
                 && fall.sections_for(&course.key()).is_empty()
         })
         .map(|course| course.key())

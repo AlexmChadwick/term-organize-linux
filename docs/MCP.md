@@ -2,11 +2,24 @@
 
 Unofficial Northeastern course planner. Not affiliated with, endorsed by, or sponsored by Northeastern University or Sandbox.
 
-`term-organize-mcp` is a local [Model Context Protocol](https://modelcontextprotocol.io) server. It speaks JSON-RPC 2.0 over stdin and stdout, protocol version `2025-06-18`. It reads the bundled Fall 2026 (`202710`) and Spring 2027 (`202730`) catalogs only. It can also read and update degree plans in the same `user.json` the Term Organize app loads.
+SHARED CONTRACT
+
+- Transport: stdio, newline-delimited JSON-RPC 2.0, one message per line, per the MCP stdio spec (protocol 2025-06-18). No Content-Length framing.
+- Term objects: {"term":"202730","name":"Spring 2027"}. The key is always "term", never "code".
+- Revisions: integer, starting at 1 and incremented on every change to that plan.
+- Errors: a tool result with isError:true and structuredContent {"error":{"code":C,"message":M}}, where C is one of: invalid_argument, not_found, revision_conflict, confirm_required, read_only, storage_error, unknown_tool. The message is never empty. A write tool called with --read-only on returns read_only, not unknown_tool. Write tools stay hidden from tools/list.
+- Instructors in get_course: [{"name":..., "email":... (optional)}]. The email is present only when its domain is EXACTLY northeastern.edu or neu.edu, compared case-insensitively. Subdomains are not allowed (husky.neu.edu, ccs.neu.edu, mail.neu.edu are all dropped).
+- create_plan {name, terms?: ["202710","202730"]}, a list of term strings.
+- reorganize_plan accepts either {plan_id} or {plan:{terms:[{term, courses:[{subject, number}]}]}}. It returns {moves:[{subject, number, from_term, to_term, reason}], unresolved:[{subject, number, reason}], plan:{...}}.
+- Reorganize rule, the same everywhere: a course moves only into a term the plan already has. The target term's bundled catalog must offer the course, prerequisite order within the plan must be kept, and it never adds a semester. A course is offered in a term when the bundled catalog for that term has at least one section of it.
+- Shared fixture: tests/fixtures/mcp-reorganize-fixture.json. It is a plan with CS 4805, CS 2535, CS 2700, CS 4130 and CS 2701 in Fall 2026, plus an empty Spring 2027. Each server must have a test that checks its output against the expected moves. Work out the expected result from the bundled 202730 catalog and the prereqs, and write it into the fixture. Include in your report the per-course reasoning: offered in 202730 yes/no, and prereq status.
+- Storage failures: if the plan file exists but can't be read (permission denied, sandbox, malformed JSON, unknown newer version), every plan tool returns storage_error with the path and reason. NEVER treat a read failure as an empty plan list, and NEVER write over a file you couldn't read. A missing file is the only case that counts as empty.
+
+`term-organize-mcp` is a local [Model Context Protocol](https://modelcontextprotocol.io) server. It speaks JSON-RPC 2.0 over stdin and stdout, protocol version `2025-06-18`, one JSON object per line. It does not use Content-Length framing. It reads the bundled Fall 2026 (`202710`) and Spring 2027 (`202730`) catalogs only. It can also read and update degree plans in the same `user.json` the Term Organize app loads.
 
 The server does not use the network, does not log in, and does not return student name or student ID. Those fields can sit in the file after a PDF import. They stay there for the app, and they are left out of every MCP response.
 
-Instructor addresses are passed through the same filter as the app (`crates/core/src/email.rs`). A response only includes `northeastern.edu`, `neu.edu`, and their subdomains. Any other address in a Banner field is omitted.
+Instructor addresses are passed through the same filter as the app (`crates/core/src/email.rs`). A response includes an email only when the domain is exactly `northeastern.edu` or `neu.edu`. Subdomains are dropped.
 
 ## Run
 
@@ -22,7 +35,7 @@ term-organize-mcp --read-only
 term-organize-mcp --data-dir /path/to/termorganize
 ```
 
-`--read-only` hides every write tool. `TERM_ORGANIZE_MCP_READONLY=1` does the same thing. Clients then see only the catalog tools plus `list_plans` and `get_plan`.
+`--read-only` hides every write tool from `tools/list`. `TERM_ORGANIZE_MCP_READONLY=1` does the same thing. A client that calls a write tool anyway gets `read_only`, not `unknown_tool`. Clients then see only the catalog tools plus `list_plans`, `get_plan`, and `reorganize_plan`.
 
 ## Where plans are stored
 
@@ -77,10 +90,10 @@ Parameter names are snake_case. The same names and JSON shapes are used on macOS
 A tool failure the user should see (a stale revision, an unknown course, a missing `confirm`) comes back as a tool result with `isError` and this JSON:
 
 ```json
-{ "error": "revision_conflict", "revision": 2, "message": "The plan changed. Reload it and try again." }
+{ "error": { "code": "revision_conflict", "message": "The plan changed (revision 2). Reload it and try again." } }
 ```
 
-`error` is `revision_conflict`, `not_found`, `rejected`, `confirm_required`, or `io`.
+`code` is `invalid_argument`, `not_found`, `revision_conflict`, `confirm_required`, `read_only`, `storage_error`, or `unknown_tool`. `message` is never empty.
 
 Times use `to` between the start and the end (`9:00 AM to 10:05 AM`). Credits use `3 to 4` when the course has a range.
 
@@ -89,7 +102,7 @@ Times use `to` between the start and the end (`9:00 AM to 10:05 AM`). Credits us
 No parameters.
 
 ```json
-{ "terms": [{ "code": "202730", "name": "Spring 2027" }] }
+{ "terms": [{ "term": "202730", "name": "Spring 2027" }] }
 ```
 
 Newest term first.
@@ -100,7 +113,7 @@ Newest term first.
 
 ```json
 {
-  "term": { "code": "202710", "name": "Fall 2026" },
+  "term": { "term": "202710", "name": "Fall 2026" },
   "courses": [{
     "subject": "CS",
     "number": "2100",
@@ -130,7 +143,7 @@ Newest term first.
 }
 ```
 
-`email` is omitted when the Banner field has no Northeastern address. Day letters are `U M T W R F S` (Tuesday is `T`, Thursday is `R`).
+`email` is omitted unless the domain is exactly `northeastern.edu` or `neu.edu`. Day letters are `U M T W R F S` (Tuesday is `T`, Thursday is `R`).
 
 ### check_schedule
 
@@ -138,7 +151,7 @@ Newest term first.
 
 ```json
 {
-  "term": { "code": "202710", "name": "Fall 2026" },
+  "term": { "term": "202710", "name": "Fall 2026" },
   "clashes": [{ "first": "11111", "second": "22222", "reason": "The meetings overlap." }],
   "unknown_crns": ["00000"]
 }
@@ -152,11 +165,11 @@ Newest term first.
 { "no_classes_before": "9:30 AM", "no_classes_after": "17:00", "days_off": ["Friday"] }
 ```
 
-Times accept `9:30`, `09:30`, `9:30 AM`, and `17:00`. Days accept full names and the letters above. Constraints are required: sections outside them are dropped. Up to 8 schedules come back, best first.
+Times are `HH:MM` on a 24-hour clock (`08:00`, `17:00`) or an explicit 12-hour time (`8am`, `8:00 AM`, `9:00 PM`). Anything else, including a bare `8`, is `invalid_argument`. Days accept full names and the letters above. Constraints are required: sections outside them are dropped. Up to 8 schedules come back, best first.
 
 ```json
 {
-  "term": { "code": "202710", "name": "Fall 2026" },
+  "term": { "term": "202710", "name": "Fall 2026" },
   "schedules": [{ "crns": ["12345"], "sections": [] }]
 }
 ```
@@ -165,19 +178,19 @@ Each section includes the get_course fields plus `subject` and `number`.
 
 ### reorganize_plan
 
-`plan.terms[]` with `term` and `courses` (`subject`, `number`, optional `crn`).
+Either `{ "plan_id": "uuid" }` or `{ "plan": { "terms": [{ "term": "202710", "courses": [{ "subject": "CS", "number": "2510" }] }] } }`.
 
-The core library's existing reorder only moves blocking courses out of one semester, and it can add a semester. This tool is a separate whole-plan pass in `crates/core/src/reorganize.rs`. It moves a course into another term the plan already has when the bundled catalogs show the current term does not teach it, or when chosen CRNs overlap. It does not append a term after the last one, so the plan does not grow. Offering history is the two bundled snapshots only. When a term has no chosen CRNs and at most six courses, the schedule generator looks for a clash and the pass tries to move one side.
+The core library's existing reorder only moves blocking courses out of one semester, and it can add a semester. This tool is a separate whole-plan pass in `crates/core/src/reorganize.rs`. A course moves only into a term the plan already has. The target term's bundled catalog must offer the course (at least one section), prerequisite order within the plan must be kept, and the pass never adds a semester. A course whose catalog prerequisites are not met by earlier courses on the plan stays put and is listed in `unresolved`. Offering checks use the two bundled snapshots.
 
 ```json
 {
-  "plan": { "terms": [{ "term": "Fall 2026", "courses": [] }] },
-  "moves": [{ "subject": "CS", "number": "2510", "from": "Fall 2026", "to": "Spring 2027", "reason": "CS 2510 has no sections in Fall 2026." }],
-  "notes": []
+  "moves": [{ "subject": "CS", "number": "2701", "from_term": "202710", "to_term": "202730", "reason": "CS 2701 has no sections in 202710." }],
+  "unresolved": [{ "subject": "CS", "number": "4805", "reason": "CS 4805 is offered in 202730, but prerequisites are not met by earlier courses on the plan: CS 3800." }],
+  "plan": { "terms": [{ "term": "202710", "courses": [] }] }
 }
 ```
 
-A CRN that belongs to the old term is cleared when the destination catalog does not have that section.
+A CRN that belongs to the old term is cleared when the destination catalog does not have that section. The shared fixture is `tests/fixtures/mcp-reorganize-fixture.json`.
 
 ### list_plans
 
@@ -186,14 +199,14 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
   "plans": [{
     "id": "uuid",
     "name": "My plan",
-    "terms": [{ "name": "Fall 2026", "code": "202710" }],
+    "terms": [{ "term": "202710", "name": "Fall 2026" }],
     "updated_at": "2026-10-20T00:00:00Z",
     "revision": 1
   }]
 }
 ```
 
-`code` is null when that season and year are not one of the bundled catalogs.
+`term` is the Banner code when that season and year are a bundled catalog, and the term name otherwise.
 
 ### get_plan
 
@@ -206,8 +219,8 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
   "revision": 1,
   "updated_at": "2026-10-20T00:00:00Z",
   "terms": [{
+    "term": "202710",
     "name": "Fall 2026",
-    "code": "202710",
     "courses": [{
       "subject": "CS",
       "number": "2100",
@@ -253,7 +266,7 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
 
 ### apply_reorganize
 
-`plan_id`, `expected_revision`. Runs the same pass as `reorganize_plan` and, when something moved, saves it. The response is the get_plan object plus `moves` and `notes`. When nothing moved, the file and the revision stay as they were.
+`plan_id`, `expected_revision`. Runs the same pass as `reorganize_plan` and, when something moved, saves it. The response is the get_plan object plus `moves` and `unresolved`. When nothing moved, the file and the revision stay as they were.
 
 ### delete_plan
 
