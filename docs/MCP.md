@@ -180,13 +180,13 @@ Each section includes the get_course fields plus `subject` and `number`.
 
 Either `{ "plan_id": "uuid" }` or `{ "plan": { "terms": [{ "term": "202710", "courses": [{ "subject": "CS", "number": "2510" }] }] } }`.
 
-The core library's existing reorder only moves blocking courses out of one semester, and it can add a semester. This tool is a separate whole-plan pass in `crates/core/src/reorganize.rs`. A course moves only into a term the plan already has. The target term's bundled catalog must offer the course (at least one section), prerequisite order within the plan must be kept, and the pass never adds a semester. A course whose catalog prerequisites are not met by earlier courses on the plan stays put and is listed in `unresolved`. Offering checks use the two bundled snapshots.
+The core library's existing reorder only moves blocking courses out of one semester, and it can add a semester. This tool is a separate whole-plan pass in `crates/core/src/reorganize.rs`. A course moves only into a term the plan already has. The target term's bundled catalog must offer the course (at least one section), and the pass never adds a semester. Prerequisite order is kept only between courses that are on the plan. A prerequisite that is not on the plan does not block a move: it may already be completed, transferred, or AP credit, and moving the course does not make that situation worse. A move is refused when it would place a course ahead of a prerequisite that is also on the plan, or leave another planned course ahead of this one. Corequisites are not part of the check. A refused course stays put and is listed in `unresolved`. Offering checks use the two bundled snapshots.
 
 ```json
 {
-  "moves": [{ "subject": "CS", "number": "2701", "from_term": "202710", "to_term": "202730", "reason": "CS 2701 has no sections in 202710." }],
-  "unresolved": [{ "subject": "CS", "number": "4805", "reason": "CS 4805 is offered in 202730, but prerequisites are not met by earlier courses on the plan: CS 3800." }],
-  "plan": { "terms": [{ "term": "202710", "courses": [] }] }
+  "moves": [{ "subject": "CS", "number": "4805", "from_term": "202710", "to_term": "202730", "reason": "CS 4805 has no sections in 202710." }],
+  "unresolved": [],
+  "plan": { "terms": [{ "term": "202730", "courses": [{ "subject": "CS", "number": "4805" }] }] }
 }
 ```
 

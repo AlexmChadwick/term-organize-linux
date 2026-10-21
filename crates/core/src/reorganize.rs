@@ -8,16 +8,14 @@
 //! using the catalogs handed to it (for the MCP server, the bundled Fall 2026 and Spring 2027
 //! snapshots) as the offering history.
 
-use crate::equivalences::CourseEquivalences;
 use crate::index::CatalogIndex;
 use crate::model::{
     CourseKey, DegreePlan, DegreePlanCourse, PlanSeason, Requisite, ScheduleFilters,
     SchedulePreferences, Term,
 };
 use crate::offering::{self, OfferingHistory};
-use crate::planlogic::{self, PrereqStatus};
 use crate::schedule::{self, Limits, ScheduleCourseInput, ScheduleSort};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const MAX_MOVES: usize = 32;
 pub const NOTE: &str = "Courses move only among terms already on the plan, so the plan does not gain a semester after the last one. Offering checks use the catalogs passed in (the bundled snapshots for the MCP server). This whole-plan pass is separate from the one-semester reorder.";
@@ -587,10 +585,11 @@ fn destination(
     }))
 }
 
-/// A move is legal when the course's catalog prerequisites are met by courses
-/// in earlier terms, and when no other course on the plan goes from met to
-/// missing. Prerequisites that are not on the plan stay unmet, so the course
-/// does not move. Corequisites are not part of this check.
+/// Prerequisite order is kept only among courses on the plan. A prerequisite
+/// that is not on the plan (completed, transferred, or AP) does not block a
+/// move. A planned prerequisite must stay in a strictly earlier term, and a
+/// later planned course that requires the moved course must stay later.
+/// Corequisites are not part of this check.
 fn prerequisite_block(
     terms: &[WorkTerm],
     catalogs: &[CatalogIndex],
@@ -598,30 +597,15 @@ fn prerequisite_block(
     dest: usize,
     key: &CourseKey,
 ) -> Option<String> {
-    let equivalences = CourseEquivalences::none();
-    let before = prerequisite_checks(terms, catalogs, &equivalences);
     let simulated = simulate_move(terms, from, dest, key);
-    let after = prerequisite_checks(&simulated, catalogs, &equivalences);
-    if let Some(PrereqStatus::Missing(text)) = after.get(key) {
-        return Some(format!(
-            "{} {} is offered in {}, but prerequisites are not met by earlier courses on the plan: {text}.",
-            key.subject, key.number, terms[dest].label
-        ));
+    if move_keeps_order(&simulated, catalogs, key) {
+        None
+    } else {
+        Some(format!(
+            "Moving {} {} would put it ahead of a prerequisite that is also in this plan.",
+            key.subject, key.number
+        ))
     }
-    for (other, status) in &before {
-        if other == key {
-            continue;
-        }
-        if let PrereqStatus::Met = status {
-            if let Some(PrereqStatus::Missing(text)) = after.get(other) {
-                return Some(format!(
-                    "Moving {} {} to {} would break prerequisite order for {other}: {text}.",
-                    key.subject, key.number, terms[dest].label
-                ));
-            }
-        }
-    }
-    None
 }
 
 fn simulate_move(terms: &[WorkTerm], from: usize, dest: usize, key: &CourseKey) -> Vec<WorkTerm> {
@@ -638,29 +622,72 @@ fn simulate_move(terms: &[WorkTerm], from: usize, dest: usize, key: &CourseKey) 
     terms
 }
 
-fn prerequisite_checks(
-    terms: &[WorkTerm],
-    catalogs: &[CatalogIndex],
-    equivalences: &CourseEquivalences,
-) -> HashMap<CourseKey, PrereqStatus> {
-    let mut order: Vec<usize> = (0..terms.len()).collect();
-    order.sort_by_key(|index| terms[*index].sort);
-    let mut taken = HashSet::new();
-    let mut checks = HashMap::new();
-    for index in order {
-        for course in &terms[index].courses {
-            let key = course_key(course);
-            let status = match known_prereq(catalogs, &key) {
-                Some(requisite) => planlogic::status(requisite, &taken, equivalences),
-                None => PrereqStatus::Unknown,
-            };
-            checks.insert(key, status);
-        }
-        for course in &terms[index].courses {
-            taken.insert(course_key(course));
+fn move_keeps_order(terms: &[WorkTerm], catalogs: &[CatalogIndex], moved: &CourseKey) -> bool {
+    let placed = placement(terms);
+    if let Some(Some(requisite)) = known_prereq(catalogs, moved) {
+        let course_sort = placed.get(moved).copied().unwrap_or(0);
+        if !prerequisite_holds(requisite, course_sort, &placed) {
+            return false;
         }
     }
-    checks
+    for (other, sort) in &placed {
+        if other == moved {
+            continue;
+        }
+        let Some(Some(requisite)) = known_prereq(catalogs, other) else {
+            continue;
+        };
+        if requisite_references(requisite, moved) && !prerequisite_holds(requisite, *sort, &placed)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn placement(terms: &[WorkTerm]) -> HashMap<CourseKey, i32> {
+    let mut placed = HashMap::new();
+    for term in terms {
+        for course in &term.courses {
+            placed.entry(course_key(course)).or_insert(term.sort);
+        }
+    }
+    placed
+}
+
+/// An off-plan course prerequisite holds. A course that is on the plan holds
+/// only when its term is strictly earlier.
+fn prerequisite_holds(
+    requisite: &Requisite,
+    course_sort: i32,
+    placed: &HashMap<CourseKey, i32>,
+) -> bool {
+    match requisite {
+        Requisite::Course(key) => match placed.get(key) {
+            None => true,
+            Some(earlier) => *earlier < course_sort,
+        },
+        Requisite::Test { .. } => true,
+        Requisite::And(items) => items
+            .iter()
+            .all(|item| prerequisite_holds(item, course_sort, placed)),
+        Requisite::Or(items) => {
+            items.is_empty()
+                || items
+                    .iter()
+                    .any(|item| prerequisite_holds(item, course_sort, placed))
+        }
+    }
+}
+
+fn requisite_references(requisite: &Requisite, key: &CourseKey) -> bool {
+    match requisite {
+        Requisite::Course(course) => course == key,
+        Requisite::Test { .. } => false,
+        Requisite::And(items) | Requisite::Or(items) => {
+            items.iter().any(|item| requisite_references(item, key))
+        }
+    }
 }
 
 fn known_prereq<'a>(
@@ -899,5 +926,121 @@ mod tests {
             .unwrap();
         assert_eq!(spring.courses[0].id, id);
         assert_eq!(spring.courses[0].title, "Fundamentals 2");
+    }
+
+    fn catalog_requiring(
+        code: &str,
+        description: &str,
+        rows: &[(&str, &str, &str, i32, i32, Option<(&str, &str)>)],
+    ) -> CatalogIndex {
+        let courses: Vec<_> = rows
+            .iter()
+            .map(|(subject, number, _, _, _, prereq)| {
+                let mut course = json!({
+                    "subject": subject,
+                    "number": number,
+                    "title": format!("{subject} {number}"),
+                    "minCredits": 4,
+                    "maxCredits": 4,
+                    "detailsLoaded": true
+                });
+                if let Some((ps, pn)) = prereq {
+                    course["prereqs"] = json!({ "s": ps, "n": pn });
+                }
+                course
+            })
+            .collect();
+        let sections: Vec<_> = rows
+            .iter()
+            .map(|(subject, number, crn, start, end, _)| {
+                json!({
+                    "crn": crn,
+                    "subject": subject,
+                    "number": number,
+                    "meetings": [{ "days": 2, "start": start, "end": end }]
+                })
+            })
+            .collect();
+        let value = json!({
+            "version": 1,
+            "term": { "code": code, "bannerDescription": description },
+            "courses": courses,
+            "sections": sections,
+            "subjects": [],
+            "attributes": [],
+            "campuses": []
+        });
+        CatalogIndex::build(serde_json::from_value::<TermCatalog>(value).unwrap())
+    }
+
+    #[test]
+    fn an_off_plan_prerequisite_does_not_block_the_move() {
+        let fall = catalog_requiring("202710", "Fall 2026 Semester", &[]);
+        let spring = catalog_requiring(
+            "202730",
+            "Spring 2027 Semester",
+            &[("CS", "4500", "20001", 540, 600, Some(("CS", "3500")))],
+        );
+        let outcome = reorganize(
+            &[
+                PlanSlot {
+                    term: "202710".into(),
+                    courses: vec![SlotCourse {
+                        subject: "CS".into(),
+                        number: "4500".into(),
+                        crn: None,
+                    }],
+                },
+                PlanSlot {
+                    term: "202730".into(),
+                    courses: vec![],
+                },
+            ],
+            &[fall, spring],
+        );
+        assert!(outcome.unresolved.is_empty());
+        assert_eq!(outcome.moves.len(), 1);
+        assert_eq!(outcome.moves[0].number, "4500");
+        assert_eq!(outcome.moves[0].to, "202730");
+    }
+
+    #[test]
+    fn a_planned_prerequisite_must_stay_in_an_earlier_term() {
+        let fall = catalog_requiring("202710", "Fall 2026 Semester", &[]);
+        let spring = catalog_requiring(
+            "202730",
+            "Spring 2027 Semester",
+            &[
+                ("CS", "3500", "20001", 540, 600, None),
+                ("CS", "4500", "20002", 660, 720, Some(("CS", "3500"))),
+            ],
+        );
+        let outcome = reorganize(
+            &[
+                PlanSlot {
+                    term: "202710".into(),
+                    courses: vec![SlotCourse {
+                        subject: "CS".into(),
+                        number: "4500".into(),
+                        crn: None,
+                    }],
+                },
+                PlanSlot {
+                    term: "202730".into(),
+                    courses: vec![SlotCourse {
+                        subject: "CS".into(),
+                        number: "3500".into(),
+                        crn: None,
+                    }],
+                },
+            ],
+            &[fall, spring],
+        );
+        assert!(outcome.moves.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].number, "4500");
+        assert!(outcome.unresolved[0]
+            .reason
+            .contains("prerequisite that is also in this plan"));
     }
 }

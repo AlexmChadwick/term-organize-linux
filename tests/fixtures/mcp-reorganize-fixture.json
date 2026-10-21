@@ -18,33 +18,40 @@
     "moves": [
       {
         "subject": "CS",
+        "number": "4805",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 4805 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "2535",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 2535 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "2700",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 2700 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "4130",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 4130 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
         "number": "2701",
         "from_term": "202710",
         "to_term": "202730",
         "reason": "CS 2701 has no sections in 202710."
       }
     ],
-    "unresolved": [
-      {
-        "subject": "CS",
-        "number": "4805",
-        "reason": "CS 4805 is offered in 202730, but prerequisites are not met by earlier courses on the plan: CS 3800."
-      },
-      {
-        "subject": "CS",
-        "number": "2535",
-        "reason": "CS 2535 is offered in 202730, but prerequisites are not met by earlier courses on the plan: CS 2100 or CS 201M."
-      },
-      {
-        "subject": "CS",
-        "number": "2700",
-        "reason": "CS 2700 is offered in 202730, but prerequisites are not met by earlier courses on the plan: (CS 1800, MATH 1365 or 2 others) and (CS 2100 or CS 201M)."
-      },
-      {
-        "subject": "CS",
-        "number": "4130",
-        "reason": "CS 4130 is offered in 202730, but prerequisites are not met by earlier courses on the plan: CS 3100, CS 310M or 2 others."
-      }
-    ]
+    "unresolved": []
   }
 }

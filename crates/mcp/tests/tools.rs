@@ -469,7 +469,7 @@ fn shared_reorganize_fixture_matches_the_bundled_catalog() {
         .iter()
         .map(|course| course["number"].as_str().unwrap())
         .collect();
-    assert_eq!(numbers, ["2701"]);
+    assert_eq!(numbers, ["4805", "2535", "2700", "4130", "2701"]);
 }
 
 #[test]
