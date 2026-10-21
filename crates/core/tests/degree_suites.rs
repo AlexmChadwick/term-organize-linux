@@ -1317,15 +1317,14 @@ fn checksHoursInTheMajorAndCoop() {
     assert_eq!(coop.detail, "COOP 3946 completed");
     assert_eq!(done.satisfied_count(), done.total_count());
     let short = audit_of(&["CS 3000", "CS 3200", "CS 1210"], &["CS 3500"]);
-    assert_eq!(
-        short
-            .note_checks
-            .iter()
-            .find(|c| matches!(c.kind, NoteKind::MajorHours { .. }))
-            .unwrap()
-            .status,
-        AuditStatus::Partial
-    );
+    let short_hours = short
+        .note_checks
+        .iter()
+        .find(|c| matches!(c.kind, NoteKind::MajorHours { .. }))
+        .unwrap();
+    // 4 (CS 3000) + 4 (CS 3200) earned, 4 (CS 3500) planned. Not 12 of 16 with the 4 planned again.
+    assert_eq!(short_hours.status, AuditStatus::Partial);
+    assert_eq!(short_hours.detail, "8 of 16 semester hours · 4 planned");
     assert_eq!(
         short
             .note_checks
@@ -1864,7 +1863,7 @@ fn checksTheUniversitywideMinimumsItCan() {
     assert_eq!(check.items[0].status, Some(AuditStatus::Partial));
     assert_eq!(
         check.items[0].detail,
-        "44 of 128 semester hours · 12 planned"
+        "32 of 128 semester hours · 12 planned"
     );
     assert_eq!(check.items[1].status, None);
     assert_eq!(
@@ -1876,7 +1875,7 @@ fn checksTheUniversitywideMinimumsItCan() {
     assert!(check.counts);
     assert_eq!(
         check.detail,
-        "44 of 128 semester hours · 12 planned · GPA and residency not checked"
+        "32 of 128 semester hours · 12 planned · GPA and residency not checked"
     );
     let unread = run_attr(
         &nupath_plan(),
@@ -1898,7 +1897,7 @@ fn checksTheProgramsTotalHours() {
         .find(|check| matches!(check.kind, NoteKind::TotalHours { .. }))
         .unwrap();
     assert_eq!(check.status, AuditStatus::Partial);
-    assert_eq!(check.detail, "44 of 134 semester hours · 12 planned");
+    assert_eq!(check.detail, "32 of 134 semester hours · 12 planned");
 }
 
 #[test]
@@ -1923,6 +1922,152 @@ fn saysWhySomeSentencesArentChecked() {
         degree_audit::unchecked_reason("Courses may not be taken pass/fail."),
         None
     );
+}
+
+/// 105 earned and 30 planned. The header says "105 of 134 credits done · 30 planned".
+/// The universitywide line used to say "135 of 128 semester hours · 30 planned",
+/// which is 105 + 30 in the first number and the 30 again. Every hours line uses
+/// `hours_status`: the first number is completed credits only.
+#[test]
+fn hoursLinesKeepCompletedSeparateFromPlanned() {
+    assert_eq!(
+        degree_audit::hours_status(105.0, 30.0, 128.0),
+        (
+            AuditStatus::Planned,
+            "105 of 128 semester hours · 30 planned".into()
+        )
+    );
+    assert_eq!(
+        degree_audit::hours_status(105.0, 30.0, 134.0),
+        (
+            AuditStatus::Planned,
+            "105 of 134 semester hours · 30 planned".into()
+        )
+    );
+    assert_eq!(
+        degree_audit::hours_status(60.0, 22.0, 72.0),
+        (
+            AuditStatus::Planned,
+            "60 of 72 semester hours · 22 planned".into()
+        )
+    );
+    assert_eq!(
+        degree_audit::hours_status(128.0, 0.0, 128.0),
+        (AuditStatus::Complete, "128 of 128 semester hours".into())
+    );
+    assert_eq!(
+        degree_audit::hours_status(140.0, 10.0, 128.0),
+        (
+            AuditStatus::Complete,
+            "140 of 128 semester hours · 10 planned".into()
+        )
+    );
+    assert_eq!(
+        degree_audit::hours_status(90.0, 20.0, 128.0),
+        (
+            AuditStatus::Partial,
+            "90 of 128 semester hours · 20 planned".into()
+        )
+    );
+    assert_eq!(
+        degree_audit::hours_status(0.0, 0.0, 128.0),
+        (AuditStatus::Missing, "0 of 128 semester hours".into())
+    );
+    assert_eq!(
+        degree_audit::hours_status(0.0, 128.0, 128.0),
+        (
+            AuditStatus::Planned,
+            "0 of 128 semester hours · 128 planned".into()
+        )
+    );
+
+    let page = r#"<div id="programrequirementstextcontainer" class="tab_content">
+        <h2>Universitywide Requirements</h2>
+        <p>All undergraduate students are required to complete the Universitywide Requirements.</p>
+        <h2>Major Requirements</h2>
+        <table class="sc_courselist"><tbody>
+        <tr class="even firstrow"><td class="codecol"><a class="bubblelink code">CS&#160;3000</a></td><td>Algorithms</td><td class="hourscol">4</td></tr>
+        <tr class="odd"><td colspan="2"><span class="courselistcomment">Complete 8 semester hours of CS classes. Choose courses within the following ranges:</span></td><td class="hourscol">8</td></tr>
+        <tr class="even lastrow"><td colspan="2"><div style="margin-left:20px;" class="blockindent"><span class="courselistcomment commentindent"><a class="bubblelink code">CS&#160;2500</a> or higher</span></div></td><td class="hourscol"></td></tr>
+        </tbody></table>
+        <h2>Writing Requirement</h2>
+        <table class="sc_courselist"><tbody>
+        <tr class="even firstrow lastrow"><td class="codecol"><a class="bubblelink code">ENGW&#160;1111</a></td><td>First-Year Writing</td><td class="hourscol">4</td></tr>
+        </tbody></table>
+        <h2>Required General Electives</h2>
+        <table class="sc_courselist"><tbody>
+        <tr class="even lastrow firstrow"><td colspan="2"><span class="courselistcomment">Complete 4 semester hours of general electives.</span></td><td class="hourscol">4</td></tr>
+        </tbody></table>
+        <h2>Credit Requirement</h2>
+        <p>Complete 72 semester hours in the major.</p>
+        <h2>Program Requirement</h2>
+        <p>134 total semester hours required</p>
+        </div>"#;
+    let mut requirements =
+        program_parser::requirements_from_html(page, CatalogYear::new(2024), bscs()).unwrap();
+    requirements.universitywide = Some(UniversitywideRequirements {
+        total_hours: Some(128.0),
+        gpa: Some(2.0),
+        residency_hours: Some(64.0),
+        requires_experiential_learning: false,
+        fetched_at: 0.0,
+    });
+    let mut plan = DegreePlan {
+        name: "BS CS".into(),
+        ..DegreePlan::default()
+    };
+    plan.completed = vec![
+        course("CS 3000", 40.0, ""),
+        course("CS 2500", 20.0, ""),
+        course("ENGW 1111", 4.0, ""),
+        course("PHIL 1102", 41.0, ""),
+    ];
+    let mut spring = DegreePlanTerm::new(PlanSeason::Spring, 2027);
+    spring.courses = vec![course("CS 3500", 22.0, ""), course("MKTG 2201", 8.0, "")];
+    plan.terms = vec![spring];
+
+    let audit = run(&plan, &requirements);
+    assert_eq!(audit.completed_hours, 105.0);
+    assert_eq!(audit.planned_hours, 30.0);
+    assert_eq!(audit.required_hours, Some(134.0));
+    assert_eq!(
+        degree_audit::credits_line(&audit),
+        "105 of 134 credits done · 30 planned"
+    );
+
+    let university = audit
+        .note_checks
+        .iter()
+        .find(|check| matches!(check.kind, NoteKind::Universitywide))
+        .unwrap();
+    assert_eq!(university.status, AuditStatus::Planned);
+    assert_eq!(university.items[0].status, Some(AuditStatus::Planned));
+    assert_eq!(
+        university.items[0].detail,
+        "105 of 128 semester hours · 30 planned"
+    );
+    assert_eq!(
+        university.detail,
+        "105 of 128 semester hours · 30 planned · GPA and residency not checked"
+    );
+
+    let total = audit
+        .note_checks
+        .iter()
+        .find(|check| matches!(check.kind, NoteKind::TotalHours { .. }))
+        .unwrap();
+    assert_eq!(total.status, AuditStatus::Planned);
+    assert_eq!(total.detail, "105 of 134 semester hours · 30 planned");
+
+    let major = audit
+        .note_checks
+        .iter()
+        .find(|check| matches!(check.kind, NoteKind::MajorHours { .. }))
+        .unwrap();
+    // CS 3000 (40) and CS 2500 (20) earned, CS 3500 (22) planned. Writing and the general
+    // electives are not hours in the major. 60 + 22 is not written as 82 and then 22 again.
+    assert_eq!(major.status, AuditStatus::Planned);
+    assert_eq!(major.detail, "60 of 72 semester hours · 22 planned");
 }
 
 type CodesByCourse = HashMap<CourseKey, HashSet<String>>;

@@ -150,6 +150,7 @@ fn input(
         excluded_crns: HashSet::new(),
         min_credits: credits,
         max_credits: credits,
+        unavailable_pin: None,
     }
 }
 
@@ -805,6 +806,7 @@ fn catalog_inputs(index: &CatalogIndex, codes: &[&str]) -> Vec<ScheduleCourseInp
                 max_credits: course
                     .map(|course| course.max_credits.ceil() as i32)
                     .unwrap_or(0),
+                unavailable_pin: None,
             })
         })
         .collect()

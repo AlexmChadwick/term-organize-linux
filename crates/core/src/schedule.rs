@@ -151,6 +151,10 @@ pub struct ScheduleCourseInput {
     pub excluded_crns: HashSet<String>,
     pub min_credits: i32,
     pub max_credits: i32,
+    /// Set when this row is locked to a CRN the catalog does not have for this
+    /// course. `sections` is then empty. Generation reports the row as
+    /// unavailable and does not substitute another section of the same number.
+    pub unavailable_pin: Option<String>,
 }
 
 impl ScheduleCourseInput {
@@ -164,6 +168,7 @@ impl ScheduleCourseInput {
             excluded_crns: HashSet::new(),
             min_credits: 0,
             max_credits: 0,
+            unavailable_pin: None,
         }
     }
 }
@@ -293,6 +298,9 @@ pub struct CourseReport {
     pub total_sections: usize,
     pub remaining_sections: usize,
     pub rejections: HashMap<FilterReason, i32>,
+    /// The CRN this row is locked to when the catalog no longer has it.
+    /// Empty `total_sections` then means unavailable, not "not offered".
+    pub unavailable_pin: Option<String>,
 }
 
 impl CourseReport {
@@ -1583,6 +1591,7 @@ fn run(
             total_sections: course.sections.len(),
             remaining_sections: remaining.len(),
             rejections,
+            unavailable_pin: course.unavailable_pin.clone(),
         });
         kept.push(remaining);
     }
@@ -3653,7 +3662,9 @@ pub fn pinned_sections(
             let mut selected = Vec::new();
             if claimed.insert(crn.to_string()) {
                 if let Some(section) = index.section_crn(crn) {
-                    selected.push(section.clone());
+                    if section.course_key() == course.key {
+                        selected.push(section.clone());
+                    }
                 }
             }
             rows.push(selected);
@@ -3700,7 +3711,18 @@ fn input_for(
         excluded_crns: course.excluded_crns.clone(),
         min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
         max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
+        unavailable_pin: None,
     }
+}
+
+fn locked_input(
+    course: &PlanCourse,
+    index: &crate::index::CatalogIndex,
+    pin: &str,
+) -> ScheduleCourseInput {
+    let mut input = input_for(course, Vec::new(), index);
+    input.unavailable_pin = Some(pin.to_string());
+    input
 }
 
 pub fn inputs_for(
@@ -3714,10 +3736,42 @@ pub fn inputs_for(
         .map(|section| section.crn.clone())
         .collect();
     let mut inputs = Vec::new();
-    for (course, selected) in plan.courses.iter().zip(pins) {
+    for (row_index, (course, selected)) in plan.courses.iter().zip(pins).enumerate() {
         let topics = index
             .course(&course.key)
             .is_some_and(|listed| listed.special_topics);
+        if let Some(crn) = crate::planlogic::chosen_crn(course.pinned_crn.as_deref()) {
+            if selected.is_empty() {
+                let listed = index.section_crn(crn);
+                let missing = listed.is_none_or(|section| section.course_key() != course.key);
+                if missing {
+                    inputs.push(locked_input(course, index, crn));
+                    continue;
+                }
+            }
+        } else if selected.is_empty() {
+            let siblings =
+                plan.courses.iter().enumerate().any(|(other_index, other)| {
+                    other_index != row_index && other.key == course.key
+                });
+            if !siblings {
+                let listed_elsewhere = plan.selected_crns.iter().any(|crn| {
+                    index
+                        .section_crn(crn)
+                        .is_some_and(|section| section.course_key() != course.key)
+                });
+                if !listed_elsewhere {
+                    if let Some(missing) = plan
+                        .selected_crns
+                        .iter()
+                        .find(|crn| index.section_crn(crn).is_none())
+                    {
+                        inputs.push(locked_input(course, index, missing));
+                        continue;
+                    }
+                }
+            }
+        }
         if !selected.is_empty() {
             if selected.len() > 1 {
                 for (offset, section) in selected.into_iter().enumerate() {
@@ -3829,6 +3883,8 @@ impl BlockerOption {
 pub struct BlockerAnalysis {
     pub required_count: usize,
     pub not_offered: Vec<CourseKey>,
+    /// Required courses locked to a CRN the catalog no longer has.
+    pub unavailable: Vec<CourseKey>,
     pub filtered_out: Vec<CourseKey>,
     pub options: Vec<BlockerOption>,
     pub conflicting_pairs: Vec<ConflictPair>,
@@ -3912,7 +3968,9 @@ pub fn analyze_blockers(
     for index in &required {
         if base.courses[*index].is_blocked() {
             dead.push(*index);
-            if base.courses[*index].total_sections == 0 {
+            if base.courses[*index].unavailable_pin.is_some() {
+                analysis.unavailable.push(courses[*index].key.clone());
+            } else if base.courses[*index].total_sections == 0 {
                 analysis.not_offered.push(courses[*index].key.clone());
             } else {
                 analysis.filtered_out.push(courses[*index].key.clone());
@@ -4081,7 +4139,9 @@ pub fn blocker_detail(
         format!("{} {noun}", option.schedule_count)
     }];
     for key in &option.courses {
-        if blockers.not_offered.contains(key) {
+        if blockers.unavailable.contains(key) {
+            parts.push(format!("{key}'s chosen section is unavailable"));
+        } else if blockers.not_offered.contains(key) {
             parts.push(format!("{key} isn’t offered in {term_name}"));
         } else if blockers.filtered_out.contains(key) {
             parts.push(format!("your rules rule out every {key} section"));
@@ -4113,7 +4173,15 @@ pub fn no_results_reasons(
         .iter()
         .filter(|report| report.is_blocked() && report.is_required)
     {
-        if report.total_sections == 0 {
+        if let Some(pin) = &report.unavailable_pin {
+            result.push(NoResultReason {
+                symbol: "lock".into(),
+                title: format!("{} is unavailable", report.key),
+                detail: Some(format!(
+                    "CRN {pin} is no longer in the {term_name} catalog. Another section was not substituted."
+                )),
+            });
+        } else if report.total_sections == 0 {
             result.push(NoResultReason {
                 symbol: "questionmark.folder".into(),
                 title: format!("{} isn’t offered in {term_name}", report.key),

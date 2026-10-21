@@ -2403,7 +2403,19 @@ fn major_hours(note: &str) -> Option<f64> {
     re.captures(note)?.get(1)?.as_str().parse().ok()
 }
 
-fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, String) {
+/// How a semester-hour minimum stands, for the university minimum, the program
+/// total, and hours in the major.
+///
+/// `completed` is credits already earned. `planned` is credits in later terms.
+/// The line is `"{completed} of {required} semester hours"`, then
+/// `" · {planned} planned"` when `planned > 0`. The first number is
+/// `completed` alone. It is not `completed + planned`.
+///
+/// Status matches the other requirement rows. Complete when
+/// `completed >= required`. Planned when completed credits fall short but
+/// `completed + planned >= required`. Partial when `completed + planned > 0`
+/// and that sum is still under `required`. Missing when both are 0.
+pub fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, String) {
     let status = if completed >= required {
         AuditStatus::Complete
     } else if completed + planned >= required {
@@ -2415,13 +2427,27 @@ fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, St
     };
     let mut detail = format!(
         "{} of {} semester hours",
-        hours_text(completed + planned),
+        hours_text(completed),
         hours_text(required)
     );
     if planned > 0.0 {
         detail.push_str(&format!(" · {} planned", hours_text(planned)));
     }
     (status, detail)
+}
+
+/// `105 of 134 credits done · 30 planned`. The first number is completed
+/// credits. Planned credits are the separate suffix.
+pub fn credits_line(audit: &DegreeAudit) -> String {
+    let done = hours_text(audit.completed_hours);
+    let mut line = match audit.required_hours {
+        Some(required) => format!("{done} of {} credits done", hours_text(required)),
+        None => format!("{done} credits done"),
+    };
+    if audit.planned_hours > 0.0 {
+        line.push_str(&format!(" · {} planned", hours_text(audit.planned_hours)));
+    }
+    line
 }
 
 fn describe(uses: &[CourseUse]) -> String {
