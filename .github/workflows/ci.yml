@@ -13,7 +13,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: System libraries
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config xvfb
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config xvfb dbus xdg-desktop-portal xdg-desktop-portal-gtk
       - name: Format
         run: cargo fmt --all -- --check
       - name: Tests
@@ -27,3 +27,7 @@ jobs:
           mkdir -p /tmp/termorganize-smoke
           TERMORGANIZE_DATA=/tmp/termorganize-smoke GDK_BACKEND=x11 GSK_RENDERER=cairo \
             xvfb-run -a -s "-screen 0 1440x900x24" ./target/release/termorganize --smoke
+      - name: D-Bus session regression
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x900x24" \
+            cargo test -p termorganize ui::portal_tests::background_request_survives_a_session_bus -- --ignored --exact
