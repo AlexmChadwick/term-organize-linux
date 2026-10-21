@@ -36,7 +36,7 @@ impl ToolError {
         })
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    pub fn invalid(message: impl Into<String>) -> Self {
         Self {
             error: "invalid_argument",
             message: nonempty(&message.into()),
@@ -306,7 +306,7 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
 pub fn get_course(args: CourseArgs) -> Result<Value, ToolError> {
     let (index, parsed) = index_for(&args.term)?;
     let course = find_course(index, &args.subject, &args.number).ok_or_else(|| {
-        ToolError::invalid(format!(
+        ToolError::not_found(format!(
             "No course {} {} in {}.",
             args.subject.trim().to_ascii_uppercase(),
             args.number.trim(),
@@ -363,7 +363,7 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
     let mut inputs = Vec::new();
     for course in &args.courses {
         let found = find_course(index, &course.subject, &course.number).ok_or_else(|| {
-            ToolError::invalid(format!(
+            ToolError::not_found(format!(
                 "No course {} {} in {}.",
                 course.subject, course.number, parsed.label
             ))
@@ -372,14 +372,14 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
         if let Some(crn) = course.crn.as_deref() {
             sections.retain(|section| section.crn == crn);
             if sections.is_empty() {
-                return Err(ToolError::invalid(format!(
+                return Err(ToolError::not_found(format!(
                     "CRN {crn} is not a section of {} {} in {}.",
                     found.subject, found.number, parsed.label
                 )));
             }
         }
         if sections.is_empty() {
-            return Err(ToolError::invalid(format!(
+            return Err(ToolError::not_found(format!(
                 "{} {} has no sections in {}.",
                 found.subject, found.number, parsed.label
             )));
@@ -801,7 +801,7 @@ fn course_row(course: &DegreePlanCourse, index: Option<&CatalogIndex>) -> Value 
 
 fn validation(plan: &DegreePlan) -> Value {
     let mut clashes = Vec::new();
-    let mut unoffered = Vec::new();
+    let mut not_offered = Vec::new();
     for term in &plan.terms {
         let Some(index) = reorganize::catalog_for_term(catalogs(), term.season, term.year) else {
             continue;
@@ -812,7 +812,7 @@ fn validation(plan: &DegreePlan) -> Value {
                 continue;
             };
             if index.sections_for(key).is_empty() {
-                unoffered.push(json!({
+                not_offered.push(json!({
                     "term": term.name(),
                     "subject": key.subject,
                     "number": key.number,
@@ -840,7 +840,7 @@ fn validation(plan: &DegreePlan) -> Value {
             chosen.push(section);
         }
     }
-    json!({ "clashes": clashes, "unoffered": unoffered })
+    json!({ "clashes": clashes, "not_offered": not_offered })
 }
 
 fn term_code(term: &DegreePlanTerm) -> Option<String> {
@@ -852,7 +852,7 @@ fn index_for(term: &str) -> Result<(&'static CatalogIndex, reorganize::ParsedTer
     let parsed = parse_label(term)?;
     let index =
         reorganize::catalog_for_term(catalogs(), parsed.season, parsed.year).ok_or_else(|| {
-            ToolError::invalid(format!(
+            ToolError::not_found(format!(
                 "No bundled catalog for {}. This server reads Fall 2026 and Spring 2027 only.",
                 parsed.label
             ))
@@ -884,14 +884,14 @@ fn require_offered<'a>(
     number: &str,
 ) -> Result<&'a Course, ToolError> {
     let course = find_course(index, subject, number).ok_or_else(|| {
-        ToolError::invalid(format!(
+        ToolError::not_found(format!(
             "No course {} {} in {label}.",
             subject.trim().to_ascii_uppercase(),
             number.trim()
         ))
     })?;
     if index.sections_for(&course.key()).is_empty() {
-        return Err(ToolError::invalid(format!(
+        return Err(ToolError::not_found(format!(
             "{} {} has no sections in {label}.",
             course.subject, course.number
         )));
@@ -909,7 +909,7 @@ fn checked_crn(
         return Ok(None);
     };
     if !crn_belongs(index, &course.key(), Some(crn)) {
-        return Err(ToolError::invalid(format!(
+        return Err(ToolError::not_found(format!(
             "CRN {crn} is not a section of {} {} in {label}.",
             course.subject, course.number
         )));

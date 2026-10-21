@@ -63,6 +63,28 @@ pub fn resolve_mcp_data_dir(flag: Option<&Path>, mcp_env: Option<&str>) -> PathB
     termorganize_core::store::data_dir()
 }
 
+/// rmcp turns a schema mismatch into `isError` text and no `structuredContent`.
+/// Every tool's argument failure has to use the same error object as the others.
+fn argument_error(response: rmcp::model::CallToolResponse) -> rmcp::model::CallToolResponse {
+    let rmcp::model::CallToolResponse::Complete(result) = response else {
+        return response;
+    };
+    if result.is_error != Some(true) || result.structured_content.is_some() {
+        return rmcp::model::CallToolResponse::Complete(result);
+    }
+    let message = result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.clone())
+        .unwrap_or_default();
+    const PREFIX: &str = "failed to deserialize parameters:";
+    if !message.starts_with(PREFIX) {
+        return rmcp::model::CallToolResponse::Complete(result);
+    }
+    finish(Err(ToolError::invalid(message))).into()
+}
+
 fn finish(result: Result<serde_json::Value, ToolError>) -> CallToolResult {
     match result {
         Ok(value) => CallToolResult::structured(value),
@@ -312,7 +334,13 @@ impl ServerHandler for TermOrganize {
             .into());
         }
         let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        self.tool_router.call(context).await
+        match self.tool_router.call(context).await {
+            Ok(response) => Ok(argument_error(response)),
+            Err(error) if error.code == rmcp::model::ErrorCode::INVALID_PARAMS => {
+                Ok(finish(Err(ToolError::invalid(error.message.to_string()))).into())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn get_info(&self) -> ServerConfig {

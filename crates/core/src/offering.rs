@@ -586,3 +586,99 @@ impl<F: OfferingSource> OfferingRepository<F> {
         let _ = std::fs::write(&self.file, text);
     }
 }
+
+/// Catalogs used to describe when a course was offered.
+///
+/// The open term comes first and wins if the same term is also bundled or cached.
+/// Every shipped catalog is included, so a course placed in Spring 2027 is not
+/// described from the Fall 2026 snapshot alone.
+pub fn indexes_for_history(selected: &CatalogIndex) -> Vec<CatalogIndex> {
+    let mut indexes = vec![selected.clone()];
+    for extra in bundled_and_cached_indexes() {
+        if indexes
+            .iter()
+            .any(|have| have.catalog.term.code == extra.catalog.term.code)
+        {
+            continue;
+        }
+        indexes.push(extra);
+    }
+    indexes
+}
+
+fn bundled_and_cached_indexes() -> Vec<CatalogIndex> {
+    let mut indexes = Vec::new();
+    for path in crate::archive::bundled_catalog_paths() {
+        let Ok(mut catalog) = crate::archive::read(&path) else {
+            continue;
+        };
+        catalog.recompute_postreqs();
+        indexes.push(CatalogIndex::build(catalog));
+    }
+    indexes.extend(crate::catalog::indexes_on_disk());
+    indexes
+}
+
+#[cfg(test)]
+mod history_indexes {
+    use super::*;
+    use crate::archive;
+    use crate::index::CatalogIndex;
+
+    struct Offline;
+
+    impl OfferingSource for Offline {
+        fn terms(&self) -> Result<Vec<Term>, String> {
+            Ok(vec![])
+        }
+        fn offered_courses(
+            &self,
+            _term: &str,
+            _courses: &[CourseKey],
+        ) -> Result<HashSet<CourseKey>, String> {
+            Err("offline".into())
+        }
+    }
+
+    fn load(code: &str) -> CatalogIndex {
+        let path = archive::bundled_catalog_path_for(code).expect(code);
+        CatalogIndex::build(archive::read(&path).expect("catalog"))
+    }
+
+    fn summary_for(indexes: &[CatalogIndex], key: &CourseKey) -> String {
+        let mut repo = OfferingRepository::new(
+            Offline,
+            PathBuf::from("/tmp/unused-offering.json"),
+            1_700_000_000.0,
+        );
+        repo.history(std::slice::from_ref(key), indexes)
+            .summary(key)
+    }
+
+    #[test]
+    fn spring_catalog_counts_when_the_open_term_is_fall() {
+        let key = CourseKey::parse("CS 3000").expect("key");
+        let fall = load("202710");
+        let spring = load("202730");
+        assert!(!fall.sections_for(&key).is_empty());
+        assert!(!spring.sections_for(&key).is_empty());
+        assert_eq!(
+            summary_for(std::slice::from_ref(&fall), &key),
+            "Last offered Fall 2026"
+        );
+
+        let indexes = indexes_for_history(&fall);
+        assert_eq!(indexes[0].catalog.term.code, "202710");
+        assert_eq!(
+            indexes
+                .iter()
+                .filter(|index| index.catalog.term.code == "202710")
+                .count(),
+            1
+        );
+        assert!(indexes
+            .iter()
+            .any(|index| index.catalog.term.code == "202730"));
+        assert_eq!(summary_for(&indexes, &key), "Last offered Spring 2027");
+    }
+}

@@ -400,10 +400,15 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 pub fn plan_revision(data: &UserData, id: uuid::Uuid) -> u64 {
-    data.plan_revisions
-        .get(&id.to_string())
-        .copied()
-        .unwrap_or(0)
+    recorded_revision(data.plan_revisions.get(&id.to_string()).copied())
+}
+
+/// A stored counter, or 1 when the plan has never been given one.
+///
+/// Plans created in the app before revisions were recorded have no `planRevisions`
+/// entry (or a 0). Those are revision 1, on read and on an `expected_revision` check.
+fn recorded_revision(stored: Option<u64>) -> u64 {
+    stored.filter(|revision| *revision > 0).unwrap_or(1)
 }
 
 fn plan_body(plan: &DegreePlan) -> String {
@@ -416,7 +421,14 @@ fn bump_plan_revisions(data: &mut UserData, previous: &UserData) {
     let mut next = std::collections::BTreeMap::new();
     for plan in &data.degree_plans {
         let id = plan.id.to_string();
-        let old_revision = previous.plan_revisions.get(&id).copied().unwrap_or(0);
+        let existed = previous.degree_plans.iter().any(|old| old.id == plan.id);
+        // A new plan's first save is revision 1. A plan already on disk with no
+        // counter is already revision 1, so the next edit becomes 2.
+        let old_revision = if existed {
+            recorded_revision(previous.plan_revisions.get(&id).copied())
+        } else {
+            0
+        };
         let changed = match previous.degree_plans.iter().find(|old| old.id == plan.id) {
             None => true,
             Some(old) => plan_body(old) != plan_body(plan),
@@ -624,6 +636,32 @@ mod tests {
             file_changed(&stamp, "abc", stamp.mtime, &bumped),
             "a new planRevisions entry is an outside edit"
         );
+    }
+
+    #[test]
+    fn a_plan_with_no_recorded_revision_is_revision_one() {
+        let dir = temp_dir("rev1");
+        let mut data = UserData::default();
+        let id = data.add_degree_plan(degree("From the app"));
+        data.plan_revisions.clear();
+        data.plan_revisions.insert(id.to_string(), 0);
+        assert_eq!(plan_revision(&data, id), 1);
+        data.plan_revisions.clear();
+        fs::write(dir.join("user.json"), serde_json::to_string(&data).unwrap()).unwrap();
+        let loaded = load_user(&dir);
+        assert!(loaded.plan_revisions.get(&id.to_string()).is_none());
+        assert_eq!(plan_revision(&loaded, id), 1);
+
+        let mut edited = loaded;
+        edited
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == id)
+            .unwrap()
+            .name = "Edited once".into();
+        save_user(&dir, &edited).unwrap();
+        assert_eq!(plan_revision(&load_user(&dir), id), 2);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

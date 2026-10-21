@@ -291,9 +291,9 @@ fn write_tools_round_trip_through_the_app_loader() {
         },
     )
     .unwrap_err();
-    assert_eq!(unknown.error, "invalid_argument");
+    assert_eq!(unknown.error, "not_found");
     assert!(!unknown.message.is_empty());
-    assert!(unknown.to_value()["error"]["code"].as_str().unwrap() == "invalid_argument");
+    assert!(unknown.to_value()["error"]["code"].as_str().unwrap() == "not_found");
     assert_eq!(
         store::load_user(&dir).degree_plans[0].terms[0]
             .courses
@@ -535,6 +535,106 @@ fn a_plan_file_that_cannot_be_read_is_a_storage_error() {
         fs::read(&path).unwrap(),
         br#"{"version": 9, "degreePlans": []}"#
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_revision_is_one_and_unknown_catalog_rows_are_not_found() {
+    let dir = temp_dir("revision-one");
+    let mut data = UserData::default();
+    let mut plan = termorganize_core::model::DegreePlan {
+        name: "From the app".into(),
+        terms: vec![termorganize_core::model::DegreePlanTerm::new(
+            PlanSeason::Spring,
+            2027,
+        )],
+        ..termorganize_core::model::DegreePlan::default()
+    };
+    plan.terms[0].courses.push(DegreePlanCourse::catalog(
+        CourseKey::parse("ZZ 9999").unwrap(),
+        "Not a course",
+        4.0,
+    ));
+    let id = data.add_degree_plan(plan);
+    data.plan_revisions.clear();
+    fs::write(dir.join("user.json"), serde_json::to_string(&data).unwrap()).unwrap();
+
+    let listed = tools::list_plans(&dir).unwrap();
+    assert_eq!(listed["plans"][0]["revision"], 1);
+    let loaded = tools::get_plan(
+        &dir,
+        tools::PlanIdArgs {
+            plan_id: id.to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(loaded["revision"], 1);
+    assert!(loaded["validation"].get("unoffered").is_none());
+    assert_eq!(loaded["validation"]["not_offered"][0]["subject"], "ZZ");
+    assert_eq!(loaded["validation"]["not_offered"][0]["number"], "9999");
+    assert_eq!(
+        loaded["validation"]["not_offered"][0]["term"],
+        "Spring 2027"
+    );
+
+    let renamed = tools::rename_plan(
+        &dir,
+        tools::RenameArgs {
+            plan_id: id.to_string(),
+            name: "Still the app plan".into(),
+            expected_revision: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(renamed["revision"], 2);
+    let stale = tools::rename_plan(
+        &dir,
+        tools::RenameArgs {
+            plan_id: id.to_string(),
+            name: "Too old".into(),
+            expected_revision: 1,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(stale.error, "revision_conflict");
+
+    let unknown_term = tools::get_course(tools::CourseArgs {
+        term: "Fall 2024".into(),
+        subject: "CS".into(),
+        number: "3000".into(),
+    })
+    .unwrap_err();
+    assert_eq!(unknown_term.error, "not_found");
+    assert!(!unknown_term.message.is_empty());
+    let malformed = tools::get_course(tools::CourseArgs {
+        term: "not a term".into(),
+        subject: "CS".into(),
+        number: "3000".into(),
+    })
+    .unwrap_err();
+    assert_eq!(malformed.error, "invalid_argument");
+
+    let course = tools::get_course(tools::CourseArgs {
+        term: "Spring 2027".into(),
+        subject: "CS".into(),
+        number: "3000".into(),
+    })
+    .unwrap();
+    assert!(!course["sections"].as_array().unwrap().is_empty());
+    let wrong_crn = tools::set_section(
+        &dir,
+        tools::SetSectionArgs {
+            plan_id: id.to_string(),
+            term: "Spring 2027".into(),
+            subject: "CS".into(),
+            number: "3000".into(),
+            crn: "00000".into(),
+            expected_revision: 2,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(wrong_crn.error, "not_found");
+    assert!(wrong_crn.message.contains("00000"));
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -59,6 +59,9 @@ pub fn update_plan(
 ) -> Result<(DegreePlan, u64), PlanFileError> {
     let _lock = UserLock::acquire(dir).map_err(PlanFileError::Io)?;
     let mut data = read_user(dir)?;
+    if !data.degree_plans.iter().any(|plan| plan.id == id) {
+        return Err(PlanFileError::NotFound);
+    }
     let actual = plan_revision(&data, id);
     if actual != expected_revision {
         return Err(PlanFileError::RevisionConflict { actual });

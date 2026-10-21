@@ -662,12 +662,7 @@ fn plan_keys(plan: &DegreePlan) -> Vec<CourseKey> {
 }
 
 fn local_history(index: &CatalogIndex, keys: &[CourseKey]) -> OfferingHistory {
-    let mut indexes = vec![index.clone()];
-    for extra in catalog::indexes_on_disk() {
-        if extra.catalog.term.code != index.catalog.term.code {
-            indexes.push(extra);
-        }
-    }
+    let indexes = termorganize_core::offering::indexes_for_history(index);
     let terms = indexes
         .iter()
         .map(|index| index.catalog.term.clone())
@@ -701,12 +696,7 @@ fn refresh_older_terms(shell: &Rc<RefCell<Shell>>) {
     toast(shell, "Asking Banner about older terms…");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut indexes = vec![index];
-        for extra in catalog::indexes_on_disk() {
-            if extra.catalog.term.code != indexes[0].catalog.term.code {
-                indexes.push(extra);
-            }
-        }
+        let indexes = termorganize_core::offering::indexes_for_history(&index);
         let now = now_secs();
         let mut offering_repo = OfferingRepository::new(
             BannerClient::default(),

@@ -200,6 +200,87 @@ fn read_only_call_returns_read_only_and_hides_writes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn argument_errors_use_the_invalid_argument_object() {
+    let dir = temp_dir();
+    let bin = std::env::var("CARGO_BIN_EXE_term_organize_mcp")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_term-organize-mcp"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/term-organize-mcp")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let mut child = Command::new(bin)
+        .arg("--data-dir")
+        .arg(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn term-organize-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let mut send = |message: Value| {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    };
+    send(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "term-organize-test", "version": "0.0.0" }
+        }
+    }));
+    let _initialized = wait_id(&rx, 1);
+    send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+
+    let cases = [
+        json!({ "name": "get_plan", "arguments": {} }),
+        json!({ "name": "create_plan", "arguments": { "name": "Bad terms", "terms": [{ "term": "Fall 2026" }] } }),
+        json!({ "name": "rename_plan", "arguments": { "plan_id": "11111111-1111-1111-1111-111111111111", "name": "Untitled" } }),
+        json!({ "name": "rename_plan", "arguments": { "plan_id": "11111111-1111-1111-1111-111111111111", "name": "Untitled", "expected_revision": "1" } }),
+    ];
+    for (index, arguments) in cases.into_iter().enumerate() {
+        let id = (index + 2) as u64;
+        send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": arguments,
+        }));
+        let called = wait_id(&rx, id);
+        assert_eq!(called["result"]["isError"], true, "{called}");
+        let body = structured(&called);
+        assert_eq!(body["error"]["code"], "invalid_argument", "{called}");
+        assert!(
+            !body["error"]["message"].as_str().unwrap().is_empty(),
+            "{called}"
+        );
+    }
+
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn structured(message: &Value) -> Value {
     message["result"]["structuredContent"].clone()
 }

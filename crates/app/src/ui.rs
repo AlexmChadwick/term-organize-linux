@@ -111,6 +111,8 @@ struct Shell {
     windows: RefCell<Vec<adw::Window>>,
     term_menu: gtk::DropDown,
     keep_focus: Cell<Option<KeepFocus>>,
+    /// Divider share captured before an external reload, consumed by the rebuilt page.
+    reload_pane_share: Cell<Option<f64>>,
     /// Owns the `user.json` monitor. Dropping it would stop reload events.
     #[allow(dead_code)]
     user_monitor: Option<gio::FileMonitor>,
@@ -334,6 +336,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         windows: RefCell::new(Vec::new()),
         term_menu: term.clone(),
         keep_focus: Cell::new(None),
+        reload_pane_share: Cell::new(None),
         user_monitor: None,
     }));
     gap::install_css();
@@ -538,6 +541,13 @@ fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
 fn refresh(shell: &Rc<RefCell<Shell>>) {
     let saved_scroll = scroll_values(shell.borrow().content.upcast_ref());
     let area_before = shell.borrow().state.borrow().area;
+    let (collapsed, shows_content) = {
+        let shell_ref = shell.borrow();
+        sidebar_after_reload(
+            shell_ref.split.is_collapsed(),
+            shell_ref.split.shows_content(),
+        )
+    };
     let page = build_page(shell);
     fill(&page);
     let shell_ref = shell.borrow();
@@ -572,7 +582,12 @@ fn refresh(shell: &Rc<RefCell<Shell>>) {
     };
     shell_ref.title.set_title(&heading);
     shell_ref.title.set_subtitle(&sub);
-    adapt(&shell_ref.window, &shell_ref.split);
+    // Rebuilding the page must not open the navigation sidebar. `default_width`
+    // stays at the initial 1180 even after the window is narrowed or the user
+    // hides the sidebar, and forcing it open covers the plan list.
+    shell_ref.split.set_collapsed(collapsed);
+    shell_ref.split.set_show_content(shows_content);
+    shell_ref.reload_pane_share.take();
     if let Some(which) = shell_ref.keep_focus.take() {
         restore_focus(&page, which);
     }
@@ -692,10 +707,38 @@ fn hold_focus(shell: &Rc<RefCell<Shell>>, which: KeepFocus) {
     shell.borrow().keep_focus.set(Some(which));
 }
 
-fn adapt(window: &adw::ApplicationWindow, split: &adw::NavigationSplitView) {
-    if window.default_width() > 0 {
-        split.set_collapsed(window.default_width() < 860);
+/// Sidebar flags to put back after a reload. The window's default width is not
+/// the current width, so a reload must not recompute collapsed from it.
+pub(crate) fn sidebar_after_reload(collapsed: bool, shows_content: bool) -> (bool, bool) {
+    (collapsed, shows_content)
+}
+
+/// Divider share for the page rebuilt by a reload. `None` keeps that page's usual share.
+pub(crate) fn pane_share_after_reload(saved: Option<f64>, default_share: f64) -> f64 {
+    let Some(share) = saved else {
+        return default_share;
+    };
+    if !share.is_finite() || share < 0.0 {
+        return default_share;
     }
+    if share == 0.0 {
+        return 0.0;
+    }
+    share.clamp(0.12, 0.7)
+}
+
+fn content_pane_share(content: &gtk::Box) -> Option<f64> {
+    let paned = content.first_child()?.downcast::<gtk::Paned>().ok()?;
+    let width = paned.width();
+    if width < 80 {
+        return None;
+    }
+    let share = paned.position() as f64 / width as f64;
+    share.is_finite().then_some(share)
+}
+
+fn page_pane_share(shell: &Rc<RefCell<Shell>>, default_share: f64) -> f64 {
+    pane_share_after_reload(shell.borrow().reload_pane_share.take(), default_share)
 }
 
 fn build_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
@@ -1180,7 +1223,7 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         (subjects, selected, courses)
     };
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.32);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.32));
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     for (code, name) in &subjects {
@@ -1617,7 +1660,7 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snapshot = schedule_snapshot(shell);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.26);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.26));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -2082,7 +2125,7 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.24);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.24));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -4305,6 +4348,12 @@ fn basename_is_user_json(file: &gio::File) -> bool {
 }
 
 fn apply_external_file(shell: &Rc<RefCell<Shell>>) {
+    {
+        let shell_ref = shell.borrow();
+        shell_ref
+            .reload_pane_share
+            .set(content_pane_share(&shell_ref.content));
+    }
     let (data, stamp) = {
         let shell = shell.borrow();
         let state = shell.state.borrow();
@@ -5031,4 +5080,20 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod reload_layout {
+    use super::{pane_share_after_reload, sidebar_after_reload};
+
+    #[test]
+    fn an_external_reload_keeps_the_sidebar_and_the_plan_list_width() {
+        assert_eq!(sidebar_after_reload(true, true), (true, true));
+        assert_eq!(sidebar_after_reload(false, false), (false, false));
+        assert_eq!(pane_share_after_reload(Some(0.41), 0.24), 0.41);
+        assert_eq!(pane_share_after_reload(Some(0.0), 0.24), 0.0);
+        assert_eq!(pane_share_after_reload(None, 0.24), 0.24);
+        assert_eq!(pane_share_after_reload(Some(0.95), 0.24), 0.7);
+        assert_eq!(pane_share_after_reload(Some(f64::NAN), 0.24), 0.24);
+    }
 }

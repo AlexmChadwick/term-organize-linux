@@ -268,7 +268,7 @@ pub struct UserData {
     #[serde(default)]
     pub dismissed_equivalences: Vec<String>,
     /// Optimistic concurrency counters for degree plans, keyed by plan id.
-    /// A missing id means revision 0. The app and the MCP server share this map.
+    /// A missing or zero id means revision 1. The app and the MCP server share this map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plan_revisions: BTreeMap<String, u64>,
 }

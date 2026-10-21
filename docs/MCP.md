@@ -6,8 +6,8 @@ SHARED CONTRACT
 
 - Transport: stdio, newline-delimited JSON-RPC 2.0, one message per line, per the MCP stdio spec (protocol 2025-06-18). No Content-Length framing.
 - Term objects: {"term":"202730","name":"Spring 2027"}. The key is always "term", never "code".
-- Revisions: integer, starting at 1 and incremented on every change to that plan.
-- Errors: a tool result with isError:true and structuredContent {"error":{"code":C,"message":M}}, where C is one of: invalid_argument, not_found, revision_conflict, confirm_required, read_only, storage_error, unknown_tool. The message is never empty. A write tool called with --read-only on returns read_only, not unknown_tool. Write tools stay hidden from tools/list.
+- Revisions: integer, starting at 1 and incremented on every change to that plan. A plan with no `planRevisions` entry, or a stored 0, is revision 1 on read and on the `expected_revision` check. The next edit is revision 2.
+- Errors: a tool result with isError:true and structuredContent {"error":{"code":C,"message":M}}, where C is one of: invalid_argument, not_found, revision_conflict, confirm_required, read_only, storage_error, unknown_tool. The message is never empty. Arguments that do not match the tool schema (a missing field, a string where a number is required, an object where a string is required) are `invalid_argument` in that same object, not a plain-text tool error. A well-formed term, course, or CRN that is not in the bundled catalogs is `not_found`. A write tool called with --read-only on returns read_only, not unknown_tool. Write tools stay hidden from tools/list.
 - Instructors in get_course: [{"name":..., "email":... (optional)}]. The email is present only when its domain is EXACTLY northeastern.edu or neu.edu, compared case-insensitively. Subdomains are not allowed (husky.neu.edu, ccs.neu.edu, mail.neu.edu are all dropped).
 - create_plan {name, terms?: ["202710","202730"]}, a list of term strings.
 - reorganize_plan accepts either {plan_id} or {plan:{terms:[{term, courses:[{subject, number}]}]}}. It returns {moves:[{subject, number, from_term, to_term, reason}], unresolved:[{subject, number, reason}], plan:{...}}.
@@ -50,7 +50,7 @@ Override that choice in this order:
 3. `TERMORGANIZE_DATA` (the app override; also the directory the server uses when the two flags above are unset)
 4. The Flatpak versus XDG choice above
 
-Writes take `expected_revision`. The revision lives in `planRevisions` on the user file, next to the degree plan, and increases when the plan body changes. A save from the open app bumps it too, so a stale `expected_revision` fails with `revision_conflict` and the file is left as it was. Each save copies the previous `user.json` to `user.json.bak` (one rolling backup), writes `user.json.tmp`, and renames that into place.
+Writes take `expected_revision`. The revision lives in `planRevisions` on the user file, next to the degree plan, and increases when the plan body changes. A plan the app saved before that map existed has no entry. That plan is revision 1: `list_plans` and `get_plan` report 1, and a write with `expected_revision` 1 is accepted. The write then stores revision 2. A save from the open app bumps it too, so a stale `expected_revision` fails with `revision_conflict` and the file is left as it was. Each save copies the previous `user.json` to `user.json.bak` (one rolling backup), writes `user.json.tmp`, and renames that into place.
 
 The desktop app also watches this file. Before it saves, it compares `planRevisions` with the copy it loaded, and the file's modification time plus a SHA-256 of the bytes. Plans only one side edited are merged. A plan both sides edited keeps the file already on disk, and the app's copy is saved beside it as `<name> (edited in app)`, so an MCP write is not replaced. A change while the window is open is reloaded through a debounced file monitor.
 
@@ -94,6 +94,8 @@ A tool failure the user should see (a stale revision, an unknown course, a missi
 ```
 
 `code` is `invalid_argument`, `not_found`, `revision_conflict`, `confirm_required`, `read_only`, `storage_error`, or `unknown_tool`. `message` is never empty.
+
+`invalid_argument` is a malformed value: an unrecognized term name, a `plan_id` that is not a UUID, a time that is not `8am` or `8:00 AM`, or arguments that fail to deserialize (`plan_id` omitted, `expected_revision` sent as `"1"`, `terms` sent as `[{"term":"Fall 2026"}]` instead of `["Fall 2026"]`). `not_found` is a term, course, or CRN that is well formed and still absent: no bundled catalog for that term, no such course in the catalog, or a CRN that is not a section of that course. An unknown plan id is also `not_found`.
 
 Times use `to` between the start and the end (`9:00 AM to 10:05 AM`). Credits use `3 to 4` when the course has a range.
 
@@ -233,7 +235,7 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
   }],
   "validation": {
     "clashes": [],
-    "unoffered": [{ "term": "Fall 2026", "subject": "CS", "number": "2510" }]
+    "not_offered": [{ "term": "Fall 2026", "subject": "CS", "number": "2510" }]
   }
 }
 ```
