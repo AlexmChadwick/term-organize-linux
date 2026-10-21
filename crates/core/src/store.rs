@@ -649,7 +649,7 @@ mod tests {
         data.plan_revisions.clear();
         fs::write(dir.join("user.json"), serde_json::to_string(&data).unwrap()).unwrap();
         let loaded = load_user(&dir);
-        assert!(loaded.plan_revisions.get(&id.to_string()).is_none());
+        assert!(!loaded.plan_revisions.contains_key(&id.to_string()));
         assert_eq!(plan_revision(&loaded, id), 1);
 
         let mut edited = loaded;

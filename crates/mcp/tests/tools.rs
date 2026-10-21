@@ -561,13 +561,7 @@ fn missing_revision_is_one_and_unknown_catalog_rows_are_not_found() {
 
     let listed = tools::list_plans(&dir).unwrap();
     assert_eq!(listed["plans"][0]["revision"], 1);
-    let loaded = tools::get_plan(
-        &dir,
-        tools::PlanIdArgs {
-            plan_id: id.to_string(),
-        },
-    )
-    .unwrap();
+    let loaded = tools::get_plan(&dir, &id.to_string()).unwrap();
     assert_eq!(loaded["revision"], 1);
     assert!(loaded["validation"].get("unoffered").is_none());
     assert_eq!(loaded["validation"]["not_offered"][0]["subject"], "ZZ");
