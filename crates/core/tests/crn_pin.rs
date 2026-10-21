@@ -524,3 +524,69 @@ fn autofill_keeps_each_pinned_topic() {
     assert_eq!(suggestions[0].courses.len(), 1);
     assert_eq!(suggestions[0].crns, vec![None]);
 }
+
+#[test]
+fn a_missing_pinned_crn_stays_locked() {
+    let catalog = index(
+        serde_json::json!([
+            course(
+                "CS",
+                "2500",
+                "Fundamentals of Computer Science 1",
+                4.0,
+                false
+            ),
+            course("MATH", "1341", "Calculus 1", 4.0, false),
+        ]),
+        serde_json::json!([
+            section("11111", "CS", "2500", 540, 600),
+            section("22222", "CS", "2500", 660, 720),
+            section("33333", "MATH", "1341", 780, 840),
+        ]),
+    );
+    let mut plan = plan_with(&["CS 2500"], &["99999"]);
+    plan.courses[0].pinned_crn = Some("99999".into());
+    let inputs = schedule::inputs_for(&plan, &catalog);
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].sections.is_empty());
+    assert_eq!(inputs[0].unavailable_pin.as_deref(), Some("99999"));
+    let result = schedule::generate(
+        &inputs,
+        &ScheduleFilters::default(),
+        &SchedulePreferences::default(),
+        ScheduleSort::Best,
+        &Limits::default(),
+    );
+    assert!(result.schedules.is_empty());
+    let reasons = schedule::no_results_reasons(&result.diagnostics, "Fall 2026");
+    assert_eq!(reasons[0].title, "CS 2500 is unavailable");
+    assert_eq!(
+        reasons[0].detail.as_deref(),
+        Some(
+            "CRN 99999 is no longer in the Fall 2026 catalog. Another section was not substituted."
+        )
+    );
+    let analysis = schedule::analyze_blockers(
+        &inputs,
+        &ScheduleFilters::default(),
+        &SchedulePreferences::default(),
+        Some(&result.diagnostics),
+        1.0,
+        4,
+    );
+    assert_eq!(
+        analysis.unavailable,
+        vec![CourseKey::parse("CS 2500").unwrap()]
+    );
+    assert!(analysis.not_offered.is_empty());
+
+    let mut saved = plan_with(&["CS 2500"], &["99999"]);
+    let inputs = schedule::inputs_for(&saved, &catalog);
+    assert!(inputs[0].sections.is_empty());
+    assert_eq!(inputs[0].unavailable_pin.as_deref(), Some("99999"));
+
+    saved.courses[0].pinned_crn = Some("33333".into());
+    let inputs = schedule::inputs_for(&saved, &catalog);
+    assert!(inputs[0].sections.is_empty());
+    assert_eq!(inputs[0].unavailable_pin.as_deref(), Some("33333"));
+}
