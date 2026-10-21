@@ -169,6 +169,8 @@ Newest term first.
 
 Times are `HH:MM` on a 24-hour clock (`08:00`, `17:00`) or an explicit 12-hour time (`8am`, `8:00 AM`, `9:00 PM`). Anything else, including a bare `8`, is `invalid_argument`. Days accept full names and the letters above. Constraints are required: sections outside them are dropped. Up to 8 schedules come back, best first.
 
+A course listed with `crn` uses only that section. The same subject and number may appear more than once only when every copy has its own CRN and the CRNs differ. A second copy with no CRN, or the same CRN twice, is `invalid_argument`. Generation does not merge those copies into one course.
+
 ```json
 {
   "term": { "term": "202710", "name": "Fall 2026" },
@@ -192,7 +194,7 @@ The core library's existing reorder only moves blocking courses out of one semes
 }
 ```
 
-A CRN that belongs to the old term is cleared when the destination catalog does not have that section. The shared fixture is `tests/fixtures/mcp-reorganize-fixture.json`.
+A chosen CRN stays on the course. A pinned course moves only when the destination catalog contains that same CRN. Otherwise the course stays in its term and is listed in `unresolved`. An unpinned clash can still move, and that move does not invent a CRN. Two rows that share a subject and number stay separate when their CRNs differ. The shared fixture is `tests/fixtures/mcp-reorganize-fixture.json`.
 
 ### list_plans
 
@@ -252,7 +254,7 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
 
 ### add_course
 
-`plan_id`, `term`, `subject`, `number`, optional `crn`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. Returns the get_plan object.
+`plan_id`, `term`, `subject`, `number`, optional `crn`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. A second copy of the same subject and number is accepted only when every copy, including the new one, has a manually chosen CRN and the CRNs differ. The same CRN twice is `invalid_argument` (`That section is already on this plan.`). A second copy with no CRN is `invalid_argument` (`That course is already on this term.` when the other copy is on that term). Returns the get_plan object.
 
 ### remove_course
 
@@ -260,11 +262,11 @@ A CRN that belongs to the old term is cleared when the destination catalog does 
 
 ### move_course
 
-`plan_id`, `subject`, `number`, `from_term`, `to_term`, `expected_revision`. The destination must be on the plan and must offer the course in a bundled catalog. A CRN that is not a section there is cleared. Returns the get_plan object.
+`plan_id`, `subject`, `number`, `from_term`, `to_term`, `expected_revision`. The destination must be on the plan and must offer the course in a bundled catalog. The chosen CRN is not cleared or replaced. Returns the get_plan object.
 
 ### set_section
 
-`plan_id`, `term`, `subject`, `number`, `crn`, `expected_revision`. The CRN must be a section of that course in the bundled catalog. Returns the get_plan object.
+`plan_id`, `term`, `subject`, `number`, `crn`, `expected_revision`. The CRN must be a section of that course in the bundled catalog. This is the only tool that changes a chosen CRN. One row of that course is updated. When several rows share the number, the row that does not yet have a CRN is the one that changes. When every row already has a different CRN, the call is `invalid_argument`. Setting a CRN the plan already uses is `invalid_argument`, and setting the CRN a row already has leaves the plan unchanged. Returns the get_plan object.
 
 ### apply_reorganize
 

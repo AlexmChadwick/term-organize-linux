@@ -143,7 +143,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Conflict-free section combinations, best first.",
+        description = "Conflict-free section combinations, best first. A chosen CRN is the only section used for that course. The same course number may be repeated only when each copy has a different CRN.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -155,7 +155,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Move courses across the terms already on a plan so sections exist and chosen CRNs do not overlap.",
+        description = "Move courses across the terms already on a plan so sections exist and chosen CRNs do not overlap. A chosen CRN is kept. A pinned course stays put when the other term does not offer that section.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -218,7 +218,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Add a catalog course to a term already on the plan.",
+        description = "Add a catalog course to a term already on the plan. The same course may be added again only with a different manually chosen CRN.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -245,7 +245,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Move a course from one term on the plan to another.",
+        description = "Move a course from one term on the plan to another. The chosen CRN is left unchanged.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -257,7 +257,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Choose a section CRN for a course already on the plan.",
+        description = "Choose a section CRN for a course already on the plan. This is the only tool that changes a chosen CRN. The same CRN cannot be selected twice.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

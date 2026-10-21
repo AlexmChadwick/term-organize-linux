@@ -293,6 +293,7 @@ fn use_of(code: &str, title: &str, credits: f64, semester: Option<&str>, order: 
         by_substitution: false,
         satisfies: None,
         instance: 0,
+        crn: None,
     }
 }
 
@@ -3662,12 +3663,16 @@ fn newPlanDraftCopiesTheLatestPlanAndAddsSchedules() {
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 0,
+
+                pinned_crn: None,
             },
             PlanCourse {
                 key: key("MATH 2331"),
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 1,
+
+                pinned_crn: None,
             },
         ],
         selected_crns: vec![],

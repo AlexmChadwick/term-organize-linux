@@ -70,6 +70,8 @@ fn schedule_plan(
                 .map(str::to_string)
                 .collect(),
             color_index: 0,
+
+            pinned_crn: None,
         }],
         selected_crns: vec!["10004".into()],
         filters: ScheduleFilters::default(),

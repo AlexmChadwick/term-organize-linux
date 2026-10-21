@@ -39,6 +39,8 @@ pub struct CourseUse {
     pub by_substitution: bool,
     pub satisfies: Option<CourseKey>,
     pub instance: i32,
+    /// Section the user chose, when this row is one copy of a shared course number.
+    pub crn: Option<String>,
 }
 
 impl CourseUse {
@@ -468,6 +470,7 @@ impl AuditEngine {
                 by_substitution: false,
                 satisfies: None,
                 instance: 0,
+                crn: course.crn.clone(),
             };
             let earlier: Vec<CourseUse> = engine
                 .instances
@@ -478,10 +481,18 @@ impl AuditEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-            if let Some(repeated) = earlier
-                .iter()
-                .find(|e| !counts_separately(&use_.title, use_.credits, &e.title, e.credits))
-            {
+            if let Some(repeated) = earlier.iter().find(|earlier| {
+                if crate::planlogic::same_chosen_crn(use_.crn.as_deref(), earlier.crn.as_deref()) {
+                    return true;
+                }
+                if crate::planlogic::distinct_chosen_crns(
+                    use_.crn.as_deref(),
+                    earlier.crn.as_deref(),
+                ) {
+                    return false;
+                }
+                !counts_separately(&use_.title, use_.credits, &earlier.title, earlier.credits)
+            }) {
                 let better = if repeated.is_completed() == use_.is_completed() {
                     use_.credits > repeated.credits
                 } else {

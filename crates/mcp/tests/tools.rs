@@ -632,6 +632,263 @@ fn missing_revision_is_one_and_unknown_catalog_rows_are_not_found() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
+    let catalogs = term_organize_mcp::catalogs::catalogs();
+    let fall = catalogs
+        .iter()
+        .find(|index| index.catalog.term.code == "202710")
+        .unwrap();
+    let spring = catalogs
+        .iter()
+        .find(|index| index.catalog.term.code == "202730")
+        .unwrap();
+    let mut picked = None;
+    for course in &fall.catalog.courses {
+        if spring.sections_for(&course.key()).is_empty() {
+            continue;
+        }
+        let sections = fall.sections_for(&course.key());
+        if sections.len() < 3 {
+            continue;
+        }
+        for left in 0..sections.len() {
+            for right in (left + 1)..sections.len() {
+                if sections[left].conflicts_with(&sections[right]) {
+                    continue;
+                }
+                let third = sections
+                    .iter()
+                    .find(|section| {
+                        section.crn != sections[left].crn && section.crn != sections[right].crn
+                    })
+                    .map(|section| section.crn.clone());
+                picked = Some((
+                    course.subject.clone(),
+                    course.number.clone(),
+                    sections[left].crn.clone(),
+                    sections[right].crn.clone(),
+                    third,
+                ));
+                break;
+            }
+            if picked.is_some() {
+                break;
+            }
+        }
+        if picked.is_some() {
+            break;
+        }
+    }
+    let (subject, number, first, second, third) =
+        picked.expect("a course in both terms with three sections");
+    let third = third.expect("third section");
+
+    let duplicate = tools::suggest_schedule(tools::SuggestArgs {
+        term: "Fall 2026".into(),
+        courses: vec![
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: None,
+            },
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: None,
+            },
+        ],
+        constraints: None,
+    })
+    .unwrap_err();
+    assert_eq!(duplicate.error, "invalid_argument");
+
+    let repeated = tools::suggest_schedule(tools::SuggestArgs {
+        term: "Fall 2026".into(),
+        courses: vec![
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: Some(first.clone()),
+            },
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: Some(first.clone()),
+            },
+        ],
+        constraints: None,
+    })
+    .unwrap_err();
+    assert_eq!(repeated.error, "invalid_argument");
+    assert!(repeated.message.contains(&first));
+
+    let suggested = tools::suggest_schedule(tools::SuggestArgs {
+        term: "Fall 2026".into(),
+        courses: vec![
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: Some(first.clone()),
+            },
+            tools::CourseRef {
+                subject: subject.clone(),
+                number: number.clone(),
+                crn: Some(second.clone()),
+            },
+        ],
+        constraints: None,
+    })
+    .unwrap();
+    let schedules = suggested["schedules"].as_array().unwrap();
+    assert!(!schedules.is_empty());
+    for schedule in schedules {
+        let crns: Vec<&str> = schedule["crns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|crn| crn.as_str().unwrap())
+            .collect();
+        assert_eq!(crns.len(), 2);
+        assert!(crns.contains(&first.as_str()));
+        assert!(crns.contains(&second.as_str()));
+    }
+
+    let dir = temp_dir("distinct-crn");
+    let created = tools::create_plan(
+        &dir,
+        tools::CreatePlanArgs {
+            name: "Topics".into(),
+            terms: Some(vec!["Fall 2026".into(), "Spring 2027".into()]),
+        },
+    )
+    .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let added = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: Some(first.clone()),
+            expected_revision: 1,
+        },
+    )
+    .unwrap();
+    let both = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: Some(second.clone()),
+            expected_revision: added["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(both["terms"][0]["courses"].as_array().unwrap().len(), 2);
+    assert_eq!(both["terms"][0]["courses"][0]["crn"], first);
+    assert_eq!(both["terms"][0]["courses"][1]["crn"], second);
+
+    let same_section = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: Some(first.clone()),
+            expected_revision: both["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(same_section.error, "invalid_argument");
+    assert!(same_section.message.contains("section"));
+
+    let unpinned = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: None,
+            expected_revision: both["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(unpinned.error, "invalid_argument");
+    assert!(unpinned.message.contains("already on this term"));
+
+    let ambiguous = tools::set_section(
+        &dir,
+        tools::SetSectionArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: third,
+            expected_revision: both["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(ambiguous.error, "invalid_argument");
+    assert!(ambiguous.message.contains("more than once"));
+
+    let moved = tools::move_course(
+        &dir,
+        tools::MoveCourseArgs {
+            plan_id: id.clone(),
+            subject: subject.clone(),
+            number: number.clone(),
+            from_term: "Fall 2026".into(),
+            to_term: "Spring 2027".into(),
+            expected_revision: both["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(moved.error, "invalid_argument");
+    assert!(moved.message.contains("more than once"));
+
+    let single = tools::create_plan(
+        &dir,
+        tools::CreatePlanArgs {
+            name: "One section".into(),
+            terms: Some(vec!["Fall 2026".into(), "Spring 2027".into()]),
+        },
+    )
+    .unwrap();
+    let single_id = single["id"].as_str().unwrap().to_string();
+    let pinned = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: single_id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: Some(first.clone()),
+            expected_revision: 1,
+        },
+    )
+    .unwrap();
+    let kept = tools::move_course(
+        &dir,
+        tools::MoveCourseArgs {
+            plan_id: single_id.clone(),
+            subject,
+            number,
+            from_term: "Fall 2026".into(),
+            to_term: "Spring 2027".into(),
+            expected_revision: pinned["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(kept["terms"][1]["courses"][0]["crn"], first);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn spring_only_course() -> CourseKey {
     let catalogs = term_organize_mcp::catalogs::catalogs();
     let spring = catalogs

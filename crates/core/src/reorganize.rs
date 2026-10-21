@@ -18,7 +18,7 @@ use crate::schedule::{self, Limits, ScheduleCourseInput, ScheduleSort};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const MAX_MOVES: usize = 32;
-pub const NOTE: &str = "Courses move only among terms already on the plan, so the plan does not gain a semester after the last one. Offering checks use the catalogs passed in (the bundled snapshots for the MCP server). This whole-plan pass is separate from the one-semester reorder.";
+pub const NOTE: &str = "Courses move only among terms already on the plan, so the plan does not gain a semester after the last one. Offering checks use the catalogs passed in (the bundled snapshots for the MCP server). This whole-plan pass is separate from the one-semester reorder. A chosen CRN stays on its course. A pinned course moves only when the destination catalog has that same CRN; otherwise it stays and is unresolved.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedTerm {
@@ -231,15 +231,7 @@ pub fn reorganize_degree_plan(plan: &DegreePlan, catalogs: &[CatalogIndex]) -> D
             .cloned()
             .collect();
         for slot_course in &slot.courses {
-            let position = pool.iter().position(|course| {
-                course.key.as_ref().is_some_and(|key| {
-                    key.subject.eq_ignore_ascii_case(&slot_course.subject)
-                        && key.number.eq_ignore_ascii_case(&slot_course.number)
-                })
-            });
-            if let Some(position) = position {
-                let mut course = pool.remove(position);
-                course.crn = slot_course.crn.clone();
+            if let Some(course) = take_matching_course(&mut pool, slot_course) {
                 rebuilt.push(course);
             }
         }
@@ -285,6 +277,30 @@ fn course_key(course: &SlotCourse) -> CourseKey {
         subject: course.subject.trim().to_ascii_uppercase(),
         number: course.number.trim().to_string(),
     }
+}
+
+/// Pull the degree-plan row for this slot without giving it another row's CRN.
+fn take_matching_course(
+    pool: &mut Vec<DegreePlanCourse>,
+    slot: &SlotCourse,
+) -> Option<DegreePlanCourse> {
+    let same_key = |course: &DegreePlanCourse| {
+        course.key.as_ref().is_some_and(|key| {
+            key.subject.eq_ignore_ascii_case(&slot.subject)
+                && key.number.eq_ignore_ascii_case(&slot.number)
+        })
+    };
+    let pinned = crate::planlogic::chosen_crn(slot.crn.as_deref());
+    let position = if let Some(crn) = pinned {
+        pool.iter()
+            .position(|course| same_key(course) && course.crn.as_deref() == Some(crn))
+    } else {
+        pool.iter().position(|course| {
+            same_key(course) && crate::planlogic::chosen_crn(course.crn.as_deref()).is_none()
+        })
+    };
+    let position = position.or_else(|| pool.iter().position(same_key))?;
+    Some(pool.remove(position))
 }
 
 fn is_offered(
@@ -524,12 +540,21 @@ fn relocate(
     }
     let course = terms[from].courses[course_index].clone();
     let key = course_key(&course);
-    let dest = destination(terms, catalogs, history, from, &key)?;
-    let crn = crn_for_destination(&course, &key, &terms[dest], catalogs);
-    let mut moved = course;
-    moved.crn = crn;
+    let incoming = course.crn.as_deref();
+    let dest = destination(terms, catalogs, history, from, &key, incoming)?;
+    if crate::planlogic::chosen_crn(incoming).is_some()
+        && crn_for_destination(&course, &key, &terms[dest], catalogs).is_none()
+    {
+        return Err(format!(
+            "{} {} stays pinned to CRN {} because {} does not offer that section.",
+            key.subject,
+            key.number,
+            incoming.unwrap_or("").trim(),
+            terms[dest].label
+        ));
+    }
     terms[from].courses.remove(course_index);
-    terms[dest].courses.push(moved);
+    terms[dest].courses.push(course);
     moves.push(CourseMove {
         subject: key.subject,
         number: key.number,
@@ -546,6 +571,7 @@ fn destination(
     history: &OfferingHistory,
     from: usize,
     key: &CourseKey,
+    incoming: Option<&str>,
 ) -> Result<usize, String> {
     let origin = terms[from].sort;
     let mut candidates: Vec<usize> = (0..terms.len()).filter(|index| *index != from).collect();
@@ -562,14 +588,16 @@ fn destination(
         if !is_offered(key, &terms[index], catalogs, history) {
             continue;
         }
-        if terms[index]
+        let existing: Vec<Option<&str>> = terms[index]
             .courses
             .iter()
-            .any(|course| course_key(course) == *key)
-        {
+            .filter(|course| course_key(course) == *key)
+            .map(|course| course.crn.as_deref())
+            .collect();
+        if !crate::planlogic::repeated_course_allowed(existing, incoming) {
             continue;
         }
-        if let Some(reason) = prerequisite_block(terms, catalogs, from, index, key) {
+        if let Some(reason) = prerequisite_block(terms, catalogs, from, index, key, incoming) {
             if blocked.is_none() {
                 blocked = Some(reason);
             }
@@ -596,8 +624,9 @@ fn prerequisite_block(
     from: usize,
     dest: usize,
     key: &CourseKey,
+    incoming: Option<&str>,
 ) -> Option<String> {
-    let simulated = simulate_move(terms, from, dest, key);
+    let simulated = simulate_move(terms, from, dest, key, incoming);
     if move_keeps_order(&simulated, catalogs, key) {
         None
     } else {
@@ -608,13 +637,21 @@ fn prerequisite_block(
     }
 }
 
-fn simulate_move(terms: &[WorkTerm], from: usize, dest: usize, key: &CourseKey) -> Vec<WorkTerm> {
+fn simulate_move(
+    terms: &[WorkTerm],
+    from: usize,
+    dest: usize,
+    key: &CourseKey,
+    incoming: Option<&str>,
+) -> Vec<WorkTerm> {
     let mut terms = terms.to_vec();
-    let Some(position) = terms[from]
-        .courses
-        .iter()
-        .position(|course| course_key(course) == *key)
-    else {
+    let Some(position) = terms[from].courses.iter().position(|course| {
+        course_key(course) == *key
+            && match crate::planlogic::chosen_crn(incoming) {
+                Some(crn) => course.crn.as_deref() == Some(crn),
+                None => crate::planlogic::chosen_crn(course.crn.as_deref()).is_none(),
+            }
+    }) else {
         return terms;
     };
     let course = terms[from].courses.remove(position);
@@ -874,11 +911,128 @@ mod tests {
             ],
             &[fall, spring],
         );
+        assert!(outcome.moves.is_empty());
+        assert_eq!(outcome.terms[0].courses.len(), 2);
+        assert!(outcome.terms[1].courses.is_empty());
+        assert_eq!(outcome.terms[0].courses[0].crn.as_deref(), Some("10001"));
+        assert_eq!(outcome.terms[0].courses[1].crn.as_deref(), Some("10002"));
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].number, "2510");
+        assert!(outcome.unresolved[0].reason.contains("pinned to CRN 10002"));
+    }
+
+    #[test]
+    fn moves_an_unpinned_clash_into_the_other_term() {
+        let rows = &[
+            ("CS", "2500", "10001", 540, 600),
+            ("CS", "2510", "10002", 570, 630),
+        ];
+        let fall = catalog("202710", "Fall 2026 Semester", rows);
+        let spring = catalog(
+            "202730",
+            "Spring 2027 Semester",
+            &[
+                ("CS", "2500", "20001", 540, 600),
+                ("CS", "2510", "20002", 540, 600),
+            ],
+        );
+        let outcome = reorganize(
+            &[
+                PlanSlot {
+                    term: "202710".into(),
+                    courses: vec![
+                        SlotCourse {
+                            subject: "CS".into(),
+                            number: "2500".into(),
+                            crn: None,
+                        },
+                        SlotCourse {
+                            subject: "CS".into(),
+                            number: "2510".into(),
+                            crn: None,
+                        },
+                    ],
+                },
+                PlanSlot {
+                    term: "202730".into(),
+                    courses: vec![],
+                },
+            ],
+            &[fall, spring],
+        );
         assert_eq!(outcome.terms[0].courses.len(), 1);
-        assert_eq!(outcome.terms[0].courses[0].number, "2500");
-        assert_eq!(outcome.terms[1].courses[0].number, "2510");
+        assert_eq!(outcome.terms[1].courses.len(), 1);
         assert!(outcome.terms[1].courses[0].crn.is_none());
+        assert_eq!(outcome.moves.len(), 1);
         assert_eq!(outcome.moves[0].to, "202730");
+    }
+
+    #[test]
+    fn distinct_topic_crns_stay_on_their_own_rows() {
+        let fall = catalog(
+            "202710",
+            "Fall 2026 Semester",
+            &[
+                ("CS", "5976", "44444", 540, 600),
+                ("CS", "5976", "55555", 780, 840),
+            ],
+        );
+        let spring = catalog(
+            "202730",
+            "Spring 2027 Semester",
+            &[("CS", "2510", "20002", 660, 720)],
+        );
+        let mut networks = DegreePlanCourse::catalog(
+            CourseKey {
+                subject: "CS".into(),
+                number: "5976".into(),
+            },
+            "Networks",
+            4.0,
+        );
+        networks.crn = Some("44444".into());
+        let mut graphics = DegreePlanCourse::catalog(
+            CourseKey {
+                subject: "CS".into(),
+                number: "5976".into(),
+            },
+            "Graphics",
+            4.0,
+        );
+        graphics.crn = Some("55555".into());
+        let fundamentals = DegreePlanCourse::catalog(
+            CourseKey {
+                subject: "CS".into(),
+                number: "2510".into(),
+            },
+            "Fundamentals 2",
+            4.0,
+        );
+        let mut plan = DegreePlan {
+            terms: vec![
+                crate::model::DegreePlanTerm {
+                    courses: vec![networks, graphics, fundamentals],
+                    ..crate::model::DegreePlanTerm::new(PlanSeason::Fall, 2026)
+                },
+                crate::model::DegreePlanTerm::new(PlanSeason::Spring, 2027),
+            ],
+            ..DegreePlan::default()
+        };
+        plan.sort_terms();
+        let result = reorganize_degree_plan(&plan, &[fall, spring]);
+        assert_eq!(result.moves.len(), 1);
+        assert_eq!(result.moves[0].number, "2510");
+        let fall = result
+            .plan
+            .terms
+            .iter()
+            .find(|term| term.season == PlanSeason::Fall)
+            .unwrap();
+        assert_eq!(fall.courses.len(), 2);
+        assert_eq!(fall.courses[0].title, "Networks");
+        assert_eq!(fall.courses[0].crn.as_deref(), Some("44444"));
+        assert_eq!(fall.courses[1].title, "Graphics");
+        assert_eq!(fall.courses[1].crn.as_deref(), Some("55555"));
     }
 
     #[test]

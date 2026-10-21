@@ -13,6 +13,7 @@ use termorganize_core::model::{
     ScheduleFilters, SchedulePreferences, TimeLimit,
 };
 use termorganize_core::planfile::{self, PlanFileError};
+use termorganize_core::planlogic;
 use termorganize_core::reorganize::{self, PlanSlot, SlotCourse};
 use termorganize_core::schedule::{self, Limits, ScheduleCourseInput, ScheduleSort};
 use termorganize_core::search::{self, SearchFilters, SearchQuery, SearchSort};
@@ -360,7 +361,7 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
             "suggest_schedule needs at least one course.",
         ));
     }
-    let mut inputs = Vec::new();
+    let mut chosen: Vec<(CourseKey, Option<String>)> = Vec::new();
     for course in &args.courses {
         let found = find_course(index, &course.subject, &course.number).ok_or_else(|| {
             ToolError::not_found(format!(
@@ -368,23 +369,62 @@ pub fn suggest_schedule(args: SuggestArgs) -> Result<Value, ToolError> {
                 course.subject, course.number, parsed.label
             ))
         })?;
-        let mut sections = index.sections_for(&found.key());
-        if let Some(crn) = course.crn.as_deref() {
-            sections.retain(|section| section.crn == crn);
-            if sections.is_empty() {
+        let crn = course
+            .crn
+            .as_deref()
+            .map(str::trim)
+            .filter(|crn| !crn.is_empty())
+            .map(str::to_string);
+        let existing: Vec<Option<&str>> = chosen
+            .iter()
+            .filter(|(key, _)| key == &found.key())
+            .map(|(_, crn)| crn.as_deref())
+            .collect();
+        if !planlogic::repeated_course_allowed(existing.iter().copied(), crn.as_deref()) {
+            if crn.as_ref().is_some_and(|value| {
+                existing
+                    .iter()
+                    .any(|have| planlogic::same_chosen_crn(*have, Some(value)))
+            }) {
+                return Err(ToolError::invalid(format!(
+                    "CRN {} is already in this request.",
+                    crn.unwrap_or_default()
+                )));
+            }
+            return Err(ToolError::invalid(format!(
+                "{} {} is already in this request. Another copy needs its own section CRN.",
+                found.subject, found.number
+            )));
+        }
+        if let Some(crn) = crn.as_deref() {
+            if !crn_belongs(index, &found.key(), Some(crn)) {
                 return Err(ToolError::not_found(format!(
                     "CRN {crn} is not a section of {} {} in {}.",
                     found.subject, found.number, parsed.label
                 )));
             }
         }
+        chosen.push((found.key(), crn));
+    }
+    let claimed: std::collections::HashSet<&str> = chosen
+        .iter()
+        .filter_map(|(_, crn)| crn.as_deref())
+        .collect();
+    let mut inputs = Vec::new();
+    for (key, crn) in &chosen {
+        let mut sections = index.sections_for(key);
+        if let Some(crn) = crn {
+            sections.retain(|section| section.crn == *crn);
+        } else {
+            sections.retain(|section| !claimed.contains(section.crn.as_str()));
+        }
         if sections.is_empty() {
             return Err(ToolError::not_found(format!(
                 "{} {} has no sections in {}.",
-                found.subject, found.number, parsed.label
+                key.subject, key.number, parsed.label
             )));
         }
-        inputs.push(ScheduleCourseInput::new(found.key(), true, sections));
+        inputs.push(ScheduleCourseInput::new(key.clone(), true, sections));
     }
     let (filters, preferences) = constraints(args.constraints.as_ref())?;
     let generated = schedule::generate(
@@ -568,14 +608,43 @@ pub fn add_course(dir: &Path, args: AddCourseArgs) -> Result<Value, ToolError> {
     let credits = course.min_credits;
     let key = course.key();
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
-        let term = term_on_plan(plan, parsed.season, parsed.year)?;
-        if term
-            .courses
+        if !plan
+            .terms
             .iter()
-            .any(|row| row.key.as_ref() == Some(&key))
+            .any(|term| term.season == parsed.season && term.year == parsed.year)
         {
-            return Err("That course is already on this term.".into());
+            return Err(format!("{} is not on this plan.", parsed.label));
         }
+        let existing: Vec<(bool, Option<String>)> = plan
+            .completed
+            .iter()
+            .filter(|row| row.key.as_ref() == Some(&key))
+            .map(|row| (false, row.crn.clone()))
+            .chain(plan.terms.iter().flat_map(|term| {
+                let here = term.season == parsed.season && term.year == parsed.year;
+                term.courses
+                    .iter()
+                    .filter(|row| row.key.as_ref() == Some(&key))
+                    .map(move |row| (here, row.crn.clone()))
+                    .collect::<Vec<_>>()
+            }))
+            .collect();
+        if !planlogic::repeated_course_allowed(
+            existing.iter().map(|(_, crn)| crn.as_deref()),
+            crn.as_deref(),
+        ) {
+            if existing
+                .iter()
+                .any(|(_, have)| planlogic::same_chosen_crn(have.as_deref(), crn.as_deref()))
+            {
+                return Err("That section is already on this plan.".into());
+            }
+            if existing.iter().any(|(here, _)| *here) {
+                return Err("That course is already on this term.".into());
+            }
+            return Err("That course is already on this plan.".into());
+        }
+        let term = term_on_plan(plan, parsed.season, parsed.year)?;
         let mut row = DegreePlanCourse::catalog(key.clone(), title.clone(), credits);
         row.crn = crn.clone();
         term.courses.push(row);
@@ -592,16 +661,28 @@ pub fn remove_course(dir: &Path, args: RemoveCourseArgs) -> Result<Value, ToolEr
     let number = args.number.trim().to_string();
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
         let term = term_on_plan(plan, parsed.season, parsed.year)?;
-        let before = term.courses.len();
-        term.courses.retain(|course| {
-            !course.key.as_ref().is_some_and(|key| {
-                key.subject.eq_ignore_ascii_case(&subject)
-                    && key.number.eq_ignore_ascii_case(&number)
+        let matches: Vec<usize> = term
+            .courses
+            .iter()
+            .enumerate()
+            .filter(|(_, course)| {
+                course.key.as_ref().is_some_and(|key| {
+                    key.subject.eq_ignore_ascii_case(&subject)
+                        && key.number.eq_ignore_ascii_case(&number)
+                })
             })
-        });
-        if term.courses.len() == before {
+            .map(|(index, _)| index)
+            .collect();
+        if matches.is_empty() {
             return Err(format!("{subject} {number} is not on {}.", term.name()));
         }
+        if matches.len() > 1 {
+            return Err(format!(
+                "{subject} {number} is on {} more than once, each with its own section.",
+                term.name()
+            ));
+        }
+        term.courses.remove(matches[0]);
         Ok(())
     })
     .map_err(ToolError::from_plan)?;
@@ -624,29 +705,45 @@ pub fn move_course(dir: &Path, args: MoveCourseArgs) -> Result<Value, ToolError>
             .iter()
             .position(|term| term.season == from.season && term.year == from.year)
             .ok_or_else(|| format!("{} is not on this plan.", from.label))?;
-        let position = plan.terms[from_index]
+        let matches: Vec<usize> = plan.terms[from_index]
             .courses
             .iter()
-            .position(|row| row.key.as_ref() == Some(&key))
-            .ok_or_else(|| format!("{} {} is not on {}.", key.subject, key.number, from.label))?;
-        let mut row = plan.terms[from_index].courses.remove(position);
+            .enumerate()
+            .filter(|(_, row)| row.key.as_ref() == Some(&key))
+            .map(|(index, _)| index)
+            .collect();
+        if matches.is_empty() {
+            return Err(format!(
+                "{} {} is not on {}.",
+                key.subject, key.number, from.label
+            ));
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "{} {} is on {} more than once, each with its own section.",
+                key.subject, key.number, from.label
+            ));
+        }
+        let row = plan.terms[from_index].courses.remove(matches[0]);
         let to_index = plan
             .terms
             .iter()
             .position(|term| term.season == to.season && term.year == to.year)
             .ok_or_else(|| format!("{} is not on this plan.", to.label))?;
-        if plan.terms[to_index]
+        let existing: Vec<Option<String>> = plan.terms[to_index]
             .courses
             .iter()
-            .any(|existing| existing.key.as_ref() == Some(&key))
-        {
+            .filter(|existing| existing.key.as_ref() == Some(&key))
+            .map(|existing| existing.crn.clone())
+            .collect();
+        if !planlogic::repeated_course_allowed(
+            existing.iter().map(|crn| crn.as_deref()),
+            row.crn.as_deref(),
+        ) {
             return Err(format!(
                 "{} {} is already on {}.",
                 key.subject, key.number, to.label
             ));
-        }
-        if !crn_belongs(dest_index, &key, row.crn.as_deref()) {
-            row.crn = None;
         }
         plan.terms[to_index].courses.push(row);
         Ok(())
@@ -663,14 +760,61 @@ pub fn set_section(dir: &Path, args: SetSectionArgs) -> Result<Value, ToolError>
         .ok_or_else(|| ToolError::invalid("A CRN is required."))?;
     let key = course.key();
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
-        let term = term_on_plan(plan, parsed.season, parsed.year)?;
-        let row = term
+        let target = plan
+            .terms
+            .iter()
+            .position(|term| term.season == parsed.season && term.year == parsed.year)
+            .ok_or_else(|| format!("{} is not on this plan.", parsed.label))?;
+        let on_term: Vec<usize> = plan.terms[target]
             .courses
-            .iter_mut()
-            .find(|row| row.key.as_ref() == Some(&key))
-            .ok_or_else(|| format!("{} {} is not on {}.", key.subject, key.number, parsed.label))?;
-        row.crn = Some(crn.clone());
-        Ok(())
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.key.as_ref() == Some(&key))
+            .map(|(index, _)| index)
+            .collect();
+        if on_term.is_empty() {
+            return Err(format!(
+                "{} {} is not on {}.",
+                key.subject, key.number, parsed.label
+            ));
+        }
+        if on_term
+            .iter()
+            .any(|index| plan.terms[target].courses[*index].crn.as_deref() == Some(crn.as_str()))
+        {
+            return Ok(());
+        }
+        let used = plan
+            .completed
+            .iter()
+            .any(|row| row.crn.as_deref() == Some(crn.as_str()))
+            || plan.terms.iter().any(|term| {
+                term.courses
+                    .iter()
+                    .any(|row| row.crn.as_deref() == Some(crn.as_str()))
+            });
+        if used {
+            return Err("That section is already on this plan.".into());
+        }
+        if on_term.len() == 1 {
+            plan.terms[target].courses[on_term[0]].crn = Some(crn.clone());
+            return Ok(());
+        }
+        let unpinned: Vec<usize> = on_term
+            .iter()
+            .copied()
+            .filter(|index| {
+                planlogic::chosen_crn(plan.terms[target].courses[*index].crn.as_deref()).is_none()
+            })
+            .collect();
+        if unpinned.len() == 1 {
+            plan.terms[target].courses[unpinned[0]].crn = Some(crn.clone());
+            return Ok(());
+        }
+        Err(format!(
+            "{} {} is on {} more than once, and each copy already has a CRN.",
+            key.subject, key.number, parsed.label
+        ))
     })
     .map_err(ToolError::from_plan)?;
     plan_value(dir, id)
