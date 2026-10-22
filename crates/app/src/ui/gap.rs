@@ -725,8 +725,14 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                 label.push_str(&format!("  CRN {pin}"));
             }
             let cps = course.key.as_ref().and_then(|key| {
-                cps_note(state.index.sections_for(key).iter().map(|section| section.cps_only()))
-                    .map(str::to_string)
+                cps_note(
+                    state
+                        .index
+                        .sections_for(key)
+                        .iter()
+                        .map(|section| section.cps_only()),
+                )
+                .map(str::to_string)
             });
             let credits = course.key.as_ref().and_then(|key| {
                 let listed = state.index.course(key)?;

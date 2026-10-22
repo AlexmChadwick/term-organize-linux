@@ -60,7 +60,9 @@ fn cps_detection_uses_must_lists_only() {
     assert!(is_cps_only(&only));
 
     let mixed = enrollment_restrictions(MIXED_LEVELS).unwrap();
-    assert!(mixed.iter().any(|item| item.is_levels() && item.values.len() == 3));
+    assert!(mixed
+        .iter()
+        .any(|item| item.is_levels() && item.values.len() == 3));
     assert!(!is_cps_only(&mixed));
 
     assert!(is_cps_only(&enrollment_restrictions(CPS_COLLEGE).unwrap()));
@@ -68,7 +70,9 @@ fn cps_detection_uses_must_lists_only() {
         &enrollment_restrictions(CPS_COLLEGE_SHORT).unwrap()
     ));
     let cannot = enrollment_restrictions(CANNOT_ONLY).unwrap();
-    assert!(cannot.iter().all(|item| item.kind == RestrictionKind::Cannot));
+    assert!(cannot
+        .iter()
+        .all(|item| item.kind == RestrictionKind::Cannot));
     assert!(!is_cps_only(&cannot));
     assert!(enrollment_restrictions("<p>Banner is down</p>").is_none());
 }
@@ -90,8 +94,14 @@ fn course_note_is_all_some_or_nothing() {
         ],
     }]);
     let both = [section("1", cps.clone()), section("2", cps.clone())];
-    assert_eq!(cps_note(both.iter().map(|s| s.cps_only())), Some(CPS_ONLY_NOTE));
-    assert_eq!(course_cps_only(both.iter().map(|s| s.cps_only())), Some(true));
+    assert_eq!(
+        cps_note(both.iter().map(|s| s.cps_only())),
+        Some(CPS_ONLY_NOTE)
+    );
+    assert_eq!(
+        course_cps_only(both.iter().map(|s| s.cps_only())),
+        Some(true)
+    );
     assert_eq!(both[0].cps_only(), Some(true));
 
     let mixed = [section("1", cps.clone()), section("2", open.clone())];
@@ -99,7 +109,10 @@ fn course_note_is_all_some_or_nothing() {
         cps_note(mixed.iter().map(|s| s.cps_only())),
         Some(CPS_SOME_NOTE)
     );
-    assert_eq!(course_cps_only(mixed.iter().map(|s| s.cps_only())), Some(false));
+    assert_eq!(
+        course_cps_only(mixed.iter().map(|s| s.cps_only())),
+        Some(false)
+    );
     assert_eq!(mixed[1].cps_only(), Some(false));
 
     let partial = [section("1", cps), section("2", None)];

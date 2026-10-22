@@ -53,8 +53,7 @@ pub fn is_cps_only(restrictions: &[EnrollmentRestriction]) -> bool {
         }
     }
     let levels_only = !levels.is_empty() && levels.iter().all(|value| is_cps_level(value));
-    let colleges_only =
-        !colleges.is_empty() && colleges.iter().all(|value| is_cps_college(value));
+    let colleges_only = !colleges.is_empty() && colleges.iter().all(|value| is_cps_college(value));
     levels_only || colleges_only
 }
 

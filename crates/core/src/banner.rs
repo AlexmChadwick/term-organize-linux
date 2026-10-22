@@ -162,10 +162,8 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
     {
         return None;
     }
-    let heading = Regex::new(
-        r"(?i)^(must|cannot) be enrolled in one of the following ([^:]+):\s*$",
-    )
-    .unwrap();
+    let heading =
+        Regex::new(r"(?i)^(must|cannot) be enrolled in one of the following ([^:]+):\s*$").unwrap();
     let mut restrictions = Vec::new();
     let mut current: Option<EnrollmentRestriction> = None;
     for line in text.lines() {
