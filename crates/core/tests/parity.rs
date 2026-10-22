@@ -2,7 +2,7 @@
 //! Ports of the Swift tests that specify search, schedules, degree plans, and the audit.
 
 use std::collections::{HashMap, HashSet};
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::degree_audit::{
     counts_separately, is_coop_note, unchecked_reason, AuditStatus, DegreeAudit,
     DegreeCourseAttributes,
@@ -25,7 +25,7 @@ use termorganize_core::CourseEquivalences;
 use uuid::Uuid;
 
 fn index() -> CatalogIndex {
-    let path = bundled_catalog_path().expect("bundled catalog");
+    let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
     let mut catalog = archive::read(&path).expect("read catalog");
     catalog.recompute_postreqs();
     CatalogIndex::build(catalog)

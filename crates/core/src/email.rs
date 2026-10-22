@@ -210,7 +210,6 @@ fn is_domain_byte(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::archive;
-    use std::path::PathBuf;
 
     #[test]
     fn mixed_banner_field_keeps_northeastern_addresses() {
@@ -253,31 +252,49 @@ mod tests {
 
     #[test]
     fn bundled_catalog_addresses_are_northeastern() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/catalog/term-202710.catalog");
-        let raw = std::fs::read(&path).expect("bundled catalog");
-        let json = archive::json_bytes(&raw).expect("catalog json");
-        let mut value: Value = serde_json::from_slice(&json).expect("catalog json");
-        let courses = value["courses"]
-            .as_array()
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        let sections = value["sections"]
-            .as_array()
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        assert!(courses > 2_500, "courses {courses}");
-        assert!(sections > 7_000, "sections {sections}");
-        let scan = redact_json_emails(&mut value);
-        assert!(
-            scan.kept > 1_000,
-            "expected the published northeastern addresses, kept {}",
-            scan.kept
-        );
-        assert!(
-            scan.removed_by_domain.is_empty(),
-            "bundled catalog still has non-university addresses: {:?}",
-            scan.removed_by_domain
-        );
+        let paths = archive::bundled_catalog_paths();
+        let codes: Vec<String> = paths
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(archive::term_code_from_file_name)
+            })
+            .collect();
+        assert!(codes.iter().any(|code| code == "202710"));
+        assert!(codes.iter().any(|code| code == "202730"));
+        for path in paths {
+            let raw = std::fs::read(&path).expect("bundled catalog");
+            let json = archive::json_bytes(&raw).expect("catalog json");
+            let mut value: Value = serde_json::from_slice(&json).expect("catalog json");
+            let code = value["term"]["code"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let courses = value["courses"]
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            let sections = value["sections"]
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            assert!(courses > 2_500, "{code} courses {courses}");
+            assert!(sections > 7_000, "{code} sections {sections}");
+            let scan = redact_json_emails(&mut value);
+            assert!(
+                scan.kept > 500,
+                "{code}: expected published northeastern addresses, kept {}",
+                scan.kept
+            );
+            if code == "202710" {
+                assert!(scan.kept > 1_000, "fall snapshot kept {}", scan.kept);
+            }
+            assert!(
+                scan.removed_by_domain.is_empty(),
+                "{code} still has non-university addresses: {:?}",
+                scan.removed_by_domain
+            );
+        }
     }
 }

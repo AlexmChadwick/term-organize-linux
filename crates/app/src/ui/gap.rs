@@ -2,7 +2,7 @@
 //! petition questions, and the rest of the preferences survey.
 
 use super::*;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::catalog;
 use termorganize_core::course_info::{self, CourseInfoRepository};
 use termorganize_core::editing;
@@ -68,7 +68,7 @@ pub fn known_terms(current: &CatalogIndex) -> Vec<(String, String)> {
             .or_insert_with(|| term_label(term));
     };
     add(&current.catalog.term);
-    if let Some(path) = bundled_catalog_path() {
+    for path in archive::bundled_catalog_paths() {
         if let Ok(catalog) = archive::read(&path) {
             add(&catalog.term);
         }
@@ -170,15 +170,10 @@ pub fn index_for_code(code: &str) -> Option<CatalogIndex> {
         catalog.recompute_postreqs();
         return Some(CatalogIndex::build(catalog));
     }
-    if let Some(path) = bundled_catalog_path() {
-        if let Ok(mut catalog) = archive::read(&path) {
-            if catalog.term.code == code {
-                catalog.recompute_postreqs();
-                return Some(CatalogIndex::build(catalog));
-            }
-        }
-    }
-    None
+    let path = archive::bundled_catalog_path_for(code)?;
+    let mut catalog = archive::read(&path).ok()?;
+    catalog.recompute_postreqs();
+    Some(CatalogIndex::build(catalog))
 }
 
 fn switch_term(shell: &Rc<RefCell<Shell>>, code: &str) {

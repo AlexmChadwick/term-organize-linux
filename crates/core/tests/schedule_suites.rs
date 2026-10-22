@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::calendar;
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::model::*;
@@ -318,7 +318,7 @@ fn clashing_index() -> CatalogIndex {
 fn catalog() -> &'static CatalogIndex {
     static INDEX: OnceLock<CatalogIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
-        let path = bundled_catalog_path().expect("bundled catalog");
+        let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
         let catalog = archive::read(&path).expect("read catalog");
         CatalogIndex::build(catalog)
     })

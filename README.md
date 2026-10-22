@@ -8,7 +8,7 @@ Course information is © Northeastern University. This program is free software 
 
 ## What it does
 
-One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 snapshot (`data/catalog/term-202710.catalog`) is enough to search, build schedules, and read sections offline. It keeps instructor addresses on `northeastern.edu` and `neu.edu` (and their subdomains) and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
+One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 and Spring 2027 snapshots (`data/catalog/term-202710.catalog` and `data/catalog/term-202730.catalog`) are enough to search, build schedules, and read sections offline. A fresh launch opens the newest bundled term; the header lists every bundled term. It keeps instructor addresses on `northeastern.edu` and `neu.edu` (and their subdomains) and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
 
 ## Build
 
@@ -21,7 +21,7 @@ cargo run --release
 
 `pdftotext` (from poppler-utils) imports a degree-audit “View Plan” PDF. Desktop notifications use `notify-send`.
 
-Set `TERMORGANIZE_DATA` to a directory that contains `catalog/term-202710.catalog` if you are not running from this repository. User data is JSON under `$XDG_DATA_HOME/termorganize` (or `~/.local/share/termorganize`).
+Set `TERMORGANIZE_DATA` to a directory whose `catalog/` folder contains the bundled `term-*.catalog` files if you are not running from this repository. When that folder has snapshots, they are the terms the app ships. User data is JSON under `$XDG_DATA_HOME/termorganize` (or `~/.local/share/termorganize`).
 
 ## Commands
 

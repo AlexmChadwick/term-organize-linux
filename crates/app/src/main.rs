@@ -5,7 +5,7 @@ mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::banner::{self, BannerClient};
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::links::{self, AppLink};
@@ -50,7 +50,9 @@ pub fn load_index() -> Option<CatalogIndex> {
             return Some(index);
         }
     }
-    let path = bundled_catalog_path()?;
+    let available = archive::bundled_term_codes();
+    let code = archive::launch_term_code(None, &available)?;
+    let path = archive::bundled_catalog_path_for(code)?;
     let mut catalog = archive::read(&path).ok()?;
     catalog.recompute_postreqs();
     Some(CatalogIndex::build(catalog))

@@ -11,7 +11,7 @@
   <description>
     <p>Term Organize searches Northeastern courses, builds conflict-free schedules, and checks a degree plan against the academic catalog.</p>
     <p>Unofficial. Not affiliated with, endorsed by, or sponsored by Northeastern University or Sandbox.</p>
-    <p>Course information is © Northeastern University and is retrieved from its public class search. A Fall 2026 catalog snapshot is bundled so the app works offline. Live seat counts are requested from Banner when you refresh a course.</p>
+    <p>Course information is © Northeastern University and is retrieved from its public class search. Fall 2026 and Spring 2027 catalog snapshots are bundled so the app works offline. Live seat counts are requested from Banner when you refresh a course.</p>
   </description>
   <launchable type="desktop-id">org.termorganize.TermOrganize.desktop</launchable>
   <url type="homepage">https://github.com/AlexmChadwick/Northeastern-Term-Organize</url>
