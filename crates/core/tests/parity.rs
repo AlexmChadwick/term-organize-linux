@@ -74,6 +74,10 @@ fn section(
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -871,12 +875,20 @@ fn prerequisite_summaries_and_autofill() {
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 0,
+
+                pinned_crn: None,
+                degree_row_id: None,
+                credits: None,
             },
             PlanCourse {
                 key: CourseKey::parse("MATH 2331").unwrap(),
                 is_required: true,
                 excluded_crns: HashSet::new(),
                 color_index: 1,
+
+                pinned_crn: None,
+                degree_row_id: None,
+                credits: None,
             },
         ],
         selected_crns: vec![],
@@ -1251,13 +1263,13 @@ fn substitutions_petitions_and_rebalance() {
         substitution(
             &hcc.id,
             "HCI electives",
-            SubstitutionChange::CountCourse(CourseKey::parse("CS 4973").unwrap()),
+            SubstitutionChange::count_course(CourseKey::parse("CS 4973").unwrap()),
             "",
         ),
         substitution(
             &engineering.id,
             "Software engineering",
-            SubstitutionChange::CountCourse(CourseKey::parse("CS 4535").unwrap()),
+            SubstitutionChange::count_course(CourseKey::parse("CS 4535").unwrap()),
             "",
         ),
         substitution(
@@ -1277,7 +1289,7 @@ fn substitutions_petitions_and_rebalance() {
         substitution(
             &electives.id,
             "Electives",
-            SubstitutionChange::CountCourse(CourseKey::parse("CS 4999").unwrap()),
+            SubstitutionChange::count_course(CourseKey::parse("CS 4999").unwrap()),
             "",
         ),
     ];

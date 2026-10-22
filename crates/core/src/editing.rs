@@ -124,9 +124,10 @@ pub fn renumbering_for(
     substitution: &RequirementSubstitution,
     requirements: &ProgramRequirements,
 ) -> Option<(CourseKey, CourseKey)> {
-    let SubstitutionChange::CountCourse(course) = &substitution.change else {
+    let SubstitutionChange::CountCourse(counted) = &substitution.change else {
         return None;
     };
+    let course = &counted.course;
     let rule =
         requirements.degree_rule(Some(&substitution.rule_id), Some(&substitution.rule_title))?;
     let RuleKind::Required(option) = &rule.kind else {

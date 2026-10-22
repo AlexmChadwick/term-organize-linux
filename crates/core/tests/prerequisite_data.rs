@@ -87,6 +87,7 @@ fn course(
         description: String::new(),
         min_credits: 4.0,
         max_credits: 4.0,
+        credit_hours: None,
         attributes: vec![],
         prereqs,
         coreqs: None,
@@ -128,6 +129,10 @@ fn section(crn: &str, code: &str, title: &str, cross: &[&str]) -> CourseSection 
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -1778,7 +1783,7 @@ fn substitutionsAcceptEquivalentsToo() {
         id: Uuid::new_v4(),
         rule_id: rule.id.clone(),
         rule_title: "Software development".into(),
-        change: SubstitutionChange::CountCourse(cs3000.clone()),
+        change: SubstitutionChange::count_course(cs3000.clone()),
         note: String::new(),
         approved_on: None,
         created_at: None,

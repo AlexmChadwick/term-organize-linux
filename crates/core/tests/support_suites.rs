@@ -70,6 +70,10 @@ fn schedule_plan(
                 .map(str::to_string)
                 .collect(),
             color_index: 0,
+
+            pinned_crn: None,
+            degree_row_id: None,
+            credits: None,
         }],
         selected_crns: vec!["10004".into()],
         filters: ScheduleFilters::default(),
@@ -236,6 +240,10 @@ fn shell_section(crn: &str, seats: i32, waitlist: i32, capacity: i32) -> CourseS
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -2202,6 +2210,10 @@ fn professor_page_texts() {
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     };
     let sections = vec![section(&a, "01"), section(&a, "04"), section(&b, "02")];
     assert_eq!(
@@ -2579,6 +2591,7 @@ fn catalog_archive_round_trip() {
         description: "Introduces…".into(),
         min_credits: 4.0,
         max_credits: 4.0,
+        credit_hours: None,
         attributes: vec!["NCFQ".into()],
         prereqs: Some(Requisite::Course(key("CS", "2100"))),
         coreqs: None,

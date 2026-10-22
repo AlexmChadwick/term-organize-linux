@@ -73,6 +73,8 @@ struct State {
     dismissed_pairs: Vec<String>,
     /// Watch items whose last Banner response did not include the CRN.
     missing_watch: HashSet<String>,
+    /// `user.json` as it was when this window loaded it, or last saved it.
+    stamp: store::FileStamp,
 }
 
 /// Which text field should keep the caret after a rebuild.
@@ -109,6 +111,15 @@ struct Shell {
     windows: RefCell<Vec<adw::Window>>,
     term_menu: gtk::DropDown,
     keep_focus: Cell<Option<KeepFocus>>,
+    /// Divider share captured before an external reload, consumed by the rebuilt page.
+    reload_pane_share: Cell<Option<f64>>,
+    /// Owns the `user.json` monitor. Dropping it would stop reload events.
+    #[allow(dead_code)]
+    user_monitor: Option<gio::FileMonitor>,
+    /// Course keys whose section restrictions are being fetched.
+    restrictions_loading: RefCell<HashSet<String>>,
+    /// Course keys already asked this session, so a miss does not retry immediately.
+    restrictions_attempted: RefCell<HashSet<String>>,
 }
 
 pub(crate) fn course_window_name(key: &CourseKey) -> String {
@@ -209,9 +220,17 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         window.present();
         return;
     };
-    let mut data = store::load();
+    let (mut data, mut stamp) = store::load_stamped(&store::data_dir());
     if data.preferences.selected_term_code.is_none() {
         data.preferences.selected_term_code = Some(index.catalog.term.code.clone());
+    }
+    let loaded = data.clone();
+    planlogic::clamp_saved_credits(&mut data, &index.catalog.courses);
+    if data != loaded {
+        if let Ok((saved, next)) = store::save_merging(&store::data_dir(), &data, &stamp) {
+            data = saved;
+            stamp = next;
+        }
     }
     pull_folder(&mut data);
     apply_scheme(&data.preferences);
@@ -243,6 +262,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         term_labels: vec![],
         dismissed_pairs: gap::load_dismissed(),
         missing_watch: HashSet::new(),
+        stamp,
     }));
     load_saved_requirements(&state);
 
@@ -328,6 +348,10 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         windows: RefCell::new(Vec::new()),
         term_menu: term.clone(),
         keep_focus: Cell::new(None),
+        reload_pane_share: Cell::new(None),
+        user_monitor: None,
+        restrictions_loading: RefCell::new(HashSet::new()),
+        restrictions_attempted: RefCell::new(HashSet::new()),
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -393,6 +417,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         greet(&shell);
     }
     install_drop(&shell);
+    watch_user_file(&shell);
     arm_seat_timer(&shell);
     if !smoke
         && shell
@@ -530,6 +555,13 @@ fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
 fn refresh(shell: &Rc<RefCell<Shell>>) {
     let saved_scroll = scroll_values(shell.borrow().content.upcast_ref());
     let area_before = shell.borrow().state.borrow().area;
+    let (collapsed, shows_content) = {
+        let shell_ref = shell.borrow();
+        sidebar_after_reload(
+            shell_ref.split.is_collapsed(),
+            shell_ref.split.shows_content(),
+        )
+    };
     let page = build_page(shell);
     fill(&page);
     let shell_ref = shell.borrow();
@@ -564,7 +596,12 @@ fn refresh(shell: &Rc<RefCell<Shell>>) {
     };
     shell_ref.title.set_title(&heading);
     shell_ref.title.set_subtitle(&sub);
-    adapt(&shell_ref.window, &shell_ref.split);
+    // Rebuilding the page must not open the navigation sidebar. `default_width`
+    // stays at the initial 1180 even after the window is narrowed or the user
+    // hides the sidebar, and forcing it open covers the plan list.
+    shell_ref.split.set_collapsed(collapsed);
+    shell_ref.split.set_show_content(shows_content);
+    shell_ref.reload_pane_share.take();
     if let Some(which) = shell_ref.keep_focus.take() {
         restore_focus(&page, which);
     }
@@ -684,10 +721,38 @@ fn hold_focus(shell: &Rc<RefCell<Shell>>, which: KeepFocus) {
     shell.borrow().keep_focus.set(Some(which));
 }
 
-fn adapt(window: &adw::ApplicationWindow, split: &adw::NavigationSplitView) {
-    if window.default_width() > 0 {
-        split.set_collapsed(window.default_width() < 860);
+/// Sidebar flags to put back after a reload. The window's default width is not
+/// the current width, so a reload must not recompute collapsed from it.
+pub(crate) fn sidebar_after_reload(collapsed: bool, shows_content: bool) -> (bool, bool) {
+    (collapsed, shows_content)
+}
+
+/// Divider share for the page rebuilt by a reload. `None` keeps that page's usual share.
+pub(crate) fn pane_share_after_reload(saved: Option<f64>, default_share: f64) -> f64 {
+    let Some(share) = saved else {
+        return default_share;
+    };
+    if !share.is_finite() || share < 0.0 {
+        return default_share;
     }
+    if share == 0.0 {
+        return 0.0;
+    }
+    share.clamp(0.12, 0.7)
+}
+
+fn content_pane_share(content: &gtk::Box) -> Option<f64> {
+    let paned = content.first_child()?.downcast::<gtk::Paned>().ok()?;
+    let width = paned.width();
+    if width < 80 {
+        return None;
+    }
+    let share = paned.position() as f64 / width as f64;
+    share.is_finite().then_some(share)
+}
+
+fn page_pane_share(shell: &Rc<RefCell<Shell>>, default_share: f64) -> f64 {
+    pane_share_after_reload(shell.borrow().reload_pane_share.take(), default_share)
 }
 
 fn build_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
@@ -786,6 +851,24 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
+    let no_prereqs = gtk::CheckButton::with_label("No prerequisites");
+    no_prereqs.set_active(filters.no_prerequisites);
+    no_prereqs.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.no_prerequisites = b.is_active();
+            refresh(&shell);
+        }
+    });
+    let no_coreqs = gtk::CheckButton::with_label("No corequisites");
+    no_coreqs.set_active(filters.no_corequisites);
+    no_coreqs.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.no_corequisites = b.is_active();
+            refresh(&shell);
+        }
+    });
     let subject = gtk::Entry::builder()
         .placeholder_text("Subject")
         .text(filters.subjects.iter().next().cloned().unwrap_or_default())
@@ -835,8 +918,11 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
+    filters_box.append(&level_filter(shell, &filters));
     filters_box.append(&open_only);
     filters_box.append(&honors);
+    filters_box.append(&no_prereqs);
+    filters_box.append(&no_coreqs);
     filters_box.append(&subject);
     filters_box.append(&sort_box);
     root.append(&filters_box);
@@ -850,108 +936,276 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         note = format!("{note} · {} filters", filters.active_count());
     }
     root.append(&dim_label(&note));
-    root.append(&course_list(shell, &rows, false));
+    if rows.is_empty() {
+        root.append(&dim_label(
+            "Nothing matches. Try a course code, a shorter word, or clear a filter.",
+        ));
+        return root.upcast();
+    }
+    let preview = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    preview.set_widget_name("course-preview");
+    let show_course: Rc<dyn Fn(Option<CourseKey>)> = Rc::new({
+        let shell = shell.clone();
+        let preview = preview.clone();
+        move |key| {
+            while let Some(child) = preview.first_child() {
+                preview.remove(&child);
+            }
+            match key {
+                Some(key) => preview.append(&course_page(&shell, &key, true)),
+                None => preview.append(&dim_label("Select a course.")),
+            }
+        }
+    });
+    let list = course_list(shell, &rows, false, {
+        let show_course = show_course.clone();
+        move |key| show_course(key)
+    });
+    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+    split.set_vexpand(true);
+    split.set_start_child(Some(&list));
+    split.set_shrink_start_child(false);
+    split.set_resize_start_child(true);
+    split.set_resize_end_child(true);
+    split.set_end_child(Some(
+        &gtk::ScrolledWindow::builder()
+            .child(&preview)
+            .vexpand(true)
+            .hexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build(),
+    ));
+    install_proportional_pane(&split, 0.46);
+    root.append(&split);
     root.upcast()
 }
 
+struct CourseRowText {
+    title: String,
+    credits: String,
+    seats: String,
+    cps: Option<String>,
+}
+
+/// Search, subject, and saved courses. `GtkListView` plus `GtkSingleSelection` moves
+/// one row per arrow only while the list itself has focus, and scrolls that row into view.
 fn course_list(
     shell: &Rc<RefCell<Shell>>,
     rows: &[(CourseKey, String, String, String)],
     saved: bool,
+    on_selected: impl Fn(Option<CourseKey>) + 'static,
 ) -> gtk::Widget {
-    let list = gtk::ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.set_activate_on_single_click(false);
-    let keys: Rc<Vec<CourseKey>> = Rc::new(rows.iter().map(|(key, _, _, _)| key.clone()).collect());
-    for (key, title, credits, seats) in rows {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        let code = gtk::Label::new(Some(&key.to_string()));
-        code.add_css_class("heading");
-        code.set_width_chars(12);
-        code.set_xalign(0.0);
-        let name = gtk::Label::new(Some(title));
-        name.set_hexpand(true);
-        name.set_xalign(0.0);
-        name.set_wrap(true);
-        name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        name.set_lines(2);
-        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        name.set_max_width_chars(48);
-        row.append(&code);
-        row.append(&name);
-        row.append(&meta_label(credits));
-        row.append(&meta_label(seats));
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&row));
-        gap::attach_course_drag(&item, key);
-        let mut entries = vec![
-            menu_action("Open", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || gap::open_course_window(&shell, &key)
-            }),
-            menu_action("Copy code", {
-                let shell = shell.clone();
-                let code = key.to_string();
-                move || copy_text(&shell, &code, "Course code copied")
-            }),
-        ];
-        if saved {
-            entries.push(menu_action("Remove", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || unsave_course(&shell, &key)
-            }));
-        } else {
-            entries.push(menu_action("Save", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || save_course(&shell, &key)
-            }));
-        }
-        attach_context_menu(&item, entries);
-        list.append(&item);
-    }
-    if rows.is_empty() && !saved {
+    if rows.is_empty() {
+        on_selected(None);
         let label = gtk::Label::builder()
-            .label("Nothing matches. Try a course code, a shorter word, or clear a filter.")
+            .label(if saved {
+                "Nothing saved yet"
+            } else {
+                "Nothing matches. Try a course code, a shorter word, or clear a filter."
+            })
             .margin_top(24)
             .margin_bottom(24)
             .build();
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&label));
-        item.set_activatable(false);
-        item.set_selectable(false);
-        list.append(&item);
+        return label.upcast();
     }
-    list.connect_row_activated({
+    let mut texts = HashMap::new();
+    let mut keys = Vec::new();
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    for (key, title, credits, seats) in rows {
+        let cps = {
+            let sections = shell.borrow().state.borrow().index.sections_for(key);
+            cps_note(sections.iter().map(|section| section.cps_only())).map(str::to_string)
+        };
+        let id = key.to_string();
+        texts.insert(
+            id.clone(),
+            CourseRowText {
+                title: title.clone(),
+                credits: credits.clone(),
+                seats: seats.clone(),
+                cps,
+            },
+        );
+        keys.push(key.clone());
+        store.append(&gtk::StringObject::new(&id));
+    }
+    let texts = Rc::new(texts);
+    let keys = Rc::new(keys);
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup({
+        let shell = shell.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            let code = gtk::Label::new(None);
+            code.set_widget_name("code-label");
+            code.add_css_class("heading");
+            code.set_width_chars(12);
+            code.set_xalign(0.0);
+            let name = gtk::Label::new(None);
+            name.set_widget_name("title-label");
+            name.set_hexpand(true);
+            name.set_xalign(0.0);
+            name.set_wrap(true);
+            name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            name.set_lines(2);
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            name.set_max_width_chars(48);
+            let cps = dim_label("");
+            cps.set_widget_name("cps-label");
+            cps.set_visible(false);
+            let title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            title_box.set_hexpand(true);
+            title_box.append(&name);
+            title_box.append(&cps);
+            let credits = meta_label("");
+            credits.set_widget_name("credits-label");
+            let seats = meta_label("");
+            seats.set_widget_name("seats-label");
+            row.append(&code);
+            row.append(&title_box);
+            row.append(&credits);
+            row.append(&seats);
+            gap::attach_named_course_drag(&row);
+            let row_menu = row.clone();
+            let mut entries = vec![
+                menu_action("Open", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            gap::open_course_window(&shell, &key);
+                        }
+                    }
+                }),
+                menu_action("Copy code", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        let code = row.widget_name();
+                        copy_text(&shell, code.as_str(), "Course code copied");
+                    }
+                }),
+            ];
+            if saved {
+                entries.push(menu_action("Remove", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            unsave_course(&shell, &key);
+                        }
+                    }
+                }));
+            } else {
+                entries.push(menu_action("Save", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            save_course(&shell, &key);
+                        }
+                    }
+                }));
+            }
+            attach_context_menu(&row, entries);
+            item.set_child(Some(&row));
+        }
+    });
+    factory.connect_bind({
+        let texts = texts.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(row) = item.child() else { return };
+            let Some(object) = item
+                .item()
+                .and_then(|value| value.downcast::<gtk::StringObject>().ok())
+            else {
+                return;
+            };
+            let id = object.string().to_string();
+            row.set_widget_name(&id);
+            let Some(text) = texts.get(&id) else { return };
+            if let Some(label) = label_named(&row, "code-label") {
+                label.set_text(&id);
+            }
+            if let Some(label) = label_named(&row, "title-label") {
+                label.set_text(&text.title);
+            }
+            if let Some(label) = label_named(&row, "credits-label") {
+                label.set_text(&text.credits);
+            }
+            if let Some(label) = label_named(&row, "seats-label") {
+                label.set_text(&text.seats);
+            }
+            if let Some(label) = label_named(&row, "cps-label") {
+                match &text.cps {
+                    Some(note) => {
+                        label.set_text(note);
+                        label.set_visible(true);
+                    }
+                    None => label.set_visible(false),
+                }
+            }
+        }
+    });
+    let selection = gtk::SingleSelection::new(Some(store));
+    selection.set_autoselect(true);
+    selection.set_can_unselect(false);
+    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    view.set_widget_name(if saved {
+        "saved-courses"
+    } else {
+        "course-results"
+    });
+    view.add_css_class("rich-list");
+    view.add_css_class("boxed-list");
+    view.set_single_click_activate(false);
+    view.set_enable_rubberband(false);
+    view.set_can_focus(true);
+    view.connect_activate({
         let shell = shell.clone();
         let keys = keys.clone();
-        move |_, row| {
-            if let Some(key) = keys.get(row.index() as usize) {
+        move |_, position| {
+            if let Some(key) = keys.get(position as usize) {
                 gap::open_course_window(&shell, key);
             }
         }
     });
     if saved {
+        let keys_for_delete = keys.clone();
+        let selection_for_delete = selection.clone();
         let shell = shell.clone();
-        let keys = keys.clone();
-        attach_delete_key(
-            &list,
-            Rc::new(move |index| {
-                if let Some(key) = keys.get(index as usize) {
-                    unsave_course(&shell, key);
-                }
-            }),
-        );
+        let keys_controller = gtk::EventControllerKey::new();
+        keys_controller.connect_key_pressed(move |_, key, _, _| {
+            if !matches!(
+                key,
+                gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete | gtk::gdk::Key::BackSpace
+            ) {
+                return glib::Propagation::Proceed;
+            }
+            let position = selection_for_delete.selected();
+            if position == gtk::INVALID_LIST_POSITION {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(key) = keys_for_delete.get(position as usize) {
+                unsave_course(&shell, key);
+            }
+            glib::Propagation::Stop
+        });
+        view.add_controller(keys_controller);
     }
+    track_list_selection(&view, &selection, keys, on_selected);
     gtk::ScrolledWindow::builder()
-        .child(&list)
+        .child(&view)
         .vexpand(true)
         .hexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -960,7 +1214,47 @@ fn course_list(
         .upcast()
 }
 
-fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
+fn label_named(root: &gtk::Widget, name: &str) -> Option<gtk::Label> {
+    find_named(root, name).and_then(|widget| widget.downcast().ok())
+}
+
+/// Arrow keys are the list's own bindings. This only keeps the selected row in view
+/// and tells the details pane which row is current.
+fn track_list_selection<T: Clone + 'static>(
+    view: &gtk::ListView,
+    selection: &gtk::SingleSelection,
+    items: Rc<Vec<T>>,
+    on_selected: impl Fn(Option<T>) + 'static,
+) {
+    let on_selected: Rc<dyn Fn(Option<T>)> = Rc::new(on_selected);
+    let emit: Rc<dyn Fn()> = Rc::new({
+        let view = view.clone();
+        let selection = selection.clone();
+        let on_selected = on_selected.clone();
+        move || {
+            let position = selection.selected();
+            if position != gtk::INVALID_LIST_POSITION {
+                let view = view.clone();
+                glib::idle_add_local_once(move || {
+                    view.scroll_to(position, gtk::ListScrollFlags::NONE, None);
+                });
+            }
+            let value = if position == gtk::INVALID_LIST_POSITION {
+                None
+            } else {
+                items.get(position as usize).cloned()
+            };
+            on_selected(value);
+        }
+    });
+    selection.connect_selected_notify({
+        let emit = emit.clone();
+        move |_| emit()
+    });
+    emit();
+}
+
+fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gtk::Widget {
     let (course, sections) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -976,7 +1270,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     root.set_margin_top(18);
     root.set_margin_start(18);
     root.set_margin_end(18);
-    root.set_margin_bottom(18);
+    root.set_margin_bottom(8);
     let bar = wrapping_box();
     let save = gtk::Button::with_label("Save");
     save.connect_clicked({
@@ -1015,6 +1309,9 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
             .collect::<Vec<_>>()
             .join(" ")
     )));
+    if let Some(note) = cps_note(sections.iter().map(|section| section.cps_only())) {
+        root.append(&dim_label(note));
+    }
     if !course.description.is_empty() {
         let body = gtk::Label::new(Some(&course.description));
         body.set_wrap(true);
@@ -1042,95 +1339,265 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         ));
     }
     root.append(&heading_label(&format!("{} sections", sections.len())));
-    let list = gtk::ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.set_activate_on_single_click(false);
-    let mut crns = Vec::new();
-    for section in &sections {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        top.append(&gtk::Label::new(Some(&format!(
-            "CRN {} · {}",
-            section.crn, section.section_number
-        ))));
-        let (seats_n, wait_n) = shell
-            .borrow()
-            .state
-            .borrow()
-            .live_seats
-            .get(&section.crn)
-            .copied()
-            .map(|(s, w, _)| (s, w))
-            .unwrap_or((section.seats_remaining, section.waitlist_remaining));
-        let seats = gtk::Label::new(Some(&seat_wait_label(seats_n, wait_n)));
-        seats.set_hexpand(true);
-        seats.set_xalign(1.0);
-        top.append(&seats);
-        row.append(&top);
-        let detail = dim_label(&format!(
-            "{} · {} · {}",
-            section.schedule_summary(),
-            section.instructor_label(),
-            section.campus
-        ));
-        detail.set_wrap(true);
-        detail.set_max_width_chars(42);
-        row.append(&detail);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let copy = gtk::Button::with_label("Copy CRN");
-        let crn = section.crn.clone();
-        let shell_copy = shell.clone();
-        copy.connect_clicked(move |_| {
-            shell_copy.borrow().window.clipboard().set_text(&crn);
-            toast(&shell_copy, "CRN copied");
-        });
-        let watch_button = gtk::Button::with_label("Watch");
-        let shell_watch = shell.clone();
-        let section_watch = section.clone();
-        let course_title = course.title.clone();
-        watch_button
-            .connect_clicked(move |_| watch_section(&shell_watch, &section_watch, &course_title));
-        buttons.append(&copy);
-        buttons.append(&watch_button);
-        row.append(&buttons);
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&row));
-        let crn_menu = section.crn.clone();
-        let section_menu = section.clone();
-        let title_menu = course.title.clone();
-        attach_context_menu(
-            &item,
-            vec![
-                menu_action("Copy CRN", {
-                    let shell = shell.clone();
-                    let crn = crn_menu.clone();
-                    move || copy_text(&shell, &crn, "CRN copied")
-                }),
-                menu_action("Watch", {
-                    let shell = shell.clone();
-                    move || watch_section(&shell, &section_menu, &title_menu)
-                }),
-            ],
-        );
-        crns.push(crn_menu);
-        list.append(&item);
+    let header = gtk::ScrolledWindow::builder()
+        .child(&root)
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .height_request(if preview { 200 } else { 160 })
+        .propagate_natural_height(false)
+        .build();
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_vexpand(true);
+    page.append(&header);
+    page.append(&section_list(shell, &course.title, &sections));
+    if !preview {
+        gap::load_restrictions(shell, key);
     }
-    let crns = Rc::new(crns);
-    list.connect_row_activated({
+    page.upcast()
+}
+
+#[derive(Clone)]
+struct SectionLine {
+    section: CourseSection,
+    seats: String,
+    summary: String,
+}
+
+/// Sections under a course. Selection and arrow keys stay inside this list.
+fn section_list(
+    shell: &Rc<RefCell<Shell>>,
+    course_title: &str,
+    sections: &[CourseSection],
+) -> gtk::Widget {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_vexpand(true);
+    if sections.is_empty() {
+        column.append(&dim_label("No sections in this term."));
+        return column.upcast();
+    }
+    let lines: Vec<SectionLine> = sections
+        .iter()
+        .map(|section| {
+            let (seats_n, wait_n) = shell
+                .borrow()
+                .state
+                .borrow()
+                .live_seats
+                .get(&section.crn)
+                .copied()
+                .map(|(seats, wait, _)| (seats, wait))
+                .unwrap_or((section.seats_remaining, section.waitlist_remaining));
+            SectionLine {
+                seats: seat_wait_label(seats_n, wait_n),
+                summary: format!(
+                    "{} · {} · {}",
+                    section.schedule_summary(),
+                    section.instructor_label(),
+                    section.campus
+                ),
+                section: section.clone(),
+            }
+        })
+        .collect();
+    let by_crn: Rc<HashMap<String, SectionLine>> = Rc::new(
+        lines
+            .iter()
+            .map(|line| (line.section.crn.clone(), line.clone()))
+            .collect(),
+    );
+    let lines = Rc::new(lines);
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    for line in lines.iter() {
+        store.append(&gtk::StringObject::new(&line.section.crn));
+    }
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup({
         let shell = shell.clone();
-        move |_, row| {
-            if let Some(crn) = crns.get(row.index() as usize) {
-                copy_text(&shell, crn, "CRN copied");
+        let course_title = course_title.to_string();
+        let by_crn = by_crn.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let title = gtk::Label::new(None);
+            title.set_widget_name("section-title");
+            title.set_xalign(0.0);
+            let seats = gtk::Label::new(None);
+            seats.set_widget_name("section-seats");
+            seats.set_hexpand(true);
+            seats.set_xalign(1.0);
+            top.append(&title);
+            top.append(&seats);
+            let detail = dim_label("");
+            detail.set_widget_name("section-summary");
+            detail.set_wrap(true);
+            detail.set_max_width_chars(42);
+            let cps = dim_label(CPS_ONLY_NOTE);
+            cps.set_widget_name("section-cps");
+            cps.set_visible(false);
+            row.append(&top);
+            row.append(&detail);
+            row.append(&cps);
+            let row_menu = row.clone();
+            attach_context_menu(
+                &row,
+                vec![
+                    menu_action("Copy CRN", {
+                        let shell = shell.clone();
+                        let row = row_menu.clone();
+                        move || {
+                            let crn = row.widget_name().to_string();
+                            copy_text(&shell, &crn, "CRN copied");
+                        }
+                    }),
+                    menu_action("Watch", {
+                        let shell = shell.clone();
+                        let row = row_menu.clone();
+                        let by_crn = by_crn.clone();
+                        let course_title = course_title.clone();
+                        move || {
+                            let crn = row.widget_name().to_string();
+                            if let Some(line) = by_crn.get(&crn) {
+                                watch_section(&shell, &line.section, &course_title);
+                            }
+                        }
+                    }),
+                ],
+            );
+            item.set_child(Some(&row));
+        }
+    });
+    factory.connect_bind({
+        let by_crn = by_crn.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(row) = item.child() else { return };
+            let Some(object) = item
+                .item()
+                .and_then(|value| value.downcast::<gtk::StringObject>().ok())
+            else {
+                return;
+            };
+            let crn = object.string().to_string();
+            row.set_widget_name(&crn);
+            let Some(line) = by_crn.get(&crn) else { return };
+            if let Some(label) = label_named(&row, "section-title") {
+                label.set_text(&format!(
+                    "CRN {} · {}",
+                    line.section.crn, line.section.section_number
+                ));
+            }
+            if let Some(label) = label_named(&row, "section-seats") {
+                label.set_text(&line.seats);
+            }
+            if let Some(label) = label_named(&row, "section-summary") {
+                label.set_text(&line.summary);
+            }
+            if let Some(label) = label_named(&row, "section-cps") {
+                label.set_visible(line.section.cps_only() == Some(true));
             }
         }
     });
-    root.append(&list);
-    root.upcast()
+    let selection = gtk::SingleSelection::new(Some(store));
+    selection.set_autoselect(true);
+    selection.set_can_unselect(false);
+    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    view.set_widget_name("section-results");
+    view.add_css_class("rich-list");
+    view.add_css_class("boxed-list");
+    view.set_single_click_activate(false);
+    view.set_enable_rubberband(false);
+    view.set_can_focus(true);
+    view.connect_activate({
+        let shell = shell.clone();
+        let lines = lines.clone();
+        move |_, position| {
+            if let Some(line) = lines.get(position as usize) {
+                copy_text(&shell, &line.section.crn, "CRN copied");
+            }
+        }
+    });
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    details.set_widget_name("section-details");
+    details.add_css_class("card");
+    details.set_margin_top(4);
+    details.set_margin_bottom(8);
+    let course_title = course_title.to_string();
+    track_list_selection(&view, &selection, lines, {
+        let shell = shell.clone();
+        let details = details.clone();
+        let course_title = course_title.clone();
+        move |line| fill_section_details(&shell, &details, &course_title, line.as_ref())
+    });
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .hexpand(true)
+        .height_request(220)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(false)
+        .build();
+    column.append(&scrolled);
+    column.append(&details);
+    column.upcast()
+}
+
+fn fill_section_details(
+    shell: &Rc<RefCell<Shell>>,
+    host: &gtk::Box,
+    course_title: &str,
+    line: Option<&SectionLine>,
+) {
+    while let Some(child) = host.first_child() {
+        host.remove(&child);
+    }
+    let Some(line) = line else {
+        host.append(&dim_label("Select a section."));
+        return;
+    };
+    let title = gtk::Label::new(Some(&format!(
+        "CRN {} · {}",
+        line.section.crn, line.section.section_number
+    )));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_margin_start(12);
+    title.set_margin_top(8);
+    host.append(&title);
+    let summary = dim_label(&format!("{} · {}", line.summary, line.seats));
+    summary.set_margin_start(12);
+    summary.set_margin_end(12);
+    summary.set_wrap(true);
+    host.append(&summary);
+    if line.section.cps_only() == Some(true) {
+        let note = dim_label(CPS_ONLY_NOTE);
+        note.set_margin_start(12);
+        host.append(&note);
+    }
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    buttons.set_margin_start(12);
+    buttons.set_margin_bottom(8);
+    let copy = gtk::Button::with_label("Copy CRN");
+    let crn = line.section.crn.clone();
+    let shell_copy = shell.clone();
+    copy.connect_clicked(move |_| copy_text(&shell_copy, &crn, "CRN copied"));
+    let watch = gtk::Button::with_label("Watch");
+    let shell_watch = shell.clone();
+    let section = line.section.clone();
+    let course_title = course_title.to_string();
+    watch.connect_clicked(move |_| watch_section(&shell_watch, &section, &course_title));
+    buttons.append(&copy);
+    buttons.append(&watch);
+    host.append(&buttons);
 }
 
 fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
@@ -1172,7 +1639,7 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         (subjects, selected, courses)
     };
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.32);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.32));
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     for (code, name) in &subjects {
@@ -1237,7 +1704,7 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     subject_column.set_margin_start(12);
     subject_column.set_margin_end(12);
     subject_column.append(&column_headers(shell));
-    subject_column.append(&course_list(shell, &courses, false));
+    subject_column.append(&course_list(shell, &courses, false, |_| {}));
     paned.set_end_child(Some(&subject_column));
     paned.upcast()
 }
@@ -1273,7 +1740,7 @@ fn saved_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         root.append(&status);
         return root.upcast();
     }
-    root.append(&course_list(shell, &rows, true));
+    root.append(&course_list(shell, &rows, true, |_| {}));
     root.upcast()
 }
 
@@ -1609,7 +2076,7 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snapshot = schedule_snapshot(shell);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.26);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.26));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -1733,31 +2200,58 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         snapshot
             .courses
             .iter()
-            .map(|(key, _)| key.clone())
+            .map(|course| course.key.clone())
             .collect(),
     );
-    for (key, required) in &snapshot.courses {
+    let schedule_id = snapshot.plan.as_ref().map(|plan| plan.id);
+    for course in &snapshot.courses {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_top(6);
         row.set_margin_bottom(6);
         row.set_margin_start(8);
         row.set_margin_end(8);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_hexpand(true);
         let label = gtk::Label::new(Some(&format!(
             "{}{}",
-            key,
-            if *required { "" } else { " · optional" }
+            course.key,
+            if course.required { "" } else { " · optional" }
         )));
-        label.set_hexpand(true);
         label.set_xalign(0.0);
-        row.append(&label);
+        text.append(&label);
+        if let (Some(plan_id), Some((value, low, high))) = (schedule_id, course.credits) {
+            let index = course.index;
+            let shell_spin = shell.clone();
+            text.append(&gap::credit_spin(low, high, value, move |chosen| {
+                {
+                    let shell_ref = shell_spin.borrow();
+                    let mut state = shell_ref.state.borrow_mut();
+                    planlogic::set_chosen_credits(
+                        &mut state.data,
+                        planlogic::CreditEdit::ScheduleRow {
+                            plan: plan_id,
+                            index,
+                        },
+                        chosen,
+                    );
+                    persist(&mut state);
+                }
+                let later = shell_spin.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                    refresh(&later);
+                    glib::ControlFlow::Break
+                });
+            }));
+        }
+        row.append(&text);
         let remove = gtk::Button::with_label("Remove");
         let shell_remove = shell.clone();
-        let key_remove = key.clone();
+        let key_remove = course.key.clone();
         remove.connect_clicked(move |_| remove_plan_course(&shell_remove, &key_remove));
         row.append(&remove);
         let item = gtk::ListBoxRow::new();
         item.set_child(Some(&row));
-        let key_menu = key.clone();
+        let key_menu = course.key.clone();
         attach_context_menu(
             &item,
             vec![
@@ -1895,10 +2389,18 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     paned.upcast()
 }
 
+struct ScheduleCourseLine {
+    index: usize,
+    key: String,
+    required: bool,
+    /// Chosen value, low, and high for a variable-credit row.
+    credits: Option<(f64, f64, f64)>,
+}
+
 struct ScheduleSnap {
     plans: Vec<(Uuid, String, usize, bool)>,
     plan: Option<SchedulePlan>,
-    courses: Vec<(String, bool)>,
+    courses: Vec<ScheduleCourseLine>,
     pref_summary: String,
     generated: Vec<SchedLine>,
     picked: usize,
@@ -1951,7 +2453,26 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
         .map(|p| {
             p.courses
                 .iter()
-                .map(|c| (c.key.to_string(), c.is_required))
+                .enumerate()
+                .map(|(index, course)| {
+                    let credits = state.index.course(&course.key).and_then(|listed| {
+                        if !listed.is_variable_credit() {
+                            return None;
+                        }
+                        let value = course.credits.unwrap_or_else(|| listed.default_credits());
+                        Some((
+                            listed.clamp_credits(value),
+                            listed.min_credits,
+                            listed.max_credits,
+                        ))
+                    });
+                    ScheduleCourseLine {
+                        index,
+                        key: course.key.to_string(),
+                        required: course.is_required,
+                        credits,
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -2031,18 +2552,7 @@ fn plan_inputs(state: &State) -> Vec<ScheduleCourseInput> {
     let Some(plan) = state.data.plans.iter().find(|p| p.id == id) else {
         return vec![];
     };
-    plan.courses
-        .iter()
-        .map(|c| {
-            let mut input = ScheduleCourseInput::new(
-                c.key.clone(),
-                c.is_required,
-                state.index.sections_for(&c.key),
-            );
-            input.excluded_crns = c.excluded_crns.clone();
-            input
-        })
-        .collect()
+    schedule::inputs_for(plan, &state.index)
 }
 
 /// The degree plan on screen. The page shows the first plan when none has been
@@ -2074,7 +2584,7 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.24);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.24));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -2282,14 +2792,7 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
     );
     let dupes = planlogic::duplicate_keys(plan);
     if !dupes.is_empty() {
-        checks.push(format!(
-            "Listed more than once: {}",
-            dupes
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        checks.push(planlogic::duplicate_plan_notice(dupes.len()));
     }
     for (index, term) in plan.terms.iter().enumerate() {
         for course in &term.courses {
@@ -2999,7 +3502,7 @@ fn new_schedule(shell: &Rc<RefCell<Shell>>) {
         state.plan = Some(id);
         state.area = 5;
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
         id
     };
     let _ = id;
@@ -3022,13 +3525,28 @@ fn new_degree(shell: &Rc<RefCell<Shell>>) {
         });
         state.degree = Some(id);
         state.area = 6;
-        persist(&state.data);
+        persist(&mut state);
     }
     select_area(shell, 6);
 }
 
 fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    add_pinned_course(shell, key, None);
+}
+
+fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&str>) {
     let known = shell.borrow().state.borrow().index.course(key).is_some();
+    let chosen_credits = shell
+        .borrow()
+        .state
+        .borrow()
+        .index
+        .course(key)
+        .and_then(|course| {
+            course
+                .is_variable_credit()
+                .then_some(course.default_credits())
+        });
     if !known {
         toast(shell, "That course isn’t in this term");
         return;
@@ -3056,19 +3574,34 @@ fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         }
         let id = current_plan_id(&state).unwrap();
         if let Some(plan) = state.data.plans.iter_mut().find(|p| p.id == id) {
-            if !plan.contains(key) {
+            let existing = plan
+                .courses
+                .iter()
+                .filter(|course| &course.key == key)
+                .map(|course| course.pinned_crn.as_deref())
+                .collect::<Vec<_>>();
+            if planlogic::repeated_course_allowed(existing, crn) {
                 let color = plan.next_color_index();
+                let pin = planlogic::chosen_crn(crn).map(|text| text.to_string());
                 plan.courses.push(PlanCourse {
                     key: key.clone(),
                     is_required: true,
                     excluded_crns: HashSet::new(),
                     color_index: color,
+                    pinned_crn: pin.clone(),
+                    degree_row_id: None,
+                    credits: chosen_credits,
                 });
+                if let Some(pin) = pin {
+                    if !plan.selected_crns.iter().any(|item| item == &pin) {
+                        plan.selected_crns.push(pin);
+                    }
+                }
                 plan.updated_at = now_secs();
             }
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, &format!("Added {key}"));
 }
@@ -3085,7 +3618,7 @@ fn remove_plan_course(shell: &Rc<RefCell<Shell>>, key: &str) {
             plan.updated_at = now_secs();
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3122,7 +3655,7 @@ fn delete_schedule(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             state.plan = None;
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3135,7 +3668,7 @@ fn delete_degree_plan_ui(shell: &Rc<RefCell<Shell>>, id: Uuid) {
         if state.degree == Some(id) {
             state.degree = state.data.degree_plans.first().map(|plan| plan.id);
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3163,7 +3696,7 @@ fn remove_degree_course(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             term.courses.retain(|course| course.id != id);
         }
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3177,7 +3710,7 @@ fn unsave_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             .data
             .saved
             .retain(|saved| !(saved.term_code == term && saved.key == *key));
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3234,7 +3767,7 @@ fn apply_nl(shell: &Rc<RefCell<Shell>>, text: &str) {
                         note = prefs.summary_parts().join(" · ");
                         plan.preferences = Some(prefs);
                         plan.updated_at = now_secs();
-                        persist(&state.data);
+                        persist(&mut state);
                     }
                 } else {
                     note = "Make a schedule first".into();
@@ -3363,7 +3896,7 @@ fn add_semester(shell: &Rc<RefCell<Shell>>) {
                 plan.sort_terms();
             }
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3373,7 +3906,7 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
         toast(shell, "Use a course code like CS 3000");
         return;
     };
-    {
+    let repeat = {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         let title = state
@@ -3384,22 +3917,36 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
         let credits = state
             .index
             .course(&key)
-            .map(|c| c.max_credits)
+            .map(|c| c.default_credits())
             .unwrap_or(4.0);
         let Some(id) = active_degree_id(&state) else {
             return;
         };
         state.degree = Some(id);
+        let mut repeat = None;
         if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
             if plan.terms.is_empty() {
                 plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
             }
+            repeat = plan
+                .terms
+                .iter()
+                .find(|term| {
+                    term.courses
+                        .iter()
+                        .any(|course| course.key.as_ref() == Some(&key))
+                })
+                .map(|term| planlogic::already_in_plan_notice(&term.name()));
             let last = plan.terms.len() - 1;
             plan.terms[last]
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, credits));
         }
-        persist(&state.data);
+        persist(&mut state);
+        repeat
+    };
+    if let Some(message) = repeat {
+        toast(shell, &message);
     }
     refresh(shell);
 }
@@ -3415,6 +3962,12 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
         let requirements = state.requirements.get(&id).cloned();
         let index_courses: HashSet<CourseKey> =
             state.index.courses.iter().map(|c| c.key()).collect();
+        let credit_for: HashMap<CourseKey, f64> = state
+            .index
+            .courses
+            .iter()
+            .map(|course| (course.key(), course.default_credits()))
+            .collect();
         let year = state.index.catalog.term.calendar_year();
         let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) else {
             return;
@@ -3451,11 +4004,12 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
         let last = plan.terms.len() - 1;
         for key in missing {
             let title = key.to_string();
+            let credits = credit_for.get(&key).copied().unwrap_or(4.0);
             plan.terms[last]
                 .courses
-                .push(DegreePlanCourse::catalog(key, title, 4.0));
+                .push(DegreePlanCourse::catalog(key, title, credits));
         }
-        persist(&state.data);
+        persist(&mut state);
         n
     };
     toast(
@@ -3480,15 +4034,16 @@ fn autofill_schedule(shell: &Rc<RefCell<Shell>>) {
         )
         .into_iter()
         .next()
-        .map(|s| s.courses)
+        .map(|suggestion| (suggestion.courses, suggestion.crns))
         .unwrap_or_default()
     };
-    if keys.is_empty() {
+    if keys.0.is_empty() {
         toast(shell, "No degree-plan courses to add for this term");
         return;
     }
-    for key in &keys {
-        add_course_to_plan(shell, key);
+    for (offset, key) in keys.0.iter().enumerate() {
+        let crn = keys.1.get(offset).and_then(|crn| crn.as_deref());
+        add_pinned_course(shell, key, crn);
     }
     refresh(shell);
 }
@@ -3576,7 +4131,7 @@ fn import_degree(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 drop(state);
                 drop(shell_ref);
                 select_area(&shell, 6);
@@ -3618,7 +4173,7 @@ fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                 key: key.clone(),
                 saved_at: now_secs(),
             });
-            persist(&state.data);
+            persist(&mut state);
         }
     }
     toast(shell, "Saved");
@@ -3641,7 +4196,7 @@ fn remember_recent(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         },
     );
     state.data.recents.truncate(40);
-    persist(&state.data);
+    persist(&mut state);
 }
 
 fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &str) {
@@ -3677,7 +4232,7 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
             notify_on_waitlist: false,
             last_notified_at: None,
         });
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, "Watching that section");
 }
@@ -3689,7 +4244,7 @@ fn set_waitlist(shell: &Rc<RefCell<Shell>>, crn: &str, on: bool) {
         if let Some(item) = state.data.watchlist.iter_mut().find(|w| w.crn == crn) {
             item.notify_on_waitlist = on;
         }
-        persist(&state.data);
+        persist(&mut state);
     }
 }
 
@@ -3698,7 +4253,7 @@ fn remove_watch(shell: &Rc<RefCell<Shell>>, crn: &str) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.watchlist.retain(|w| w.crn != crn);
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3749,7 +4304,7 @@ fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
                     let id = state.data.add_degree_plan(plan);
                     state.degree = Some(id);
                     state.area = 6;
-                    persist(&state.data);
+                    persist(&mut state);
                 }
             } else if let Ok(html) = std::fs::read_to_string(&path) {
                 if let Some(id) = shell.borrow().state.borrow().degree {
@@ -3819,7 +4374,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
                 let mut state = shell.state.borrow_mut();
                 state.data.preferences.color_scheme = value;
                 apply_scheme(&state.data.preferences);
-                persist(&state.data);
+                persist(&mut state);
             }
         }
     });
@@ -3833,7 +4388,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.show_weekends = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     appearance.add(&weekends);
@@ -3862,7 +4417,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.auto_refresh_seats = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&auto);
@@ -3883,7 +4438,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.seat_check_minutes = row.value() as i32;
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&minutes);
@@ -3910,7 +4465,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.include_student_in_export = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&include);
@@ -3931,7 +4486,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_enabled = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&sync_on);
@@ -3956,7 +4511,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_path =
                 if text.is_empty() { None } else { Some(text) };
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&path_row);
@@ -4030,7 +4585,7 @@ fn greet(shell: &Rc<RefCell<Shell>>) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.preferences.has_completed_onboarding = true;
-        persist(&state.data);
+        persist(&mut state);
     });
     dialog.present(Some(&window));
 }
@@ -4052,7 +4607,7 @@ fn import_user(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data = imported;
-            persist(&state.data);
+            persist(&mut state);
         }
         refresh(&shell);
         toast(&shell, "Data imported");
@@ -4176,7 +4731,7 @@ fn check_seats(shell: &Rc<RefCell<Shell>>) {
                 let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
                 state.missing_watch = report.missing_ids.iter().cloned().collect();
                 state.data.watchlist = report.items;
-                persist(&state.data);
+                persist(&mut state);
                 report.alerts
             };
             if let Some(message) = error {
@@ -4225,16 +4780,99 @@ fn save_bytes(shell: &Rc<RefCell<Shell>>, name: &str, bytes: &[u8], message: &st
     });
 }
 
-fn persist(data: &UserData) {
-    let _ = store::save(data);
-    if data.preferences.folder_sync_enabled {
-        if let Some(dir) = &data.preferences.folder_sync_path {
+fn persist(state: &mut State) {
+    if let Ok((data, stamp)) = store::save_merging(&store::data_dir(), &state.data, &state.stamp) {
+        state.data = data;
+        state.stamp = stamp;
+    }
+    if state.data.preferences.folder_sync_enabled {
+        if let Some(dir) = &state.data.preferences.folder_sync_path {
             let dir = PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
-            let text = store::export_json(data, false);
+            let text = store::export_json(&state.data, false);
             let _ = std::fs::write(dir.join("user.json"), text);
         }
     }
+}
+
+/// Reloads `user.json` when another process writes it. Events are debounced so a
+/// temp-file rename settles into one read.
+fn watch_user_file(shell: &Rc<RefCell<Shell>>) {
+    let path = store::user_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let directory = gio::File::for_path(parent);
+    let Ok(monitor) = directory.monitor_directory(
+        gio::FileMonitorFlags::WATCH_MOVES,
+        None::<&gio::Cancellable>,
+    ) else {
+        return;
+    };
+    let generation = Rc::new(Cell::new(0u64));
+    let shell_for_events = shell.clone();
+    let generation_for_events = generation.clone();
+    monitor.connect_changed(move |_, file, other, event| {
+        if !matches!(
+            event,
+            gio::FileMonitorEvent::Changed
+                | gio::FileMonitorEvent::ChangesDoneHint
+                | gio::FileMonitorEvent::Created
+                | gio::FileMonitorEvent::Deleted
+                | gio::FileMonitorEvent::Renamed
+                | gio::FileMonitorEvent::Moved
+                | gio::FileMonitorEvent::MovedIn
+        ) {
+            return;
+        }
+        let touches_user = basename_is_user_json(file) || other.is_some_and(basename_is_user_json);
+        if !touches_user {
+            return;
+        }
+        let next = generation_for_events.get().wrapping_add(1);
+        generation_for_events.set(next);
+        let generation = generation_for_events.clone();
+        let shell = shell_for_events.clone();
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            if generation.get() != next {
+                return glib::ControlFlow::Break;
+            }
+            apply_external_file(&shell);
+            glib::ControlFlow::Break
+        });
+    });
+    shell.borrow_mut().user_monitor = Some(monitor);
+}
+
+fn basename_is_user_json(file: &gio::File) -> bool {
+    file.basename()
+        .as_deref()
+        .is_some_and(|name| name == std::ffi::OsStr::new("user.json"))
+}
+
+fn apply_external_file(shell: &Rc<RefCell<Shell>>) {
+    {
+        let shell_ref = shell.borrow();
+        shell_ref
+            .reload_pane_share
+            .set(content_pane_share(&shell_ref.content));
+    }
+    let (data, stamp) = {
+        let shell = shell.borrow();
+        let state = shell.state.borrow();
+        (state.data.clone(), state.stamp.clone())
+    };
+    let Ok(Some((data, stamp))) = store::fold_external(&store::data_dir(), &data, &stamp) else {
+        return;
+    };
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        state.data = data;
+        state.stamp = stamp;
+    }
+    refresh(shell);
 }
 
 fn pull_folder(data: &mut UserData) {
@@ -4415,6 +5053,44 @@ fn toast(shell: &Rc<RefCell<Shell>>, text: &str) {
     }
     let toast = adw::Toast::new(text);
     shell.borrow().toast.add_toast(toast);
+}
+
+fn level_filter(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("linked");
+    row.set_widget_name("course-level-filter");
+    let all = gtk::ToggleButton::with_label("All");
+    let undergrad = gtk::ToggleButton::with_label("Undergrad");
+    let grad = gtk::ToggleButton::with_label("Grad");
+    undergrad.set_group(Some(&all));
+    grad.set_group(Some(&all));
+    match filters.course_level {
+        search::CourseLevel::Undergrad => undergrad.set_active(true),
+        search::CourseLevel::Grad => grad.set_active(true),
+        search::CourseLevel::All => all.set_active(true),
+    }
+    for (button, level) in [
+        (all, search::CourseLevel::All),
+        (undergrad, search::CourseLevel::Undergrad),
+        (grad, search::CourseLevel::Grad),
+    ] {
+        button.connect_toggled({
+            let shell = shell.clone();
+            move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                let current = shell.borrow().state.borrow().filters.course_level;
+                if current == level {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().filters.course_level = level;
+                refresh(&shell);
+            }
+        });
+        row.append(&button);
+    }
+    row.upcast()
 }
 
 fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {
@@ -4669,7 +5345,7 @@ fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePre
             change(&mut prefs);
             plan.preferences = Some(prefs.normalized());
             plan.updated_at = now_secs();
-            persist(&state.data);
+            persist(&mut state);
         }
         state.generated.clear();
     }
@@ -4683,13 +5359,14 @@ fn replace_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         if window.widget_name().as_str() != name || !window.is_visible() {
             continue;
         }
-        let page = course_page(shell, key);
+        let page = course_page(shell, key, false);
+        page.set_vexpand(true);
         let clamp = adw::Clamp::new();
         clamp.set_maximum_size(760);
         clamp.set_tightening_threshold(480);
+        clamp.set_vexpand(true);
         clamp.set_child(Some(&page));
-        let scroll = gtk::ScrolledWindow::builder().child(&clamp).build();
-        window.set_content(Some(&scroll));
+        window.set_content(Some(&clamp));
     }
 }
 
@@ -4800,7 +5477,7 @@ fn install_drop(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 std::mem::drop(state);
                 std::mem::drop(shell_ref);
                 select_area(&dropped, 6);
@@ -4946,4 +5623,20 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod reload_layout {
+    use super::{pane_share_after_reload, sidebar_after_reload};
+
+    #[test]
+    fn an_external_reload_keeps_the_sidebar_and_the_plan_list_width() {
+        assert_eq!(sidebar_after_reload(true, true), (true, true));
+        assert_eq!(sidebar_after_reload(false, false), (false, false));
+        assert_eq!(pane_share_after_reload(Some(0.41), 0.24), 0.41);
+        assert_eq!(pane_share_after_reload(Some(0.0), 0.24), 0.0);
+        assert_eq!(pane_share_after_reload(None, 0.24), 0.24);
+        assert_eq!(pane_share_after_reload(Some(0.95), 0.24), 0.7);
+        assert_eq!(pane_share_after_reload(Some(f64::NAN), 0.24), 0.24);
+    }
 }

@@ -1,0 +1,57 @@
+{
+  "plan": {
+    "terms": [
+      {
+        "term": "202710",
+        "courses": [
+          { "subject": "CS", "number": "4805" },
+          { "subject": "CS", "number": "2535" },
+          { "subject": "CS", "number": "2700" },
+          { "subject": "CS", "number": "4130" },
+          { "subject": "CS", "number": "2701" }
+        ]
+      },
+      { "term": "202730", "courses": [] }
+    ]
+  },
+  "expected": {
+    "moves": [
+      {
+        "subject": "CS",
+        "number": "4805",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 4805 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "2535",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 2535 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "2700",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 2700 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "4130",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 4130 has no sections in 202710."
+      },
+      {
+        "subject": "CS",
+        "number": "2701",
+        "from_term": "202710",
+        "to_term": "202730",
+        "reason": "CS 2701 has no sections in 202710."
+      }
+    ],
+    "unresolved": []
+  }
+}

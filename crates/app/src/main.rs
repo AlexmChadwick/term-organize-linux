@@ -88,7 +88,8 @@ fn seat_watch() -> i32 {
         eprintln!("termorganize: no catalog for seat watch");
         return 1;
     };
-    let mut data = store::load();
+    let dir = store::data_dir();
+    let (mut data, stamp) = store::load_stamped(&dir);
     let watched = data.watchlist.clone();
     let client = BannerClient::default();
     let mut live: HashMap<String, Vec<CourseSection>> = HashMap::new();
@@ -143,7 +144,7 @@ fn seat_watch() -> i32 {
             *slot = updated.clone();
         }
     }
-    let _ = store::save(&data);
+    let _ = store::save_merging(&dir, &data, &stamp);
     for alert in &report.alerts {
         let _ = std::process::Command::new("notify-send")
             .args(["--app-name=Term Organize", &alert.title(), &alert.body()])

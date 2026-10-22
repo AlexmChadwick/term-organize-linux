@@ -57,6 +57,8 @@ pub struct BannerSection {
     #[serde(default)]
     pub credit_hour_low: Option<f64>,
     #[serde(default)]
+    pub credit_hour_indicator: Option<String>,
+    #[serde(default)]
     pub meetings_faculty: Option<Vec<BannerMeetingFaculty>>,
     #[serde(default)]
     pub section_attributes: Option<Vec<BannerAttribute>>,
@@ -320,9 +322,39 @@ pub fn make_sections(
                 description: prior.and_then(|p| p.description.clone()),
                 prereqs: prior.and_then(|p| p.prereqs.clone()),
                 coreqs: prior.and_then(|p| p.coreqs.clone()),
+                credit_hours: section.credit_hours,
+                credit_hour_low: section.credit_hour_low,
+                credit_hour_high: section.credit_hour_high,
+                restrictions: prior.and_then(|p| p.restrictions.clone()),
             }
         })
         .collect()
+}
+
+fn credit_bounds(section: &BannerSection) -> (f64, f64, Option<f64>) {
+    let reported = section.credit_hours;
+    let low = section.credit_hour_low.or(reported).unwrap_or(0.0);
+    let high = section.credit_hour_high.unwrap_or(low);
+    (low, high, reported)
+}
+
+/// A later section must not erase a variable range. A variable section widens
+/// an existing range. A fixed section leaves a variable range alone.
+fn keep_credit_range(course: &mut Course, low: f64, high: f64, reported: Option<f64>) {
+    let incoming = high - low > 1e-6;
+    if course.is_variable_credit() && incoming {
+        course.min_credits = course.min_credits.min(low);
+        course.max_credits = course.max_credits.max(high);
+        if course.credit_hours.is_none() {
+            course.credit_hours = reported;
+        }
+        return;
+    }
+    if !course.is_variable_credit() && incoming {
+        course.min_credits = low;
+        course.max_credits = high;
+        course.credit_hours = reported.or(course.credit_hours);
+    }
 }
 
 pub fn stub_courses(banner: &[BannerSection]) -> (Vec<Course>, Vec<AttributeInfo>) {
@@ -346,6 +378,8 @@ pub fn stub_courses(banner: &[BannerSection]) -> (Vec<Course>, Vec<AttributeInfo
         }
         let is_topics = section_attributes.iter().any(|a| a.code == "TOPC");
         if let Some(existing) = courses.get_mut(&key) {
+            let (low, high, reported) = credit_bounds(section);
+            keep_credit_range(existing, low, high, reported);
             let mut codes: Vec<String> = existing
                 .attributes
                 .iter()
@@ -366,10 +400,7 @@ pub fn stub_courses(banner: &[BannerSection]) -> (Vec<Course>, Vec<AttributeInfo
             }
         } else {
             let special = title.to_ascii_lowercase().contains("special topics") || is_topics;
-            let low = section
-                .credit_hour_low
-                .or(section.credit_hours)
-                .unwrap_or(0.0);
+            let (low, high, reported) = credit_bounds(section);
             courses.insert(
                 key.clone(),
                 Course {
@@ -382,7 +413,8 @@ pub fn stub_courses(banner: &[BannerSection]) -> (Vec<Course>, Vec<AttributeInfo
                     },
                     description: String::new(),
                     min_credits: low,
-                    max_credits: section.credit_hour_high.unwrap_or(low),
+                    max_credits: high,
+                    credit_hours: reported,
                     attributes: {
                         let mut codes: Vec<String> = section_attributes
                             .iter()
@@ -453,6 +485,7 @@ pub fn merge(
             if let Some(mut known) = previous_courses.get(&stub.key()).cloned() {
                 known.min_credits = stub.min_credits;
                 known.max_credits = stub.max_credits;
+                known.credit_hours = stub.credit_hours.or(known.credit_hours);
                 known.attributes = stub.attributes;
                 known.special_topics = known.special_topics || stub.special_topics;
                 return known;
@@ -460,6 +493,7 @@ pub fn merge(
             if let Some(mut borrowed) = knowledge.get(&stub.key()).cloned() {
                 borrowed.min_credits = stub.min_credits;
                 borrowed.max_credits = stub.max_credits;
+                borrowed.credit_hours = stub.credit_hours.or(borrowed.credit_hours);
                 borrowed.attributes = stub.attributes;
                 borrowed.special_topics = borrowed.special_topics || stub.special_topics;
                 borrowed.postreqs = vec![];
@@ -524,7 +558,35 @@ pub fn apply_course_refresh(
         .map(|s| (s.crn.clone(), s.clone()))
         .collect();
     let fresh = make_sections(banner, &previous);
-    catalog.sections.retain(|s| &s.course_key() != course);
+    let topics = catalog
+        .courses
+        .iter()
+        .any(|listed| &listed.key() == course && listed.special_topics)
+        || banner.iter().any(|section| {
+            section
+                .section_attributes
+                .as_ref()
+                .is_some_and(|attributes| {
+                    attributes.iter().any(|attribute| attribute.code == "TOPC")
+                })
+                || section
+                    .course_title
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains("special topics")
+        });
+    if topics {
+        // Sections that share a number are different topics. A refresh replaces
+        // the CRNs it names and leaves every other CRN of that number in place.
+        let replaced: std::collections::HashSet<String> =
+            fresh.iter().map(|section| section.crn.clone()).collect();
+        catalog
+            .sections
+            .retain(|section| &section.course_key() != course || !replaced.contains(&section.crn));
+    } else {
+        catalog.sections.retain(|s| &s.course_key() != course);
+    }
     catalog.sections.extend(fresh);
     catalog.sections.sort_by(|a, b| {
         a.course_key()
