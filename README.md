@@ -6,6 +6,13 @@ Unofficial Northeastern course search, schedule builder, and degree-plan checker
 
 Course information is © Northeastern University. This program is free software under the GNU Affero General Public License v3.0 only. It is an independent Linux adaptation of [Term Organize](https://github.com/AlexmChadwick/Northeastern-Term-Organize), which is itself based on [SearchNEU](https://github.com/sandboxnu/searchneu) (AGPL-3.0). See `LICENSE` and `NOTICE.md`.
 
+## Install
+
+Term Organize is an early beta. It is unofficial and not affiliated with Northeastern University.
+
+- **Download:** when available, the [Releases page](https://github.com/AlexmChadwick/term-organize-linux/releases) has a signed Flatpak and AppImage. See "Downloads" below to verify and install them.
+- **Build from source:** install Rust (cargo) and the GTK 4 and libadwaita development packages, then follow "Build" below.
+
 ## What it does
 
 One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 and Spring 2027 snapshots (`data/catalog/term-202710.catalog` and `data/catalog/term-202730.catalog`) are enough to search, build schedules, and read sections offline. A fresh launch opens the newest bundled term; the header lists every bundled term. It keeps instructor addresses on `northeastern.edu` and `neu.edu` (and their subdomains) and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
