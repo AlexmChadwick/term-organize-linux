@@ -76,6 +76,7 @@ fn plan_with(keys: &[&str], selected: &[&str]) -> SchedulePlan {
             color_index: offset as i32,
             pinned_crn: None,
             degree_row_id: None,
+            credits: None,
         });
     }
     plan
@@ -200,6 +201,7 @@ fn removing_one_topic_leaves_the_other_pin() {
             color_index: 1,
             pinned_crn: Some("55555".into()),
             degree_row_id: None,
+            credits: None,
         });
         plan.selected_crns = vec!["44444".into(), "55555".into()];
     });

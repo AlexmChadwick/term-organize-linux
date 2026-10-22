@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,10 +6,13 @@ use term_organize_mcp::server::TermOrganize;
 use term_organize_mcp::tools;
 use term_organize_mcp::{resolve_mcp_data_dir, INSTRUCTIONS};
 use termorganize_core::email::is_northeastern_address;
-use termorganize_core::model::{CourseKey, DegreePlanCourse, PlanSeason};
+use termorganize_core::model::{
+    CourseKey, DegreePlanCourse, PlanCourse, PlanSeason, ScheduleFilters, SchedulePlan,
+};
 use termorganize_core::planfile;
 use termorganize_core::store;
 use termorganize_core::UserData;
+use uuid::Uuid;
 
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -184,6 +188,7 @@ fn write_tools_round_trip_through_the_app_loader() {
             subject: "CS".into(),
             number: "2100".into(),
             crn: Some(crn.clone()),
+            credits: None,
             expected_revision: 1,
         },
     )
@@ -289,6 +294,7 @@ fn write_tools_round_trip_through_the_app_loader() {
             subject: "ZZ".into(),
             number: "9999".into(),
             crn: None,
+            credits: None,
             expected_revision: removed["revision"].as_u64().unwrap(),
         },
     )
@@ -419,6 +425,7 @@ fn read_only_hides_writes_and_annotations_match_the_spec() {
         "add_course",
         "move_course",
         "set_section",
+        "set_credits",
     ] {
         let annotations = tool(name).annotations.clone().unwrap();
         assert_eq!(annotations.destructive_hint, Some(false), "{name}");
@@ -430,6 +437,7 @@ fn read_only_hides_writes_and_annotations_match_the_spec() {
     assert!(names.contains(&"list_plans"));
     assert!(!names.contains(&"create_plan"));
     assert!(!names.contains(&"delete_plan"));
+    assert!(!names.contains(&"set_credits"));
     assert!(INSTRUCTIONS.contains("Not affiliated"));
     assert_eq!(
         resolve_mcp_data_dir(Some(dir.as_path()), Some("/tmp/ignored")),
@@ -774,6 +782,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject: subject.clone(),
             number: number.clone(),
             crn: Some(first.clone()),
+            credits: None,
             expected_revision: 1,
         },
     )
@@ -786,6 +795,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject: subject.clone(),
             number: number.clone(),
             crn: Some(second.clone()),
+            credits: None,
             expected_revision: added["revision"].as_u64().unwrap(),
         },
     )
@@ -836,6 +846,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject: subject.clone(),
             number: number.clone(),
             crn: Some(first.clone()),
+            credits: None,
             expected_revision: both["revision"].as_u64().unwrap(),
         },
     )
@@ -862,6 +873,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject: subject.clone(),
             number: number.clone(),
             crn: None,
+            credits: None,
             expected_revision: same_section["revision"].as_u64().unwrap(),
         },
     )
@@ -885,6 +897,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject: subject.clone(),
             number: number.clone(),
             crn: Some(first.clone()),
+            credits: None,
             expected_revision: 1,
         },
     )
@@ -910,6 +923,7 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
             subject,
             number,
             crn: None,
+            credits: None,
             expected_revision: kept["revision"].as_u64().unwrap(),
         },
     )
@@ -1037,4 +1051,230 @@ fn spring_only_course() -> CourseKey {
         })
         .map(|course| course.key())
         .expect("a course offered in Spring 2027 and not Fall 2026")
+}
+
+#[test]
+fn variable_credit_add_and_set_credits_follow_the_row_rules() {
+    let found = tools::search_courses(tools::SearchArgs {
+        term: "Fall 2026".into(),
+        query: None,
+        subject: Some("CS".into()),
+        number: Some("8982".into()),
+        attribute: None,
+        limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
+    })
+    .unwrap();
+    let course = &found["courses"][0];
+    assert_eq!(course["credit_low"].as_f64().unwrap(), 1.0);
+    assert_eq!(course["credit_high"].as_f64().unwrap(), 8.0);
+    assert_eq!(course["chosen_credits"].as_f64().unwrap(), 4.0);
+    assert!(course["credits"].as_str().unwrap().contains('1'));
+    assert!(course["credits"].as_str().unwrap().contains('8'));
+
+    let detail = tools::get_course(tools::CourseArgs {
+        term: "Fall 2026".into(),
+        subject: "CS".into(),
+        number: "8982".into(),
+    })
+    .unwrap();
+    let crns: Vec<String> = detail["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|section| section["crn"].as_str().map(str::to_string))
+        .collect();
+    assert!(!crns.is_empty());
+
+    let dir = temp_dir("credits");
+    let created = tools::create_plan(
+        &dir,
+        tools::CreatePlanArgs {
+            name: "Variable credits".into(),
+            terms: Some(vec!["Fall 2026".into()]),
+        },
+    )
+    .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let added = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: Some(crns[0].clone()),
+            credits: None,
+            expected_revision: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        added["terms"][0]["courses"][0]["credits"].as_f64().unwrap(),
+        4.0
+    );
+    assert_eq!(
+        added["terms"][0]["courses"][0]["credit_low"]
+            .as_f64()
+            .unwrap(),
+        1.0
+    );
+    assert_eq!(
+        added["terms"][0]["courses"][0]["credit_high"]
+            .as_f64()
+            .unwrap(),
+        8.0
+    );
+    assert_eq!(added["revision"].as_u64().unwrap(), 2);
+
+    let too_high = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: None,
+            credits: Some(9.0),
+            expected_revision: 2,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(too_high.error, "invalid_argument");
+    assert!(too_high.message.contains("whole number from 1 to 8"));
+
+    let fractional = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: None,
+            credits: Some(4.5),
+            expected_revision: 2,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(fractional.error, "invalid_argument");
+    assert!(fractional.message.contains("whole number from 1 to 8"));
+
+    let fixed = tools::set_credits(
+        &dir,
+        tools::SetCreditsArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "2100".into(),
+            crn: None,
+            credits: 4.0,
+            expected_revision: 2,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(fixed.error, "invalid_argument", "{}", fixed.message);
+    assert!(fixed.message.contains("fixed credit"), "{}", fixed.message);
+
+    for value in [0.0, 9.0] {
+        let rejected = tools::set_credits(
+            &dir,
+            tools::SetCreditsArgs {
+                plan_id: id.clone(),
+                term: "Fall 2026".into(),
+                subject: "CS".into(),
+                number: "8982".into(),
+                crn: None,
+                credits: value,
+                expected_revision: 2,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(rejected.error, "invalid_argument");
+        assert!(rejected.message.contains("whole number from 1 to 8"));
+    }
+
+    let second = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: crns.get(1).cloned(),
+            credits: Some(2.0),
+            expected_revision: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(second["revision"].as_u64().unwrap(), 3);
+    let rows = second["terms"][0]["courses"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["credits"].as_f64().unwrap(), 4.0);
+    assert_eq!(rows[1]["credits"].as_f64().unwrap(), 2.0);
+
+    let ambiguous = tools::set_credits(
+        &dir,
+        tools::SetCreditsArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: None,
+            credits: 5.0,
+            expected_revision: 3,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(ambiguous.error, "invalid_argument");
+    assert!(ambiguous.message.contains("more than once"));
+
+    let mut data = store::load_user(&dir);
+    let row_id = data.degree_plans[0].terms[0].courses[0].id;
+    data.plans.push(SchedulePlan {
+        id: Uuid::new_v4(),
+        name: "Fall plan".into(),
+        term_code: "202710".into(),
+        courses: vec![PlanCourse {
+            key: CourseKey::parse("CS 8982").unwrap(),
+            is_required: true,
+            excluded_crns: HashSet::new(),
+            color_index: 0,
+            pinned_crn: Some(crns[0].clone()),
+            degree_row_id: Some(row_id),
+            credits: Some(4.0),
+        }],
+        selected_crns: vec![],
+        filters: ScheduleFilters::default(),
+        preferences: None,
+        favorite_combinations: vec![],
+        is_primary: true,
+        created_at: 0.0,
+        updated_at: 0.0,
+    });
+    store::save_user(&dir, &data).unwrap();
+
+    let updated = tools::set_credits(
+        &dir,
+        tools::SetCreditsArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: "CS".into(),
+            number: "8982".into(),
+            crn: Some(crns[0].clone()),
+            credits: 6.0,
+            expected_revision: 3,
+        },
+    )
+    .unwrap();
+    let rows = updated["terms"][0]["courses"].as_array().unwrap();
+    assert_eq!(rows[0]["credits"].as_f64().unwrap(), 6.0);
+    assert_eq!(rows[0]["crn"].as_str().unwrap(), crns[0]);
+    assert_eq!(rows[1]["credits"].as_f64().unwrap(), 2.0);
+    let linked = store::load_user(&dir);
+    assert_eq!(linked.plans[0].courses[0].credits, Some(6.0));
+    assert!((linked.degree_plans[0].terms[0].courses[0].credits - 6.0).abs() < 1e-9);
+    assert!((linked.degree_plans[0].terms[0].courses[1].credits - 2.0).abs() < 1e-9);
+    let _ = fs::remove_dir_all(&dir);
 }

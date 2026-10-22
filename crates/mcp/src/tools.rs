@@ -209,6 +209,21 @@ pub struct AddCourseArgs {
     pub number: String,
     #[serde(default)]
     pub crn: Option<String>,
+    /// Chosen credits for a variable-credit course. Omitted uses the catalog default.
+    #[serde(default)]
+    pub credits: Option<f64>,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetCreditsArgs {
+    pub plan_id: String,
+    pub term: String,
+    pub subject: String,
+    pub number: String,
+    #[serde(default)]
+    pub crn: Option<String>,
+    pub credits: f64,
     pub expected_revision: u64,
 }
 
@@ -615,7 +630,10 @@ pub fn add_course(dir: &Path, args: AddCourseArgs) -> Result<Value, ToolError> {
     let course = require_offered(index, &parsed.label, &args.subject, &args.number)?;
     let crn = checked_crn(index, course, args.crn.as_deref(), &parsed.label)?;
     let title = course.title.clone();
-    let credits = course.min_credits;
+    let credits = match args.credits {
+        Some(value) => chosen_credits(course, value)?,
+        None => course.default_credits(),
+    };
     let key = course.key();
     planfile::update_plan(dir, id, args.expected_revision, |plan| {
         if !plan
@@ -633,6 +651,105 @@ pub fn add_course(dir: &Path, args: AddCourseArgs) -> Result<Value, ToolError> {
     })
     .map_err(ToolError::from_plan)?;
     plan_value(dir, id)
+}
+
+pub fn set_credits(dir: &Path, args: SetCreditsArgs) -> Result<Value, ToolError> {
+    let id = parse_id(&args.plan_id)?;
+    let (index, parsed) = index_for(&args.term)?;
+    let course = require_offered(index, &parsed.label, &args.subject, &args.number)?;
+    let chosen = chosen_credits(course, args.credits)?;
+    let key = course.key();
+    let crn = args
+        .crn
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let row_id = std::cell::Cell::new(None);
+    planfile::update_plan(dir, id, args.expected_revision, |plan| {
+        let term = term_on_plan(plan, parsed.season, parsed.year)?;
+        let matches: Vec<usize> = term
+            .courses
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.key.as_ref() == Some(&key))
+            .map(|(index, _)| index)
+            .collect();
+        if matches.is_empty() {
+            return Err(format!(
+                "{} {} is not on {}.",
+                key.subject,
+                key.number,
+                term.name()
+            ));
+        }
+        let index = if matches.len() == 1 && crn.is_none() {
+            matches[0]
+        } else if matches.len() > 1 && crn.is_none() {
+            return Err(format!(
+                "{} {} is on {} more than once, each with its own section.",
+                key.subject,
+                key.number,
+                term.name()
+            ));
+        } else {
+            let crn = crn.unwrap_or("");
+            let Some(found) = matches
+                .iter()
+                .copied()
+                .find(|index| term.courses[*index].crn.as_deref() == Some(crn))
+            else {
+                return Err(format!(
+                    "{} {} with CRN {crn} is not on {}.",
+                    key.subject,
+                    key.number,
+                    term.name()
+                ));
+            };
+            found
+        };
+        term.courses[index].credits = chosen;
+        row_id.set(Some(term.courses[index].id));
+        Ok(())
+    })
+    .map_err(ToolError::from_plan)?;
+    if let Some(row) = row_id.get() {
+        if let Ok(mut data) = planfile::read_user(dir) {
+            let mut linked = false;
+            for schedule in &mut data.plans {
+                for course in &mut schedule.courses {
+                    if course.degree_row_id == Some(row) {
+                        course.credits = Some(chosen);
+                        linked = true;
+                    }
+                }
+            }
+            if linked {
+                let _ = termorganize_core::store::save_user(dir, &data);
+            }
+        }
+    }
+    plan_value(dir, id)
+}
+
+fn chosen_credits(course: &Course, value: f64) -> Result<f64, ToolError> {
+    use termorganize_core::model::credit_number;
+    if !course.is_variable_credit() {
+        return Err(ToolError::invalid(format!(
+            "{} {} has fixed credit.",
+            course.subject, course.number
+        )));
+    }
+    let low = credit_number(course.min_credits);
+    let high = credit_number(course.max_credits);
+    if (value - value.round()).abs() > 1e-6
+        || value + 1e-9 < course.min_credits
+        || value > course.max_credits + 1e-9
+    {
+        return Err(ToolError::invalid(format!(
+            "Credits must be a whole number from {low} to {high}."
+        )));
+    }
+    Ok(value.round())
 }
 
 pub fn remove_course(dir: &Path, args: RemoveCourseArgs) -> Result<Value, ToolError> {
@@ -898,11 +1015,14 @@ fn course_row(course: &DegreePlanCourse, index: Option<&CatalogIndex>) -> Value 
             .filter(|section| section.course_key() == *key)
             .map(section_json)
     });
+    let listed = index.and_then(|catalog| catalog.course(key));
     json!({
         "subject": key.subject,
         "number": key.number,
         "title": course.title,
         "credits": course.credits,
+        "credit_low": listed.map(|item| item.min_credits),
+        "credit_high": listed.map(|item| item.max_credits),
         "crn": course.crn,
         "section": section,
         "offered": offered,

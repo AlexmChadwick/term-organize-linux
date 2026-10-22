@@ -111,6 +111,7 @@ fn schedule_row(code: &str, pin: Option<&str>) -> PlanCourse {
         color_index: 0,
         pinned_crn: pin.map(str::to_string),
         degree_row_id: None,
+        credits: None,
     }
 }
 

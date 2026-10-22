@@ -22,6 +22,9 @@ pub fn course_json(course: &Course) -> Value {
         "credits": credits_text(course.min_credits, course.max_credits),
         "min_credits": course.min_credits,
         "max_credits": course.max_credits,
+        "credit_low": course.min_credits,
+        "credit_high": course.max_credits,
+        "chosen_credits": course.default_credits(),
         "attributes": course.attributes,
     })
 }

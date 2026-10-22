@@ -555,10 +555,16 @@ pub fn new_degree_plan_draft(
                 if let Some(pin) = pin {
                     fill_open_crn(&mut draft, position, id, pin);
                 }
+                if let Some(credits) = course.credits {
+                    set_degree_row_credits(&mut draft, id, credits);
+                }
                 continue;
             }
-            let mut added =
-                DegreePlanCourse::catalog(course.key.clone(), course.key.to_string(), 4.0);
+            let mut added = DegreePlanCourse::catalog(
+                course.key.clone(),
+                course.key.to_string(),
+                course.credits.unwrap_or(4.0),
+            );
             added.crn = pin;
             claimed.insert(added.id);
             draft.terms[position].courses.push(added);
@@ -764,6 +770,7 @@ fn sync_degree_rows(schedule: &mut SchedulePlan, rows: &[&DegreePlanCourse]) {
                 color_index: color,
                 pinned_crn: pin.clone(),
                 degree_row_id: Some(course.id),
+                credits: Some(course.credits),
             });
             if let Some(pin) = pin {
                 if !schedule.selected_crns.iter().any(|item| item == &pin) {
@@ -776,6 +783,7 @@ fn sync_degree_rows(schedule: &mut SchedulePlan, rows: &[&DegreePlanCourse]) {
         used.insert(index);
         let row = &mut schedule.courses[index];
         row.degree_row_id = Some(course.id);
+        row.credits = Some(course.credits);
         if pin.is_none() || chosen_crn(row.pinned_crn.as_deref()) == pin.as_deref() {
             continue;
         }
@@ -853,6 +861,101 @@ fn match_degree_row(
         consider(row);
     }
     best.map(|(_, id)| id)
+}
+
+fn set_degree_row_credits(plan: &mut DegreePlan, id: Uuid, credits: f64) {
+    for row in &mut plan.completed {
+        if row.id == id {
+            row.credits = credits;
+            return;
+        }
+    }
+    for term in &mut plan.terms {
+        for row in &mut term.courses {
+            if row.id == id {
+                row.credits = credits;
+                return;
+            }
+        }
+    }
+}
+
+/// Which row the user edited. The linked row on the other side gets the same value.
+pub enum CreditEdit {
+    DegreeRow(Uuid),
+    ScheduleRow { plan: Uuid, index: usize },
+}
+
+/// Writes the chosen credits on one row and on the row it is linked to.
+/// Rows are never merged.
+pub fn set_chosen_credits(data: &mut UserData, edit: CreditEdit, credits: f64) {
+    let credits = credits.round();
+    match edit {
+        CreditEdit::DegreeRow(id) => {
+            for plan in &mut data.degree_plans {
+                set_degree_row_credits(plan, id, credits);
+            }
+            for schedule in &mut data.plans {
+                for row in &mut schedule.courses {
+                    if row.degree_row_id == Some(id) {
+                        row.credits = Some(credits);
+                    }
+                }
+            }
+        }
+        CreditEdit::ScheduleRow { plan, index } => {
+            let link = {
+                let Some(schedule) = data.plans.iter_mut().find(|item| item.id == plan) else {
+                    return;
+                };
+                let Some(row) = schedule.courses.get_mut(index) else {
+                    return;
+                };
+                row.credits = Some(credits);
+                row.degree_row_id
+            };
+            if let Some(id) = link {
+                for plan in &mut data.degree_plans {
+                    set_degree_row_credits(plan, id, credits);
+                }
+            }
+        }
+    }
+}
+
+/// Fills a missing variable-credit choice with the default, and clamps a saved
+/// choice into a new range. A chosen value is not replaced with the default.
+/// Fixed-credit rows are left as they were saved.
+pub fn clamp_saved_credits(data: &mut UserData, courses: &[Course]) {
+    let find = |key: &CourseKey| courses.iter().find(|course| course.key() == *key);
+    for plan in &mut data.degree_plans {
+        let rows = plan.completed.iter_mut().chain(
+            plan.terms
+                .iter_mut()
+                .flat_map(|term| term.courses.iter_mut()),
+        );
+        for row in rows {
+            let Some(key) = row.key.clone() else { continue };
+            let Some(listed) = find(&key) else { continue };
+            if listed.is_variable_credit() {
+                row.credits = listed.clamp_credits(row.credits);
+            }
+        }
+    }
+    for schedule in &mut data.plans {
+        for row in &mut schedule.courses {
+            let Some(listed) = find(&row.key) else {
+                continue;
+            };
+            if !listed.is_variable_credit() {
+                continue;
+            }
+            row.credits = Some(match row.credits {
+                Some(value) => listed.clamp_credits(value),
+                None => listed.default_credits(),
+            });
+        }
+    }
 }
 
 fn fill_open_crn(draft: &mut DegreePlan, position: usize, id: Uuid, pin: String) {

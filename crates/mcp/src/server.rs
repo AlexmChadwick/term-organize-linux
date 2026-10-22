@@ -20,6 +20,7 @@ const WRITE_TOOLS: &[&str] = &[
     "remove_course",
     "move_course",
     "set_section",
+    "set_credits",
     "apply_reorganize",
     "delete_plan",
 ];
@@ -218,7 +219,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Add a catalog course to a term already on the plan. The same course may be added again, with or without a CRN. validation.duplicates reports a repeated course.",
+        description = "Add a catalog course to a term already on the plan. The same course may be added again, with or without a CRN. Optional credits sets the chosen value for a variable-credit course. validation.duplicates reports a repeated course.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -266,6 +267,18 @@ impl TermOrganize {
     )]
     fn set_section(&self, Parameters(args): Parameters<tools::SetSectionArgs>) -> CallToolResult {
         finish(tools::set_section(&self.data_dir, args))
+    }
+
+    #[tool(
+        description = "Set the chosen credits on one variable-credit degree-plan row. A CRN is required when that course is on the term more than once. Fixed-credit courses and values outside the range are invalid_argument.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn set_credits(&self, Parameters(args): Parameters<tools::SetCreditsArgs>) -> CallToolResult {
+        finish(tools::set_credits(&self.data_dir, args))
     }
 
     #[tool(

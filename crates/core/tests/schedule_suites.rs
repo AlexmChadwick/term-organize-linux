@@ -122,6 +122,9 @@ fn section(
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
     }
 }
 
@@ -250,6 +253,7 @@ fn plan_with(codes: &[&str], selected: &[&str]) -> SchedulePlan {
 
             pinned_crn: None,
             degree_row_id: None,
+            credits: None,
         });
     }
     plan.selected_crns = selected.iter().map(|crn| (*crn).to_string()).collect();
@@ -264,6 +268,7 @@ fn listed_course(subject: &str, number: &str, credits: f64) -> Course {
         description: String::new(),
         min_credits: credits,
         max_credits: credits,
+        credit_hours: None,
         attributes: vec![],
         prereqs: None,
         coreqs: None,
@@ -1183,6 +1188,7 @@ fn plansSavedBeforePreferencesExistStillLoad() {
 
         pinned_crn: None,
         degree_row_id: None,
+        credits: None,
     }];
     let mut value = serde_json::to_value(&plan).unwrap();
     assert!(
@@ -3396,6 +3402,7 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
 
             pinned_crn: None,
             degree_row_id: None,
+            credits: None,
         },
         PlanCourse {
             key: key("MATH", "2331"),
@@ -3405,6 +3412,7 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
 
             pinned_crn: None,
             degree_row_id: None,
+            credits: None,
         },
     ];
     let context = schedule::preferences_context(&plan, Some(index));
@@ -3447,6 +3455,7 @@ fn excludedSectionsDontOfferTheirInstructors() {
 
         pinned_crn: None,
         degree_row_id: None,
+        credits: None,
     }];
     let everyone = schedule::preferences_context(&plan, Some(index)).instructors;
     plan.courses[0].excluded_crns = index

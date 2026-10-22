@@ -232,6 +232,8 @@ A chosen CRN stays on the course. A pinned course moves only when the destinatio
       "number": "2100",
       "title": "Program Design and Implementation 1",
       "credits": 4,
+      "credit_low": 4,
+      "credit_high": 4,
       "crn": "12345",
       "section": {},
       "offered": true
@@ -257,7 +259,11 @@ A chosen CRN stays on the course. A pinned course moves only when the destinatio
 
 ### add_course
 
-`plan_id`, `term`, `subject`, `number`, optional `crn`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. A second copy is always accepted, with or without a CRN, including the same CRN twice. `validation.duplicates` lists each repeated course as `<subject> <number> appears more than once. Each copy still counts.` A repeat is two copies with no distinct sections, or the same CRN twice. Two different CRNs, or a title containing "topic", is not a duplicate. Returns the get_plan object.
+`plan_id`, `term`, `subject`, `number`, optional `crn`, optional `credits`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. A second copy is always accepted, with or without a CRN, including the same CRN twice. `validation.duplicates` lists each repeated course as `<subject> <number> appears more than once. Each copy still counts.` A repeat is two copies with no distinct sections, or the same CRN twice. Two different CRNs, or a title containing "topic", is not a duplicate. For a variable-credit course, omitted `credits` uses Banner `creditHours` when that value is inside the range, and the low value otherwise. `credits` on a fixed-credit course, or outside the range, is `invalid_argument`. Returns the get_plan object. Each course includes `credits` (the chosen value), `credit_low`, and `credit_high`.
+
+### set_credits
+
+`plan_id`, `term`, `subject`, `number`, optional `crn`, `credits`, `expected_revision`. Sets the chosen credits on one row. When that course is on the term more than once, `crn` is required, the same rule as `remove_course`. A fixed-credit course, a fractional value, or a value outside low through high is `invalid_argument`. Returns the get_plan object.
 
 ### remove_course
 

@@ -216,9 +216,17 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         window.present();
         return;
     };
-    let (mut data, stamp) = store::load_stamped(&store::data_dir());
+    let (mut data, mut stamp) = store::load_stamped(&store::data_dir());
     if data.preferences.selected_term_code.is_none() {
         data.preferences.selected_term_code = Some(index.catalog.term.code.clone());
+    }
+    let loaded = data.clone();
+    planlogic::clamp_saved_credits(&mut data, &index.catalog.courses);
+    if data != loaded {
+        if let Ok((saved, next)) = store::save_merging(&store::data_dir(), &data, &stamp) {
+            data = saved;
+            stamp = next;
+        }
     }
     pull_folder(&mut data);
     apply_scheme(&data.preferences);
@@ -1804,31 +1812,54 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         snapshot
             .courses
             .iter()
-            .map(|(key, _)| key.clone())
+            .map(|course| course.key.clone())
             .collect(),
     );
-    for (key, required) in &snapshot.courses {
+    let schedule_id = snapshot.plan.as_ref().map(|plan| plan.id);
+    for course in &snapshot.courses {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_top(6);
         row.set_margin_bottom(6);
         row.set_margin_start(8);
         row.set_margin_end(8);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_hexpand(true);
         let label = gtk::Label::new(Some(&format!(
             "{}{}",
-            key,
-            if *required { "" } else { " · optional" }
+            course.key,
+            if course.required { "" } else { " · optional" }
         )));
-        label.set_hexpand(true);
         label.set_xalign(0.0);
-        row.append(&label);
+        text.append(&label);
+        if let (Some(plan_id), Some((value, low, high))) = (schedule_id, course.credits) {
+            let index = course.index;
+            let shell_spin = shell.clone();
+            text.append(&gap::credit_spin(low, high, value, move |chosen| {
+                {
+                    let shell_ref = shell_spin.borrow();
+                    let mut state = shell_ref.state.borrow_mut();
+                    planlogic::set_chosen_credits(
+                        &mut state.data,
+                        planlogic::CreditEdit::ScheduleRow {
+                            plan: plan_id,
+                            index,
+                        },
+                        chosen,
+                    );
+                    persist(&mut state);
+                }
+                refresh(&shell_spin);
+            }));
+        }
+        row.append(&text);
         let remove = gtk::Button::with_label("Remove");
         let shell_remove = shell.clone();
-        let key_remove = key.clone();
+        let key_remove = course.key.clone();
         remove.connect_clicked(move |_| remove_plan_course(&shell_remove, &key_remove));
         row.append(&remove);
         let item = gtk::ListBoxRow::new();
         item.set_child(Some(&row));
-        let key_menu = key.clone();
+        let key_menu = course.key.clone();
         attach_context_menu(
             &item,
             vec![
@@ -1966,10 +1997,18 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     paned.upcast()
 }
 
+struct ScheduleCourseLine {
+    index: usize,
+    key: String,
+    required: bool,
+    /// Chosen value, low, and high for a variable-credit row.
+    credits: Option<(f64, f64, f64)>,
+}
+
 struct ScheduleSnap {
     plans: Vec<(Uuid, String, usize, bool)>,
     plan: Option<SchedulePlan>,
-    courses: Vec<(String, bool)>,
+    courses: Vec<ScheduleCourseLine>,
     pref_summary: String,
     generated: Vec<SchedLine>,
     picked: usize,
@@ -2022,7 +2061,26 @@ fn schedule_snapshot(shell: &Rc<RefCell<Shell>>) -> ScheduleSnap {
         .map(|p| {
             p.courses
                 .iter()
-                .map(|c| (c.key.to_string(), c.is_required))
+                .enumerate()
+                .map(|(index, course)| {
+                    let credits = state.index.course(&course.key).and_then(|listed| {
+                        if !listed.is_variable_credit() {
+                            return None;
+                        }
+                        let value = course.credits.unwrap_or_else(|| listed.default_credits());
+                        Some((
+                            listed.clamp_credits(value),
+                            listed.min_credits,
+                            listed.max_credits,
+                        ))
+                    });
+                    ScheduleCourseLine {
+                        index,
+                        key: course.key.to_string(),
+                        required: course.is_required,
+                        credits,
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -3086,6 +3144,17 @@ fn add_course_to_plan(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
 
 fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&str>) {
     let known = shell.borrow().state.borrow().index.course(key).is_some();
+    let chosen_credits = shell
+        .borrow()
+        .state
+        .borrow()
+        .index
+        .course(key)
+        .and_then(|course| {
+            course
+                .is_variable_credit()
+                .then_some(course.default_credits())
+        });
     if !known {
         toast(shell, "That course isn’t in this term");
         return;
@@ -3129,6 +3198,7 @@ fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&s
                     color_index: color,
                     pinned_crn: pin.clone(),
                     degree_row_id: None,
+                    credits: chosen_credits,
                 });
                 if let Some(pin) = pin {
                     if !plan.selected_crns.iter().any(|item| item == &pin) {
@@ -3455,7 +3525,7 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
         let credits = state
             .index
             .course(&key)
-            .map(|c| c.max_credits)
+            .map(|c| c.default_credits())
             .unwrap_or(4.0);
         let Some(id) = active_degree_id(&state) else {
             return;
@@ -3500,6 +3570,12 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
         let requirements = state.requirements.get(&id).cloned();
         let index_courses: HashSet<CourseKey> =
             state.index.courses.iter().map(|c| c.key()).collect();
+        let credit_for: HashMap<CourseKey, f64> = state
+            .index
+            .courses
+            .iter()
+            .map(|course| (course.key(), course.default_credits()))
+            .collect();
         let year = state.index.catalog.term.calendar_year();
         let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) else {
             return;
@@ -3536,9 +3612,10 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
         let last = plan.terms.len() - 1;
         for key in missing {
             let title = key.to_string();
+            let credits = credit_for.get(&key).copied().unwrap_or(4.0);
             plan.terms[last]
                 .courses
-                .push(DegreePlanCourse::catalog(key, title, 4.0));
+                .push(DegreePlanCourse::catalog(key, title, credits));
         }
         persist(&mut state);
         n
