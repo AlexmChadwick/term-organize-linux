@@ -10,6 +10,7 @@ use termorganize_core::banner::{self, BannerClient};
 use termorganize_core::course_info::CourseInfo;
 use termorganize_core::degree_audit::{AuditStatus, DegreeAudit, DegreeCourseAttributes};
 use termorganize_core::degree_format;
+use termorganize_core::editing;
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::legal;
 use termorganize_core::links::AppLink;
@@ -2226,21 +2227,47 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
         main.append(&group);
     }
+    for listing in &snap.listings {
+        main.append(&audit_listing_row(shell, listing));
+    }
     main.append(&gap::equivalence_section(shell));
     main.append(&gap::petition_section(shell));
     main.append(&heading_label("Semesters"));
     main.append(&gap::semester_section(shell));
+    let add_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let add = gtk::Entry::builder()
-        .placeholder_text("Add CS 3000 to the last semester")
+        .placeholder_text("Add a course, such as CS 3000")
+        .hexpand(true)
         .build();
-    add.connect_activate({
+    let add_crn = gtk::Entry::builder()
+        .placeholder_text("CRN")
+        .width_chars(8)
+        .build();
+    let add_button = gtk::Button::with_label("Add");
+    let submit_add = {
         let shell = shell.clone();
-        move |entry| {
-            add_degree_course(&shell, &entry.text());
-            entry.set_text("");
+        let add = add.clone();
+        let add_crn = add_crn.clone();
+        move || {
+            if add_degree_course(&shell, &add.text(), &add_crn.text()) {
+                add.set_text("");
+                add_crn.set_text("");
+            }
         }
+    };
+    add.connect_activate({
+        let submit_add = submit_add.clone();
+        move |_| submit_add()
     });
-    main.append(&add);
+    add_crn.connect_activate({
+        let submit_add = submit_add.clone();
+        move |_| submit_add()
+    });
+    add_button.connect_clicked(move |_| submit_add());
+    add_row.append(&add);
+    add_row.append(&add_crn);
+    add_row.append(&add_button);
+    main.append(&add_row);
     let clamp = adw::Clamp::new();
     clamp.set_maximum_size(880);
     clamp.set_tightening_threshold(520);
@@ -2254,6 +2281,11 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     paned.upcast()
 }
 
+struct AuditListing {
+    key: CourseKey,
+    on_plan: bool,
+}
+
 struct DegreeSnap {
     plans: Vec<(Uuid, String)>,
     id: Option<Uuid>,
@@ -2261,6 +2293,7 @@ struct DegreeSnap {
     totals: String,
     checks: Vec<String>,
     audit: Vec<String>,
+    listings: Vec<AuditListing>,
     catalog_path: String,
 }
 
@@ -2282,6 +2315,7 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
             totals: String::new(),
             checks: vec![],
             audit: vec![],
+            listings: vec![],
             catalog_path: state.catalog_path.clone(),
         };
     };
@@ -2327,6 +2361,7 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
         }
     }
     let mut audit_lines = Vec::new();
+    let mut listings: Vec<AuditListing> = Vec::new();
     if let Some(requirements) = state.requirements.get(&plan.id) {
         let audit = DegreeAudit::run(
             plan,
@@ -2365,6 +2400,38 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
                 }
             ));
         }
+        let on_plan: HashSet<CourseKey> = plan
+            .completed
+            .iter()
+            .chain(plan.terms.iter().flat_map(|term| term.courses.iter()))
+            .filter_map(|course| course.key.clone())
+            .collect();
+        let mut ranked = Vec::new();
+        for rule in audit.rule_results() {
+            let open = rule.status == AuditStatus::Missing || rule.status == AuditStatus::Partial;
+            for key in rule.rule.listed_courses() {
+                ranked.push((on_plan.contains(&key), open, key));
+            }
+        }
+        ranked.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.cmp(&left.1)));
+        let mut seen = HashSet::new();
+        for (on_plan, open, key) in ranked {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if !on_plan && !open {
+                continue;
+            }
+            let repeats = listings.iter().filter(|item| item.on_plan).count();
+            let fresh = listings.iter().filter(|item| !item.on_plan).count();
+            if on_plan && repeats >= 12 {
+                continue;
+            }
+            if !on_plan && fresh >= 6 {
+                continue;
+            }
+            listings.push(AuditListing { key, on_plan });
+        }
     }
     DegreeSnap {
         plans,
@@ -2377,6 +2444,7 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
         ),
         checks,
         audit: audit_lines,
+        listings,
         catalog_path: state.catalog_path.clone(),
     }
 }
@@ -3394,38 +3462,148 @@ fn add_semester(shell: &Rc<RefCell<Shell>>) {
     refresh(shell);
 }
 
-fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
+fn audit_listing_row(shell: &Rc<RefCell<Shell>>, listing: &AuditListing) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let label = gtk::Label::new(Some(&listing.key.to_string()));
+    label.set_xalign(0.0);
+    let crn = gtk::Entry::builder()
+        .placeholder_text("CRN")
+        .width_chars(8)
+        .build();
+    let button = gtk::Button::with_label(if listing.on_plan {
+        "Add again"
+    } else {
+        "Add to plan"
+    });
+    let submit = {
+        let shell = shell.clone();
+        let crn = crn.clone();
+        let code = listing.key.to_string();
+        move || {
+            if add_degree_course(&shell, &code, &crn.text()) {
+                crn.set_text("");
+            }
+        }
+    };
+    crn.connect_activate({
+        let submit = submit.clone();
+        move |_| submit()
+    });
+    button.connect_clicked(move |_| submit());
+    row.append(&label);
+    row.append(&crn);
+    row.append(&button);
+    row.upcast()
+}
+
+fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str, crn_text: &str) -> bool {
     let Some(key) = CourseKey::parse(text) else {
         toast(shell, "Use a course code like CS 3000");
-        return;
+        return false;
     };
-    {
+    let outcome = {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         let title = state
             .index
             .course(&key)
-            .map(|c| c.title.clone())
+            .map(|course| course.title.clone())
             .unwrap_or_else(|| key.to_string());
         let credits = state
             .index
             .course(&key)
-            .map(|c| c.max_credits)
+            .map(|course| course.max_credits)
             .unwrap_or(4.0);
         let Some(id) = active_degree_id(&state) else {
-            return;
+            return false;
         };
         state.degree = Some(id);
-        if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
-            if plan.terms.is_empty() {
-                plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
-            }
-            let last = plan.terms.len() - 1;
-            plan.terms[last]
-                .courses
-                .push(DegreePlanCourse::catalog(key, title, credits));
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == id)
+        else {
+            return false;
+        };
+        if plan.terms.is_empty() {
+            plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
         }
-        persist(&state.data);
+        let crn = editing::clean_crn(Some(crn_text));
+        let term_id =
+            editing::term_with(&key, plan).unwrap_or_else(|| plan.terms.last().unwrap().id);
+        let term_name = plan
+            .terms
+            .iter()
+            .find(|term| term.id == term_id)
+            .map(|term| term.name())
+            .unwrap_or_default();
+        if let Some(reason) = editing::block_reason(plan, &key, crn.as_deref(), None) {
+            Err(reason)
+        } else {
+            let mut course = DegreePlanCourse::catalog(key.clone(), title, credits);
+            course.crn = crn.clone();
+            if editing::try_add(course, term_id, plan) {
+                persist(&state.data);
+                Ok((key, crn, term_name))
+            } else {
+                Err(format!("{key} could not be added."))
+            }
+        }
+    };
+    match outcome {
+        Ok((key, crn, term_name)) => {
+            let message = match crn {
+                Some(crn) => format!("Added {key} (CRN {crn}) to {term_name}."),
+                None => format!("Added {key} to {term_name}."),
+            };
+            toast(shell, &message);
+            refresh(shell);
+            true
+        }
+        Err(reason) => {
+            toast(shell, &reason);
+            false
+        }
+    }
+}
+
+fn save_degree_crn(shell: &Rc<RefCell<Shell>>, course_id: Uuid, text: &str) {
+    let rejected = {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        let Some(plan_id) = state
+            .degree
+            .or_else(|| state.data.degree_plans.first().map(|plan| plan.id))
+        else {
+            return;
+        };
+        let Some(plan) = state
+            .data
+            .degree_plans
+            .iter_mut()
+            .find(|plan| plan.id == plan_id)
+        else {
+            return;
+        };
+        if editing::set_selected_crn(course_id, Some(text), plan) {
+            persist(&state.data);
+            None
+        } else {
+            let key = plan
+                .completed
+                .iter()
+                .chain(plan.terms.iter().flat_map(|term| term.courses.iter()))
+                .find(|course| course.id == course_id)
+                .and_then(|course| course.key.clone());
+            Some(
+                key.and_then(|key| editing::block_reason(plan, &key, Some(text), Some(course_id)))
+                    .unwrap_or_else(|| "That CRN could not be saved.".into()),
+            )
+        }
+    };
+    if let Some(reason) = rejected {
+        toast(shell, &reason);
     }
     refresh(shell);
 }
