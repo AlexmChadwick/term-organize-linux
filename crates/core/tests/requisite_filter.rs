@@ -84,20 +84,26 @@ fn none_is_a_loaded_course_with_the_requisite_omitted() {
         campuses: vec![],
     });
 
-    let mut no_prereqs = SearchFilters::default();
-    no_prereqs.no_prerequisites = true;
+    let no_prereqs = SearchFilters {
+        no_prerequisites: true,
+        ..SearchFilters::default()
+    };
     let found = search::search(&query(no_prereqs.clone()), &index);
     assert_eq!(codes(&found), vec!["CS 1100", "CS 2501"]);
     assert_eq!(no_prereqs.active_count(), 1);
 
-    let mut no_coreqs = SearchFilters::default();
-    no_coreqs.no_corequisites = true;
+    let no_coreqs = SearchFilters {
+        no_corequisites: true,
+        ..SearchFilters::default()
+    };
     let found = search::search(&query(no_coreqs), &index);
     assert_eq!(codes(&found), vec!["CS 1100", "CS 1800", "CS 2500"]);
 
-    let mut both_filters = SearchFilters::default();
-    both_filters.no_prerequisites = true;
-    both_filters.no_corequisites = true;
+    let both_filters = SearchFilters {
+        no_prerequisites: true,
+        no_corequisites: true,
+        ..SearchFilters::default()
+    };
     let found = search::search(&query(both_filters.clone()), &index);
     assert_eq!(codes(&found), vec!["CS 1100"]);
     assert_eq!(both_filters.active_count(), 2);
