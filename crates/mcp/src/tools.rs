@@ -625,35 +625,6 @@ pub fn add_course(dir: &Path, args: AddCourseArgs) -> Result<Value, ToolError> {
         {
             return Err(format!("{} is not on this plan.", parsed.label));
         }
-        let existing: Vec<(bool, Option<String>)> = plan
-            .completed
-            .iter()
-            .filter(|row| row.key.as_ref() == Some(&key))
-            .map(|row| (false, row.crn.clone()))
-            .chain(plan.terms.iter().flat_map(|term| {
-                let here = term.season == parsed.season && term.year == parsed.year;
-                term.courses
-                    .iter()
-                    .filter(|row| row.key.as_ref() == Some(&key))
-                    .map(move |row| (here, row.crn.clone()))
-                    .collect::<Vec<_>>()
-            }))
-            .collect();
-        if !planlogic::repeated_course_allowed(
-            existing.iter().map(|(_, crn)| crn.as_deref()),
-            crn.as_deref(),
-        ) {
-            if existing
-                .iter()
-                .any(|(_, have)| planlogic::same_chosen_crn(have.as_deref(), crn.as_deref()))
-            {
-                return Err("That section is already on this plan.".into());
-            }
-            if existing.iter().any(|(here, _)| *here) {
-                return Err("That course is already on this term.".into());
-            }
-            return Err("That course is already on this plan.".into());
-        }
         let term = term_on_plan(plan, parsed.season, parsed.year)?;
         let mut row = DegreePlanCourse::catalog(key.clone(), title.clone(), credits);
         row.crn = crn.clone();
@@ -740,21 +711,6 @@ pub fn move_course(dir: &Path, args: MoveCourseArgs) -> Result<Value, ToolError>
             .iter()
             .position(|term| term.season == to.season && term.year == to.year)
             .ok_or_else(|| format!("{} is not on this plan.", to.label))?;
-        let existing: Vec<Option<String>> = plan.terms[to_index]
-            .courses
-            .iter()
-            .filter(|existing| existing.key.as_ref() == Some(&key))
-            .map(|existing| existing.crn.clone())
-            .collect();
-        if !planlogic::repeated_course_allowed(
-            existing.iter().map(|crn| crn.as_deref()),
-            row.crn.as_deref(),
-        ) {
-            return Err(format!(
-                "{} {} is already on {}.",
-                key.subject, key.number, to.label
-            ));
-        }
         plan.terms[to_index].courses.push(row);
         Ok(())
     })
@@ -994,7 +950,12 @@ fn validation(plan: &DegreePlan) -> Value {
             chosen.push(section);
         }
     }
-    json!({ "clashes": clashes, "not_offered": not_offered })
+    let mut duplicates: Vec<String> = planlogic::duplicate_keys(plan)
+        .into_iter()
+        .map(|key| planlogic::duplicate_copy_notice(&key))
+        .collect();
+    duplicates.sort();
+    json!({ "clashes": clashes, "not_offered": not_offered, "duplicates": duplicates })
 }
 
 fn term_code(term: &DegreePlanTerm) -> Option<String> {

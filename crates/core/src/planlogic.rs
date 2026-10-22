@@ -241,7 +241,35 @@ pub fn duplicate_keys(plan: &DegreePlan) -> HashSet<CourseKey> {
             duplicates.insert(key.clone());
         }
     }
+    for (index, course) in plan.completed.iter().enumerate() {
+        let Some(key) = &course.key else { continue };
+        if plan.completed[..index]
+            .iter()
+            .any(|other| repeats_course(key, other, course))
+        {
+            duplicates.insert(key.clone());
+        }
+    }
     duplicates
+}
+
+/// Header when one or more course numbers are repeated. Every copy still counts.
+pub fn duplicate_plan_notice(count: usize) -> String {
+    if count == 1 {
+        "1 course appears more than once in this plan. Each copy still counts.".into()
+    } else {
+        format!("{count} courses appear more than once in this plan. Each copy still counts.")
+    }
+}
+
+/// Toast when a course already on the plan is added again.
+pub fn already_in_plan_notice(term_name: &str) -> String {
+    format!("Already in {term_name}. Adding it again keeps both copies.")
+}
+
+/// One repeated course, for `validation.duplicates`.
+pub fn duplicate_copy_notice(key: &CourseKey) -> String {
+    format!("{key} appears more than once. Each copy still counts.")
 }
 
 fn counts_separately(a: &DegreePlanCourse, b: &DegreePlanCourse) -> bool {
@@ -296,19 +324,7 @@ pub fn schedule_suggestions(
             let mut accepted: Vec<(CourseKey, Option<String>)> = Vec::new();
             for course in &plan_term.courses {
                 let Some(key) = &course.key else { continue };
-                let earlier = plan
-                    .completed
-                    .iter()
-                    .filter(|other| other.key.as_ref() == Some(key))
-                    .map(|other| other.crn.as_deref())
-                    .chain(
-                        accepted
-                            .iter()
-                            .filter(|(prior, _)| prior == key)
-                            .map(|(_, crn)| crn.as_deref()),
-                    )
-                    .chain(already.iter().filter(|prior| *prior == key).map(|_| None));
-                if !repeated_course_allowed(earlier, course.crn.as_deref()) {
+                if already.contains(key) {
                     continue;
                 }
                 accepted.push((key.clone(), course.crn.clone()));
@@ -499,7 +515,6 @@ pub fn new_degree_plan_draft(
             })
             .collect();
     }
-    let done = draft.completed_keys();
     for plan in schedule_plans
         .iter()
         .filter(|p| p.is_primary && !p.courses.is_empty())
@@ -530,22 +545,23 @@ pub fn new_degree_plan_draft(
             draft.terms.push(DegreePlanTerm::new(season, year));
             draft.terms.len() - 1
         };
-        let present: HashSet<CourseKey> = draft.terms[position]
-            .courses
-            .iter()
-            .filter_map(|c| c.key.clone())
-            .collect();
+        let mut claimed = HashSet::new();
         for course in &plan.courses {
-            if present.contains(&course.key) || done.contains(&course.key) {
+            let pin = chosen_crn(course.pinned_crn.as_deref()).map(str::to_string);
+            if let Some(id) =
+                match_degree_row(&draft, position, &course.key, pin.as_deref(), &claimed)
+            {
+                claimed.insert(id);
+                if let Some(pin) = pin {
+                    fill_open_crn(&mut draft, position, id, pin);
+                }
                 continue;
             }
-            draft.terms[position]
-                .courses
-                .push(DegreePlanCourse::catalog(
-                    course.key.clone(),
-                    course.key.to_string(),
-                    4.0,
-                ));
+            let mut added =
+                DegreePlanCourse::catalog(course.key.clone(), course.key.to_string(), 4.0);
+            added.crn = pin;
+            claimed.insert(added.id);
+            draft.terms[position].courses.push(added);
         }
     }
     draft.sort_terms();
@@ -651,30 +667,24 @@ pub fn schedule_for_semester(
     semester: &DegreePlanTerm,
     term_code: &str,
 ) -> Option<SemesterSchedule> {
-    let mut seen = HashSet::new();
-    let keys: Vec<CourseKey> = semester
+    let rows: Vec<&DegreePlanCourse> = semester
         .courses
         .iter()
-        .filter_map(|course| course.key.clone())
-        .filter(|key| seen.insert(key.clone()))
+        .filter(|course| course.key.is_some())
         .collect();
-    if keys.is_empty() {
+    if rows.is_empty() {
         return None;
     }
-    let wanted: HashSet<CourseKey> = keys.iter().cloned().collect();
-    if let Some(existing) = data.plans.iter().find(|plan| {
-        plan.term_code == term_code
-            && plan
-                .courses
-                .iter()
-                .map(|course| course.key.clone())
-                .collect::<HashSet<_>>()
-                == wanted
-    }) {
+    if let Some(index) = data
+        .plans
+        .iter()
+        .position(|plan| plan.term_code == term_code && schedule_rows_match(plan, &rows))
+    {
+        sync_degree_rows(&mut data.plans[index], &rows);
         return Some(SemesterSchedule {
-            plan: existing.clone(),
+            plan: data.plans[index].clone(),
             is_new: false,
-            course_count: keys.len(),
+            course_count: rows.len(),
         });
     }
     let names: Vec<String> = data
@@ -683,22 +693,11 @@ pub fn schedule_for_semester(
         .filter(|plan| plan.term_code == term_code)
         .map(|plan| plan.name.clone())
         .collect();
-    let schedule = SchedulePlan {
+    let mut schedule = SchedulePlan {
         id: Uuid::new_v4(),
         name: unique_schedule_name(&format!("{} plan", semester.name()), &names),
         term_code: term_code.to_string(),
-        courses: keys
-            .iter()
-            .enumerate()
-            .map(|(index, key)| PlanCourse {
-                key: key.clone(),
-                is_required: true,
-                excluded_crns: HashSet::new(),
-                color_index: index as i32,
-
-                pinned_crn: None,
-            })
-            .collect(),
+        courses: vec![],
         selected_crns: vec![],
         filters: ScheduleFilters::default(),
         preferences: None,
@@ -707,14 +706,168 @@ pub fn schedule_for_semester(
         created_at: 0.0,
         updated_at: 0.0,
     };
+    sync_degree_rows(&mut schedule, &rows);
     let id = schedule.id;
     data.add_schedule(schedule);
     let stored = data.plans.iter().find(|plan| plan.id == id).cloned()?;
     Some(SemesterSchedule {
         plan: stored,
         is_new: true,
-        course_count: keys.len(),
+        course_count: rows.len(),
     })
+}
+
+fn schedule_rows_match(plan: &SchedulePlan, rows: &[&DegreePlanCourse]) -> bool {
+    if plan.courses.len() != rows.len() {
+        return false;
+    }
+    let mut left: Vec<(CourseKey, Option<String>)> = plan
+        .courses
+        .iter()
+        .map(|course| {
+            (
+                course.key.clone(),
+                chosen_crn(course.pinned_crn.as_deref()).map(str::to_string),
+            )
+        })
+        .collect();
+    let mut right: Vec<(CourseKey, Option<String>)> = rows
+        .iter()
+        .filter_map(|course| {
+            course
+                .key
+                .clone()
+                .map(|key| (key, chosen_crn(course.crn.as_deref()).map(str::to_string)))
+        })
+        .collect();
+    left.sort();
+    right.sort();
+    left == right
+}
+
+/// Copies each degree-plan row onto the schedule. A repeated subject and number
+/// stays a second row. A pin is copied only when the degree row has one.
+fn sync_degree_rows(schedule: &mut SchedulePlan, rows: &[&DegreePlanCourse]) {
+    let mut used = HashSet::new();
+    for course in rows {
+        let Some(key) = course.key.clone() else {
+            continue;
+        };
+        let pin = chosen_crn(course.crn.as_deref()).map(str::to_string);
+        let index = match_schedule_row(schedule, course.id, &key, pin.as_deref(), &used);
+        if index < 0 {
+            let color = schedule.next_color_index();
+            schedule.courses.push(PlanCourse {
+                key,
+                is_required: true,
+                excluded_crns: HashSet::new(),
+                color_index: color,
+                pinned_crn: pin.clone(),
+                degree_row_id: Some(course.id),
+            });
+            if let Some(pin) = pin {
+                if !schedule.selected_crns.iter().any(|item| item == &pin) {
+                    schedule.selected_crns.push(pin);
+                }
+            }
+            continue;
+        }
+        let index = index as usize;
+        used.insert(index);
+        let row = &mut schedule.courses[index];
+        row.degree_row_id = Some(course.id);
+        if pin.is_none() || chosen_crn(row.pinned_crn.as_deref()) == pin.as_deref() {
+            continue;
+        }
+        row.pinned_crn = pin.clone();
+        if let Some(pin) = pin {
+            if !schedule.selected_crns.iter().any(|item| item == &pin) {
+                schedule.selected_crns.push(pin);
+            }
+        }
+    }
+}
+
+fn match_schedule_row(
+    schedule: &SchedulePlan,
+    degree_row_id: Uuid,
+    key: &CourseKey,
+    pin: Option<&str>,
+    used: &HashSet<usize>,
+) -> isize {
+    for (index, row) in schedule.courses.iter().enumerate() {
+        if !used.contains(&index) && row.degree_row_id == Some(degree_row_id) {
+            return index as isize;
+        }
+    }
+    let mut open = -1isize;
+    for (index, row) in schedule.courses.iter().enumerate() {
+        if used.contains(&index) || &row.key != key || row.degree_row_id.is_some() {
+            continue;
+        }
+        let existing = chosen_crn(row.pinned_crn.as_deref());
+        if pin.is_some() && existing == pin {
+            return index as isize;
+        }
+        if existing.is_none() && open < 0 {
+            open = index as isize;
+        }
+    }
+    open
+}
+
+fn pair_score(existing: Option<&str>, pin: Option<&str>) -> i32 {
+    match (chosen_crn(pin), chosen_crn(existing)) {
+        (Some(pin), Some(existing)) if pin == existing => 0,
+        (Some(_), Some(_)) => -1,
+        (Some(_), None) => 1,
+        (None, None) => 2,
+        (None, Some(_)) => -1,
+    }
+}
+
+fn match_degree_row(
+    draft: &DegreePlan,
+    position: usize,
+    key: &CourseKey,
+    pin: Option<&str>,
+    claimed: &HashSet<Uuid>,
+) -> Option<Uuid> {
+    let mut best: Option<(i32, Uuid)> = None;
+    let mut consider = |row: &DegreePlanCourse| {
+        if row.key.as_ref() != Some(key) || claimed.contains(&row.id) {
+            return;
+        }
+        let score = pair_score(row.crn.as_deref(), pin);
+        if score < 0 {
+            return;
+        }
+        if best.is_none_or(|(best_score, _)| score < best_score) {
+            best = Some((score, row.id));
+        }
+    };
+    for row in &draft.completed {
+        consider(row);
+    }
+    for row in &draft.terms[position].courses {
+        consider(row);
+    }
+    best.map(|(_, id)| id)
+}
+
+fn fill_open_crn(draft: &mut DegreePlan, position: usize, id: Uuid, pin: String) {
+    for row in &mut draft.completed {
+        if row.id == id && chosen_crn(row.crn.as_deref()).is_none() {
+            row.crn = Some(pin);
+            return;
+        }
+    }
+    for row in &mut draft.terms[position].courses {
+        if row.id == id && chosen_crn(row.crn.as_deref()).is_none() {
+            row.crn = Some(pin);
+            return;
+        }
+    }
 }
 
 fn unique_schedule_name(base: &str, existing: &[String]) -> String {

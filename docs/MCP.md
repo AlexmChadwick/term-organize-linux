@@ -239,7 +239,8 @@ A chosen CRN stays on the course. A pinned course moves only when the destinatio
   }],
   "validation": {
     "clashes": [],
-    "not_offered": [{ "term": "Fall 2026", "subject": "CS", "number": "2510" }]
+    "not_offered": [{ "term": "Fall 2026", "subject": "CS", "number": "2510" }],
+    "duplicates": ["CS 4973 appears more than once. Each copy still counts."]
   }
 }
 ```
@@ -256,7 +257,7 @@ A chosen CRN stays on the course. A pinned course moves only when the destinatio
 
 ### add_course
 
-`plan_id`, `term`, `subject`, `number`, optional `crn`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. A second copy of the same subject and number is accepted only when every copy, including the new one, has a manually chosen CRN and the CRNs differ. The same CRN twice is `invalid_argument` (`That section is already on this plan.`). A second copy with no CRN is `invalid_argument` (`That course is already on this term.` when the other copy is on that term). Returns the get_plan object.
+`plan_id`, `term`, `subject`, `number`, optional `crn`, `expected_revision`. The term must already be on the plan. The course and CRN must exist in the bundled catalog for that term. A second copy is always accepted, with or without a CRN, including the same CRN twice. `validation.duplicates` lists each repeated course as `<subject> <number> appears more than once. Each copy still counts.` A repeat is two copies with no distinct sections, or the same CRN twice. Two different CRNs, or a title containing "topic", is not a duplicate. Returns the get_plan object.
 
 ### remove_course
 

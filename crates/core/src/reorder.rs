@@ -160,16 +160,6 @@ fn perform_move(course: &CourseKey, from: Uuid, to: Uuid, plan: &mut DegreePlan)
     };
     let moved = plan.terms[source].courses.remove(position);
     let target = plan.terms.iter().position(|term| term.id == to).unwrap();
-    let existing: Vec<Option<&str>> = plan.terms[target]
-        .courses
-        .iter()
-        .filter(|item| item.key.as_ref() == Some(course))
-        .map(|item| item.crn.as_deref())
-        .collect();
-    if !crate::planlogic::repeated_course_allowed(existing, moved.crn.as_deref()) {
-        plan.terms[source].courses.insert(position, moved);
-        return false;
-    }
     plan.terms[target].courses.push(moved);
     true
 }

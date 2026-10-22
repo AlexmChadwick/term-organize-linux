@@ -294,6 +294,7 @@ fn use_of(code: &str, title: &str, credits: f64, semester: Option<&str>, order: 
         satisfies: None,
         instance: 0,
         crn: None,
+        row_id: Uuid::nil(),
     }
 }
 
@@ -602,13 +603,13 @@ fn substitutionsAndPetitions() {
         sub(
             &hcc.id,
             "HCI electives",
-            SubstitutionChange::CountCourse(key("CS 4973")),
+            SubstitutionChange::count_course(key("CS 4973")),
             "",
         ),
         sub(
             &engineering.id,
             "Software engineering",
-            SubstitutionChange::CountCourse(key("CS 4535")),
+            SubstitutionChange::count_course(key("CS 4535")),
             "",
         ),
         sub(
@@ -626,7 +627,7 @@ fn substitutionsAndPetitions() {
         sub(
             &electives.id,
             "Electives",
-            SubstitutionChange::CountCourse(key("CS 4999")),
+            SubstitutionChange::count_course(key("CS 4999")),
             "",
         ),
     ];
@@ -1046,7 +1047,7 @@ fn topicsCoursesCountEachTime() {
             .iter()
             .filter(|u| u.key.to_string() == "MKTG 2602")
             .count(),
-        1
+        2
     );
     assert_eq!(
         counted.iter().map(|u| u.id()).collect::<HashSet<_>>().len(),
@@ -2434,7 +2435,7 @@ fn matchesAsManyRequirementsAsPossible() {
                 sub(
                     &rules[*rule_index].id,
                     &rules[*rule_index].id,
-                    SubstitutionChange::CountCourse(courses[*course_index].key.clone()),
+                    SubstitutionChange::count_course(courses[*course_index].key.clone()),
                     "",
                 )
             })
@@ -2919,7 +2920,7 @@ fn renumbered() -> (
     let renumbering = sub(
         &required.id,
         "CS 3000",
-        SubstitutionChange::CountCourse(key("CS 3001")),
+        SubstitutionChange::count_course(key("CS 3001")),
         "Approved",
     );
     let waiver = sub(
@@ -2940,13 +2941,13 @@ fn onlyASubstitutionForOneNamedCourseIsARenumbering() {
     other.substitutions.push(sub(
         &either.id,
         "CS 4500 or CS 4530",
-        SubstitutionChange::CountCourse(key("CS 4535")),
+        SubstitutionChange::count_course(key("CS 4535")),
         "",
     ));
     other.substitutions.push(sub(
         &renumbering.rule_id,
         "CS 3000",
-        SubstitutionChange::CountCourse(key("CS 3000")),
+        SubstitutionChange::count_course(key("CS 3000")),
         "",
     ));
     assert_eq!(
@@ -3157,13 +3158,13 @@ fn aSubstituteSitsUnderTheRequirementItReplaces() {
         sub(
             &either.id,
             "CS 4500 or CS 4530",
-            SubstitutionChange::CountCourse(key("CS 4535")),
+            SubstitutionChange::count_course(key("CS 4535")),
             "Approved by advising",
         ),
         sub(
             &security.id,
             "Security Course",
-            SubstitutionChange::CountCourse(key("CS 4973")),
+            SubstitutionChange::count_course(key("CS 4973")),
             "",
         ),
     ];
@@ -3237,7 +3238,7 @@ fn aSubstituteSitsUnderTheRequirementItReplaces() {
     listed.substitutions = vec![sub(
         &security.id,
         "Security Course",
-        SubstitutionChange::CountCourse(key("CY 3740")),
+        SubstitutionChange::count_course(key("CY 3740")),
         "",
     )];
     listed.completed.push(course("CY 3740", 4.0, ""));
@@ -3810,6 +3811,7 @@ fn newPlanDraftCopiesTheLatestPlanAndAddsSchedules() {
                 color_index: 0,
 
                 pinned_crn: None,
+                degree_row_id: None,
             },
             PlanCourse {
                 key: key("MATH 2331"),
@@ -3818,6 +3820,7 @@ fn newPlanDraftCopiesTheLatestPlanAndAddsSchedules() {
                 color_index: 1,
 
                 pinned_crn: None,
+                degree_row_id: None,
             },
         ],
         selected_crns: vec![],

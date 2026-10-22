@@ -218,7 +218,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Add a catalog course to a term already on the plan. The same course may be added again only with a different manually chosen CRN.",
+        description = "Add a catalog course to a term already on the plan. The same course may be added again, with or without a CRN. validation.duplicates reports a repeated course.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

@@ -4772,8 +4772,8 @@ pub fn add_course(
         is_required: required,
         excluded_crns: HashSet::new(),
         color_index: color,
-
         pinned_crn: None,
+        degree_row_id: None,
     });
     true
 }

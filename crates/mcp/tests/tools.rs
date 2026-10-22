@@ -793,36 +793,10 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
     assert_eq!(both["terms"][0]["courses"].as_array().unwrap().len(), 2);
     assert_eq!(both["terms"][0]["courses"][0]["crn"], first);
     assert_eq!(both["terms"][0]["courses"][1]["crn"], second);
-
-    let same_section = tools::add_course(
-        &dir,
-        tools::AddCourseArgs {
-            plan_id: id.clone(),
-            term: "Fall 2026".into(),
-            subject: subject.clone(),
-            number: number.clone(),
-            crn: Some(first.clone()),
-            expected_revision: both["revision"].as_u64().unwrap(),
-        },
-    )
-    .unwrap_err();
-    assert_eq!(same_section.error, "invalid_argument");
-    assert!(same_section.message.contains("section"));
-
-    let unpinned = tools::add_course(
-        &dir,
-        tools::AddCourseArgs {
-            plan_id: id.clone(),
-            term: "Fall 2026".into(),
-            subject: subject.clone(),
-            number: number.clone(),
-            crn: None,
-            expected_revision: both["revision"].as_u64().unwrap(),
-        },
-    )
-    .unwrap_err();
-    assert_eq!(unpinned.error, "invalid_argument");
-    assert!(unpinned.message.contains("already on this term"));
+    assert!(both["validation"]["duplicates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let ambiguous = tools::set_section(
         &dir,
@@ -854,6 +828,46 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
     assert_eq!(moved.error, "invalid_argument");
     assert!(moved.message.contains("more than once"));
 
+    let same_section = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: Some(first.clone()),
+            expected_revision: both["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        same_section["terms"][0]["courses"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let notice = format!("{subject} {number} appears more than once. Each copy still counts.");
+    assert!(same_section["validation"]["duplicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str() == Some(notice.as_str())));
+
+    let unpinned = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: id.clone(),
+            term: "Fall 2026".into(),
+            subject: subject.clone(),
+            number: number.clone(),
+            crn: None,
+            expected_revision: same_section["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(unpinned["terms"][0]["courses"].as_array().unwrap().len(), 4);
+
     let single = tools::create_plan(
         &dir,
         tools::CreatePlanArgs {
@@ -879,8 +893,8 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
         &dir,
         tools::MoveCourseArgs {
             plan_id: single_id.clone(),
-            subject,
-            number,
+            subject: subject.clone(),
+            number: number.clone(),
             from_term: "Fall 2026".into(),
             to_term: "Spring 2027".into(),
             expected_revision: pinned["revision"].as_u64().unwrap(),
@@ -888,6 +902,38 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
     )
     .unwrap();
     assert_eq!(kept["terms"][1]["courses"][0]["crn"], first);
+    let again = tools::add_course(
+        &dir,
+        tools::AddCourseArgs {
+            plan_id: single_id.clone(),
+            term: "Fall 2026".into(),
+            subject,
+            number,
+            crn: None,
+            expected_revision: kept["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    let joined = tools::move_course(
+        &dir,
+        tools::MoveCourseArgs {
+            plan_id: single_id.clone(),
+            subject: again["terms"][0]["courses"][0]["subject"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            number: again["terms"][0]["courses"][0]["number"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            from_term: "Fall 2026".into(),
+            to_term: "Spring 2027".into(),
+            expected_revision: again["revision"].as_u64().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(joined["terms"][1]["courses"].as_array().unwrap().len(), 2);
+    assert_eq!(joined["terms"][1]["courses"][0]["crn"], first);
     let _ = fs::remove_dir_all(&dir);
 }
 
