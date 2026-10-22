@@ -936,118 +936,276 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         note = format!("{note} · {} filters", filters.active_count());
     }
     root.append(&dim_label(&note));
-    root.append(&course_list(shell, &rows, false));
+    if rows.is_empty() {
+        root.append(&dim_label(
+            "Nothing matches. Try a course code, a shorter word, or clear a filter.",
+        ));
+        return root.upcast();
+    }
+    let preview = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    preview.set_widget_name("course-preview");
+    let show_course: Rc<dyn Fn(Option<CourseKey>)> = Rc::new({
+        let shell = shell.clone();
+        let preview = preview.clone();
+        move |key| {
+            while let Some(child) = preview.first_child() {
+                preview.remove(&child);
+            }
+            match key {
+                Some(key) => preview.append(&course_page(&shell, &key, true)),
+                None => preview.append(&dim_label("Select a course.")),
+            }
+        }
+    });
+    let list = course_list(shell, &rows, false, {
+        let show_course = show_course.clone();
+        move |key| show_course(key)
+    });
+    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+    split.set_vexpand(true);
+    split.set_start_child(Some(&list));
+    split.set_shrink_start_child(false);
+    split.set_resize_start_child(true);
+    split.set_resize_end_child(true);
+    split.set_end_child(Some(
+        &gtk::ScrolledWindow::builder()
+            .child(&preview)
+            .vexpand(true)
+            .hexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build(),
+    ));
+    install_proportional_pane(&split, 0.46);
+    root.append(&split);
     root.upcast()
 }
 
+struct CourseRowText {
+    title: String,
+    credits: String,
+    seats: String,
+    cps: Option<String>,
+}
+
+/// Search, subject, and saved courses. `GtkListView` plus `GtkSingleSelection` moves
+/// one row per arrow only while the list itself has focus, and scrolls that row into view.
 fn course_list(
     shell: &Rc<RefCell<Shell>>,
     rows: &[(CourseKey, String, String, String)],
     saved: bool,
+    on_selected: impl Fn(Option<CourseKey>) + 'static,
 ) -> gtk::Widget {
-    let list = gtk::ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.set_activate_on_single_click(false);
-    let keys: Rc<Vec<CourseKey>> = Rc::new(rows.iter().map(|(key, _, _, _)| key.clone()).collect());
-    for (key, title, credits, seats) in rows {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        let code = gtk::Label::new(Some(&key.to_string()));
-        code.add_css_class("heading");
-        code.set_width_chars(12);
-        code.set_xalign(0.0);
-        let name = gtk::Label::new(Some(title));
-        name.set_hexpand(true);
-        name.set_xalign(0.0);
-        name.set_wrap(true);
-        name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        name.set_lines(2);
-        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        name.set_max_width_chars(48);
-        let title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        title_box.set_hexpand(true);
-        title_box.append(&name);
-        let cps = {
-            let sections = shell.borrow().state.borrow().index.sections_for(key);
-            cps_note(sections.iter().map(|section| section.cps_only()))
-        };
-        if let Some(note) = cps {
-            title_box.append(&dim_label(note));
-        }
-        row.append(&code);
-        row.append(&title_box);
-        row.append(&meta_label(credits));
-        row.append(&meta_label(seats));
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&row));
-        gap::attach_course_drag(&item, key);
-        let mut entries = vec![
-            menu_action("Open", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || gap::open_course_window(&shell, &key)
-            }),
-            menu_action("Copy code", {
-                let shell = shell.clone();
-                let code = key.to_string();
-                move || copy_text(&shell, &code, "Course code copied")
-            }),
-        ];
-        if saved {
-            entries.push(menu_action("Remove", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || unsave_course(&shell, &key)
-            }));
-        } else {
-            entries.push(menu_action("Save", {
-                let shell = shell.clone();
-                let key = key.clone();
-                move || save_course(&shell, &key)
-            }));
-        }
-        attach_context_menu(&item, entries);
-        list.append(&item);
-    }
-    if rows.is_empty() && !saved {
+    if rows.is_empty() {
+        on_selected(None);
         let label = gtk::Label::builder()
-            .label("Nothing matches. Try a course code, a shorter word, or clear a filter.")
+            .label(if saved {
+                "Nothing saved yet"
+            } else {
+                "Nothing matches. Try a course code, a shorter word, or clear a filter."
+            })
             .margin_top(24)
             .margin_bottom(24)
             .build();
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&label));
-        item.set_activatable(false);
-        item.set_selectable(false);
-        list.append(&item);
+        return label.upcast();
     }
-    list.connect_row_activated({
+    let mut texts = HashMap::new();
+    let mut keys = Vec::new();
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    for (key, title, credits, seats) in rows {
+        let cps = {
+            let sections = shell.borrow().state.borrow().index.sections_for(key);
+            cps_note(sections.iter().map(|section| section.cps_only())).map(str::to_string)
+        };
+        let id = key.to_string();
+        texts.insert(
+            id.clone(),
+            CourseRowText {
+                title: title.clone(),
+                credits: credits.clone(),
+                seats: seats.clone(),
+                cps,
+            },
+        );
+        keys.push(key.clone());
+        store.append(&gtk::StringObject::new(&id));
+    }
+    let texts = Rc::new(texts);
+    let keys = Rc::new(keys);
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup({
+        let shell = shell.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            let code = gtk::Label::new(None);
+            code.set_widget_name("code-label");
+            code.add_css_class("heading");
+            code.set_width_chars(12);
+            code.set_xalign(0.0);
+            let name = gtk::Label::new(None);
+            name.set_widget_name("title-label");
+            name.set_hexpand(true);
+            name.set_xalign(0.0);
+            name.set_wrap(true);
+            name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            name.set_lines(2);
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            name.set_max_width_chars(48);
+            let cps = dim_label("");
+            cps.set_widget_name("cps-label");
+            cps.set_visible(false);
+            let title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            title_box.set_hexpand(true);
+            title_box.append(&name);
+            title_box.append(&cps);
+            let credits = meta_label("");
+            credits.set_widget_name("credits-label");
+            let seats = meta_label("");
+            seats.set_widget_name("seats-label");
+            row.append(&code);
+            row.append(&title_box);
+            row.append(&credits);
+            row.append(&seats);
+            gap::attach_named_course_drag(&row);
+            let row_menu = row.clone();
+            let mut entries = vec![
+                menu_action("Open", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            gap::open_course_window(&shell, &key);
+                        }
+                    }
+                }),
+                menu_action("Copy code", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        let code = row.widget_name();
+                        copy_text(&shell, code.as_str(), "Course code copied");
+                    }
+                }),
+            ];
+            if saved {
+                entries.push(menu_action("Remove", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            unsave_course(&shell, &key);
+                        }
+                    }
+                }));
+            } else {
+                entries.push(menu_action("Save", {
+                    let shell = shell.clone();
+                    let row = row_menu.clone();
+                    move || {
+                        if let Some(key) = CourseKey::parse(&row.widget_name()) {
+                            save_course(&shell, &key);
+                        }
+                    }
+                }));
+            }
+            attach_context_menu(&row, entries);
+            item.set_child(Some(&row));
+        }
+    });
+    factory.connect_bind({
+        let texts = texts.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(row) = item.child() else { return };
+            let Some(object) = item
+                .item()
+                .and_then(|value| value.downcast::<gtk::StringObject>().ok())
+            else {
+                return;
+            };
+            let id = object.string().to_string();
+            row.set_widget_name(&id);
+            let Some(text) = texts.get(&id) else { return };
+            if let Some(label) = label_named(&row, "code-label") {
+                label.set_text(&id);
+            }
+            if let Some(label) = label_named(&row, "title-label") {
+                label.set_text(&text.title);
+            }
+            if let Some(label) = label_named(&row, "credits-label") {
+                label.set_text(&text.credits);
+            }
+            if let Some(label) = label_named(&row, "seats-label") {
+                label.set_text(&text.seats);
+            }
+            if let Some(label) = label_named(&row, "cps-label") {
+                match &text.cps {
+                    Some(note) => {
+                        label.set_text(note);
+                        label.set_visible(true);
+                    }
+                    None => label.set_visible(false),
+                }
+            }
+        }
+    });
+    let selection = gtk::SingleSelection::new(Some(store));
+    selection.set_autoselect(true);
+    selection.set_can_unselect(false);
+    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    view.set_widget_name(if saved {
+        "saved-courses"
+    } else {
+        "course-results"
+    });
+    view.add_css_class("rich-list");
+    view.add_css_class("boxed-list");
+    view.set_single_click_activate(false);
+    view.set_enable_rubberband(false);
+    view.set_can_focus(true);
+    view.connect_activate({
         let shell = shell.clone();
         let keys = keys.clone();
-        move |_, row| {
-            if let Some(key) = keys.get(row.index() as usize) {
+        move |_, position| {
+            if let Some(key) = keys.get(position as usize) {
                 gap::open_course_window(&shell, key);
             }
         }
     });
     if saved {
+        let keys_for_delete = keys.clone();
+        let selection_for_delete = selection.clone();
         let shell = shell.clone();
-        let keys = keys.clone();
-        attach_delete_key(
-            &list,
-            Rc::new(move |index| {
-                if let Some(key) = keys.get(index as usize) {
-                    unsave_course(&shell, key);
-                }
-            }),
-        );
+        let keys_controller = gtk::EventControllerKey::new();
+        keys_controller.connect_key_pressed(move |_, key, _, _| {
+            if !matches!(
+                key,
+                gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete | gtk::gdk::Key::BackSpace
+            ) {
+                return glib::Propagation::Proceed;
+            }
+            let position = selection_for_delete.selected();
+            if position == gtk::INVALID_LIST_POSITION {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(key) = keys_for_delete.get(position as usize) {
+                unsave_course(&shell, key);
+            }
+            glib::Propagation::Stop
+        });
+        view.add_controller(keys_controller);
     }
+    track_list_selection(&view, &selection, keys, on_selected);
     gtk::ScrolledWindow::builder()
-        .child(&list)
+        .child(&view)
         .vexpand(true)
         .hexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -1056,7 +1214,47 @@ fn course_list(
         .upcast()
 }
 
-fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
+fn label_named(root: &gtk::Widget, name: &str) -> Option<gtk::Label> {
+    find_named(root, name).and_then(|widget| widget.downcast().ok())
+}
+
+/// Arrow keys are the list's own bindings. This only keeps the selected row in view
+/// and tells the details pane which row is current.
+fn track_list_selection<T: Clone + 'static>(
+    view: &gtk::ListView,
+    selection: &gtk::SingleSelection,
+    items: Rc<Vec<T>>,
+    on_selected: impl Fn(Option<T>) + 'static,
+) {
+    let on_selected: Rc<dyn Fn(Option<T>)> = Rc::new(on_selected);
+    let emit: Rc<dyn Fn()> = Rc::new({
+        let view = view.clone();
+        let selection = selection.clone();
+        let on_selected = on_selected.clone();
+        move || {
+            let position = selection.selected();
+            if position != gtk::INVALID_LIST_POSITION {
+                let view = view.clone();
+                glib::idle_add_local_once(move || {
+                    view.scroll_to(position, gtk::ListScrollFlags::NONE, None);
+                });
+            }
+            let value = if position == gtk::INVALID_LIST_POSITION {
+                None
+            } else {
+                items.get(position as usize).cloned()
+            };
+            on_selected(value);
+        }
+    });
+    selection.connect_selected_notify({
+        let emit = emit.clone();
+        move |_| emit()
+    });
+    emit();
+}
+
+fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gtk::Widget {
     let (course, sections) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -1072,7 +1270,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
     root.set_margin_top(18);
     root.set_margin_start(18);
     root.set_margin_end(18);
-    root.set_margin_bottom(18);
+    root.set_margin_bottom(8);
     let bar = wrapping_box();
     let save = gtk::Button::with_label("Save");
     save.connect_clicked({
@@ -1141,99 +1339,265 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         ));
     }
     root.append(&heading_label(&format!("{} sections", sections.len())));
-    let list = gtk::ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.set_activate_on_single_click(false);
-    let mut crns = Vec::new();
-    for section in &sections {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        top.append(&gtk::Label::new(Some(&format!(
-            "CRN {} · {}",
-            section.crn, section.section_number
-        ))));
-        let (seats_n, wait_n) = shell
-            .borrow()
-            .state
-            .borrow()
-            .live_seats
-            .get(&section.crn)
-            .copied()
-            .map(|(s, w, _)| (s, w))
-            .unwrap_or((section.seats_remaining, section.waitlist_remaining));
-        let seats = gtk::Label::new(Some(&seat_wait_label(seats_n, wait_n)));
-        seats.set_hexpand(true);
-        seats.set_xalign(1.0);
-        top.append(&seats);
-        row.append(&top);
-        let detail = dim_label(&format!(
-            "{} · {} · {}",
-            section.schedule_summary(),
-            section.instructor_label(),
-            section.campus
-        ));
-        detail.set_wrap(true);
-        detail.set_max_width_chars(42);
-        row.append(&detail);
-        if section.cps_only() == Some(true) {
-            row.append(&dim_label(CPS_ONLY_NOTE));
-        }
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let copy = gtk::Button::with_label("Copy CRN");
-        let crn = section.crn.clone();
-        let shell_copy = shell.clone();
-        copy.connect_clicked(move |_| {
-            shell_copy.borrow().window.clipboard().set_text(&crn);
-            toast(&shell_copy, "CRN copied");
-        });
-        let watch_button = gtk::Button::with_label("Watch");
-        let shell_watch = shell.clone();
-        let section_watch = section.clone();
-        let course_title = course.title.clone();
-        watch_button
-            .connect_clicked(move |_| watch_section(&shell_watch, &section_watch, &course_title));
-        buttons.append(&copy);
-        buttons.append(&watch_button);
-        row.append(&buttons);
-        let item = gtk::ListBoxRow::new();
-        item.set_child(Some(&row));
-        let crn_menu = section.crn.clone();
-        let section_menu = section.clone();
-        let title_menu = course.title.clone();
-        attach_context_menu(
-            &item,
-            vec![
-                menu_action("Copy CRN", {
-                    let shell = shell.clone();
-                    let crn = crn_menu.clone();
-                    move || copy_text(&shell, &crn, "CRN copied")
-                }),
-                menu_action("Watch", {
-                    let shell = shell.clone();
-                    move || watch_section(&shell, &section_menu, &title_menu)
-                }),
-            ],
-        );
-        crns.push(crn_menu);
-        list.append(&item);
+    let header = gtk::ScrolledWindow::builder()
+        .child(&root)
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .height_request(if preview { 200 } else { 160 })
+        .propagate_natural_height(false)
+        .build();
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_vexpand(true);
+    page.append(&header);
+    page.append(&section_list(shell, &course.title, &sections));
+    if !preview {
+        gap::load_restrictions(shell, key);
     }
-    let crns = Rc::new(crns);
-    list.connect_row_activated({
+    page.upcast()
+}
+
+#[derive(Clone)]
+struct SectionLine {
+    section: CourseSection,
+    seats: String,
+    summary: String,
+}
+
+/// Sections under a course. Selection and arrow keys stay inside this list.
+fn section_list(
+    shell: &Rc<RefCell<Shell>>,
+    course_title: &str,
+    sections: &[CourseSection],
+) -> gtk::Widget {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_vexpand(true);
+    if sections.is_empty() {
+        column.append(&dim_label("No sections in this term."));
+        return column.upcast();
+    }
+    let lines: Vec<SectionLine> = sections
+        .iter()
+        .map(|section| {
+            let (seats_n, wait_n) = shell
+                .borrow()
+                .state
+                .borrow()
+                .live_seats
+                .get(&section.crn)
+                .copied()
+                .map(|(seats, wait, _)| (seats, wait))
+                .unwrap_or((section.seats_remaining, section.waitlist_remaining));
+            SectionLine {
+                seats: seat_wait_label(seats_n, wait_n),
+                summary: format!(
+                    "{} · {} · {}",
+                    section.schedule_summary(),
+                    section.instructor_label(),
+                    section.campus
+                ),
+                section: section.clone(),
+            }
+        })
+        .collect();
+    let by_crn: Rc<HashMap<String, SectionLine>> = Rc::new(
+        lines
+            .iter()
+            .map(|line| (line.section.crn.clone(), line.clone()))
+            .collect(),
+    );
+    let lines = Rc::new(lines);
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    for line in lines.iter() {
+        store.append(&gtk::StringObject::new(&line.section.crn));
+    }
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup({
         let shell = shell.clone();
-        move |_, row| {
-            if let Some(crn) = crns.get(row.index() as usize) {
-                copy_text(&shell, crn, "CRN copied");
+        let course_title = course_title.to_string();
+        let by_crn = by_crn.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let title = gtk::Label::new(None);
+            title.set_widget_name("section-title");
+            title.set_xalign(0.0);
+            let seats = gtk::Label::new(None);
+            seats.set_widget_name("section-seats");
+            seats.set_hexpand(true);
+            seats.set_xalign(1.0);
+            top.append(&title);
+            top.append(&seats);
+            let detail = dim_label("");
+            detail.set_widget_name("section-summary");
+            detail.set_wrap(true);
+            detail.set_max_width_chars(42);
+            let cps = dim_label(CPS_ONLY_NOTE);
+            cps.set_widget_name("section-cps");
+            cps.set_visible(false);
+            row.append(&top);
+            row.append(&detail);
+            row.append(&cps);
+            let row_menu = row.clone();
+            attach_context_menu(
+                &row,
+                vec![
+                    menu_action("Copy CRN", {
+                        let shell = shell.clone();
+                        let row = row_menu.clone();
+                        move || {
+                            let crn = row.widget_name().to_string();
+                            copy_text(&shell, &crn, "CRN copied");
+                        }
+                    }),
+                    menu_action("Watch", {
+                        let shell = shell.clone();
+                        let row = row_menu.clone();
+                        let by_crn = by_crn.clone();
+                        let course_title = course_title.clone();
+                        move || {
+                            let crn = row.widget_name().to_string();
+                            if let Some(line) = by_crn.get(&crn) {
+                                watch_section(&shell, &line.section, &course_title);
+                            }
+                        }
+                    }),
+                ],
+            );
+            item.set_child(Some(&row));
+        }
+    });
+    factory.connect_bind({
+        let by_crn = by_crn.clone();
+        move |_, obj| {
+            let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(row) = item.child() else { return };
+            let Some(object) = item
+                .item()
+                .and_then(|value| value.downcast::<gtk::StringObject>().ok())
+            else {
+                return;
+            };
+            let crn = object.string().to_string();
+            row.set_widget_name(&crn);
+            let Some(line) = by_crn.get(&crn) else { return };
+            if let Some(label) = label_named(&row, "section-title") {
+                label.set_text(&format!(
+                    "CRN {} · {}",
+                    line.section.crn, line.section.section_number
+                ));
+            }
+            if let Some(label) = label_named(&row, "section-seats") {
+                label.set_text(&line.seats);
+            }
+            if let Some(label) = label_named(&row, "section-summary") {
+                label.set_text(&line.summary);
+            }
+            if let Some(label) = label_named(&row, "section-cps") {
+                label.set_visible(line.section.cps_only() == Some(true));
             }
         }
     });
-    root.append(&list);
-    gap::load_restrictions(shell, key);
-    root.upcast()
+    let selection = gtk::SingleSelection::new(Some(store));
+    selection.set_autoselect(true);
+    selection.set_can_unselect(false);
+    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    view.set_widget_name("section-results");
+    view.add_css_class("rich-list");
+    view.add_css_class("boxed-list");
+    view.set_single_click_activate(false);
+    view.set_enable_rubberband(false);
+    view.set_can_focus(true);
+    view.connect_activate({
+        let shell = shell.clone();
+        let lines = lines.clone();
+        move |_, position| {
+            if let Some(line) = lines.get(position as usize) {
+                copy_text(&shell, &line.section.crn, "CRN copied");
+            }
+        }
+    });
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    details.set_widget_name("section-details");
+    details.add_css_class("card");
+    details.set_margin_top(4);
+    details.set_margin_bottom(8);
+    let course_title = course_title.to_string();
+    track_list_selection(&view, &selection, lines, {
+        let shell = shell.clone();
+        let details = details.clone();
+        let course_title = course_title.clone();
+        move |line| fill_section_details(&shell, &details, &course_title, line.as_ref())
+    });
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .hexpand(true)
+        .height_request(220)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(false)
+        .build();
+    column.append(&scrolled);
+    column.append(&details);
+    column.upcast()
+}
+
+fn fill_section_details(
+    shell: &Rc<RefCell<Shell>>,
+    host: &gtk::Box,
+    course_title: &str,
+    line: Option<&SectionLine>,
+) {
+    while let Some(child) = host.first_child() {
+        host.remove(&child);
+    }
+    let Some(line) = line else {
+        host.append(&dim_label("Select a section."));
+        return;
+    };
+    let title = gtk::Label::new(Some(&format!(
+        "CRN {} · {}",
+        line.section.crn, line.section.section_number
+    )));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_margin_start(12);
+    title.set_margin_top(8);
+    host.append(&title);
+    let summary = dim_label(&format!("{} · {}", line.summary, line.seats));
+    summary.set_margin_start(12);
+    summary.set_margin_end(12);
+    summary.set_wrap(true);
+    host.append(&summary);
+    if line.section.cps_only() == Some(true) {
+        let note = dim_label(CPS_ONLY_NOTE);
+        note.set_margin_start(12);
+        host.append(&note);
+    }
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    buttons.set_margin_start(12);
+    buttons.set_margin_bottom(8);
+    let copy = gtk::Button::with_label("Copy CRN");
+    let crn = line.section.crn.clone();
+    let shell_copy = shell.clone();
+    copy.connect_clicked(move |_| copy_text(&shell_copy, &crn, "CRN copied"));
+    let watch = gtk::Button::with_label("Watch");
+    let shell_watch = shell.clone();
+    let section = line.section.clone();
+    let course_title = course_title.to_string();
+    watch.connect_clicked(move |_| watch_section(&shell_watch, &section, &course_title));
+    buttons.append(&copy);
+    buttons.append(&watch);
+    host.append(&buttons);
 }
 
 fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
@@ -1340,7 +1704,7 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     subject_column.set_margin_start(12);
     subject_column.set_margin_end(12);
     subject_column.append(&column_headers(shell));
-    subject_column.append(&course_list(shell, &courses, false));
+    subject_column.append(&course_list(shell, &courses, false, |_| {}));
     paned.set_end_child(Some(&subject_column));
     paned.upcast()
 }
@@ -1376,7 +1740,7 @@ fn saved_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         root.append(&status);
         return root.upcast();
     }
-    root.append(&course_list(shell, &rows, true));
+    root.append(&course_list(shell, &rows, true, |_| {}));
     root.upcast()
 }
 
@@ -4995,13 +5359,14 @@ fn replace_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         if window.widget_name().as_str() != name || !window.is_visible() {
             continue;
         }
-        let page = course_page(shell, key);
+        let page = course_page(shell, key, false);
+        page.set_vexpand(true);
         let clamp = adw::Clamp::new();
         clamp.set_maximum_size(760);
         clamp.set_tightening_threshold(480);
+        clamp.set_vexpand(true);
         clamp.set_child(Some(&page));
-        let scroll = gtk::ScrolledWindow::builder().child(&clamp).build();
-        window.set_content(Some(&scroll));
+        window.set_content(Some(&clamp));
     }
 }
 
