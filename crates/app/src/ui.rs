@@ -428,7 +428,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
             .preferences
             .background_refresh_enabled
     {
-        request_background();
+        let _ = request_background();
     }
     if smoke {
         window.set_default_size(1440, 900);
@@ -5564,7 +5564,7 @@ fn view_text(shell: &Rc<RefCell<Shell>>) -> String {
     lines.join("\n")
 }
 
-fn request_background() {
+fn request_background() -> bool {
     let Ok(proxy) = gio::DBusProxy::for_bus_sync(
         gio::BusType::Session,
         gio::DBusProxyFlags::NONE,
@@ -5574,18 +5574,18 @@ fn request_background() {
         "org.freedesktop.portal.Background",
         gio::Cancellable::NONE,
     ) else {
-        return;
+        return false;
     };
     let exe = std::env::current_exe().ok();
-    let Some(exe) = exe else { return };
+    let Some(exe) = exe else { return false };
     let command = [exe.to_string_lossy().to_string(), "--seat-watch".into()];
-    let commandline =
-        glib::Variant::array_from_iter::<glib::Variant>(command.iter().map(|s| s.to_variant()));
+    // RequestBackground's commandline option is an array of strings ("as").
+    let commandline = background_commandline(&command);
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", "termorganize");
     options.insert("reason", "Check watched sections for open seats");
     options.insert("autostart", true);
-    options.insert("commandline", &commandline);
+    options.insert_value("commandline", &commandline);
     let params = glib::Variant::tuple_from_iter(["".to_variant(), options.end()]);
     let _ = proxy.call_sync(
         "RequestBackground",
@@ -5594,6 +5594,7 @@ fn request_background() {
         1000,
         gio::Cancellable::NONE,
     );
+    true
 }
 
 fn parse_clock(text: &str) -> Option<i32> {
@@ -5623,6 +5624,43 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+fn background_commandline(command: &[String]) -> glib::Variant {
+    glib::Variant::array_from_iter::<String>(command.iter().map(|part| part.to_variant()))
+}
+
+#[cfg(test)]
+mod portal_tests {
+    use super::*;
+
+    #[test]
+    fn background_commandline_is_an_array_of_strings() {
+        let command = ["termorganize".to_string(), "--seat-watch".to_string()];
+        let commandline = background_commandline(&command);
+        assert_eq!(commandline.type_().as_str(), "as");
+        let argv: Vec<String> = commandline
+            .array_iter_str()
+            .expect("commandline")
+            .map(str::to_string)
+            .collect();
+        assert_eq!(argv, command);
+    }
+
+    /// Launch calls `request_background` whenever a session bus is up.
+    /// `dbus-run-session` in CI is what used to abort in the variant builder.
+    #[test]
+    #[ignore = "run under dbus-run-session; see .github/workflows/ci.yml"]
+    fn background_request_survives_a_session_bus() {
+        assert!(
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|value| !value.is_empty()),
+            "run under dbus-run-session"
+        );
+        assert!(
+            request_background(),
+            "session bus did not reach RequestBackground"
+        );
+    }
 }
 
 #[cfg(test)]
