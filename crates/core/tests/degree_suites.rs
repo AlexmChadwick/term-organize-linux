@@ -2183,6 +2183,7 @@ fn loaded_index() -> CatalogIndex {
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     };
     CatalogIndex::build(TermCatalog {
         version: 1,

@@ -132,6 +132,7 @@ fn section(crn: &str, code: &str, title: &str, cross: &[&str]) -> CourseSection 
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     }
 }
 

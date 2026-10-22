@@ -243,6 +243,7 @@ fn shell_section(crn: &str, seats: i32, waitlist: i32, capacity: i32) -> CourseS
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -2212,6 +2213,7 @@ fn professor_page_texts() {
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     };
     let sections = vec![section(&a, "01"), section(&a, "04"), section(&b, "02")];
     assert_eq!(
