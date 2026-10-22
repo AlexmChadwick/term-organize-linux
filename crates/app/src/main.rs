@@ -5,7 +5,7 @@ mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::banner::{self, BannerClient};
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::links::{self, AppLink};
@@ -50,7 +50,9 @@ pub fn load_index() -> Option<CatalogIndex> {
             return Some(index);
         }
     }
-    let path = bundled_catalog_path()?;
+    let available = archive::bundled_term_codes();
+    let code = archive::launch_term_code(None, &available)?;
+    let path = archive::bundled_catalog_path_for(code)?;
     let mut catalog = archive::read(&path).ok()?;
     catalog.recompute_postreqs();
     Some(CatalogIndex::build(catalog))
@@ -86,7 +88,8 @@ fn seat_watch() -> i32 {
         eprintln!("termorganize: no catalog for seat watch");
         return 1;
     };
-    let mut data = store::load();
+    let dir = store::data_dir();
+    let (mut data, stamp) = store::load_stamped(&dir);
     let watched = data.watchlist.clone();
     let client = BannerClient::default();
     let mut live: HashMap<String, Vec<CourseSection>> = HashMap::new();
@@ -141,7 +144,7 @@ fn seat_watch() -> i32 {
             *slot = updated.clone();
         }
     }
-    let _ = store::save(&data);
+    let _ = store::save_merging(&dir, &data, &stamp);
     for alert in &report.alerts {
         let _ = std::process::Command::new("notify-send")
             .args(["--app-name=Term Organize", &alert.title(), &alert.body()])

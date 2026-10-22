@@ -15,6 +15,10 @@ pub struct Course {
     pub min_credits: f64,
     #[serde(default)]
     pub max_credits: f64,
+    /// Banner `creditHours`. For a variable-credit course this is only the default.
+    /// Older catalogs omit it; the default is then 4 when that sits in the range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hours: Option<f64>,
     #[serde(default)]
     pub attributes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,9 +54,78 @@ impl Course {
     pub fn credits_label(&self) -> String {
         credit_label(self.min_credits, self.max_credits)
     }
+
+    /// High and low differ, so the student picks the credits at registration.
+    pub fn is_variable_credit(&self) -> bool {
+        self.max_credits - self.min_credits > 1e-6
+    }
+
+    /// `creditHours` when it sits inside the range, otherwise the low value.
+    /// A fixed-credit course returns its only value.
+    pub fn default_credits(&self) -> f64 {
+        if !self.is_variable_credit() {
+            return self.min_credits;
+        }
+        let reported = self.credit_hours.unwrap_or(4.0);
+        if reported + 1e-9 >= self.min_credits && reported <= self.max_credits + 1e-9 {
+            clamp_whole_credits(reported, self.min_credits, self.max_credits)
+        } else {
+            clamp_whole_credits(self.min_credits, self.min_credits, self.max_credits)
+        }
+    }
+
+    /// Nearest whole number inside the variable range.
+    pub fn clamp_credits(&self, value: f64) -> f64 {
+        if !self.is_variable_credit() {
+            return self.min_credits;
+        }
+        clamp_whole_credits(value, self.min_credits, self.max_credits)
+    }
+
+    /// `Credits: 4 (1 to 8)`.
+    pub fn credits_choice_label(&self, chosen: f64) -> String {
+        format!(
+            "Credits: {} ({} to {})",
+            credit_number(chosen),
+            credit_number(self.min_credits),
+            credit_number(self.max_credits)
+        )
+    }
     pub fn nupaths(&self) -> Vec<NuPath> {
         NuPath::from_codes(&self.attributes)
     }
+
+    /// True when the course details were loaded and they list no prerequisites.
+    /// A loaded course omits `prereqs` when there are none. A course whose
+    /// details were not loaded leaves the field empty too, and that is unknown, not none.
+    pub fn has_no_prerequisites(&self) -> bool {
+        self.details_loaded
+            && self
+                .prereqs
+                .as_ref()
+                .is_none_or(|req| req.simplified().is_none())
+    }
+
+    /// True when the course details were loaded and they list no corequisites.
+    /// Same split as [`Self::has_no_prerequisites`]: omitted on a loaded course means none,
+    /// and empty before the details load means unknown.
+    pub fn has_no_corequisites(&self) -> bool {
+        self.details_loaded
+            && self
+                .coreqs
+                .as_ref()
+                .is_none_or(|req| req.simplified().is_none())
+    }
+}
+
+/// Whole number of credits inside `low..=high`.
+pub fn clamp_whole_credits(value: f64, low: f64, high: f64) -> f64 {
+    let lo = low.ceil();
+    let hi = high.floor();
+    if hi < lo {
+        return low;
+    }
+    value.round().clamp(lo, hi)
 }
 
 pub fn credit_number(value: f64) -> String {

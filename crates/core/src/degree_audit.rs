@@ -13,6 +13,7 @@ use crate::model::{
 use crate::nupath::{self, NuCourse};
 use crate::NuPath;
 use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AuditStatus {
@@ -39,6 +40,10 @@ pub struct CourseUse {
     pub by_substitution: bool,
     pub satisfies: Option<CourseKey>,
     pub instance: i32,
+    /// Section the user chose, when this row is one copy of a shared course number.
+    pub crn: Option<String>,
+    /// Degree-plan row this use was built from.
+    pub row_id: Uuid,
 }
 
 impl CourseUse {
@@ -468,6 +473,8 @@ impl AuditEngine {
                 by_substitution: false,
                 satisfies: None,
                 instance: 0,
+                crn: course.crn.clone(),
+                row_id: course.id,
             };
             let earlier: Vec<CourseUse> = engine
                 .instances
@@ -478,20 +485,33 @@ impl AuditEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-            if let Some(repeated) = earlier
-                .iter()
-                .find(|e| !counts_separately(&use_.title, use_.credits, &e.title, e.credits))
-            {
-                let better = if repeated.is_completed() == use_.is_completed() {
-                    use_.credits > repeated.credits
-                } else {
-                    use_.is_completed()
-                };
-                if better {
-                    use_.instance = repeated.instance;
-                    engine.pool.insert(use_.id(), use_);
+            // A row with no credit still folds into an earlier copy. Two rows that
+            // both have credit stay, including a warned repeat.
+            if use_.credits <= 0.0 || earlier.iter().any(|prior| prior.credits <= 0.0) {
+                if let Some(repeated) = earlier.iter().find(|prior| {
+                    if crate::planlogic::same_chosen_crn(use_.crn.as_deref(), prior.crn.as_deref())
+                    {
+                        return true;
+                    }
+                    if crate::planlogic::distinct_chosen_crns(
+                        use_.crn.as_deref(),
+                        prior.crn.as_deref(),
+                    ) {
+                        return false;
+                    }
+                    !counts_separately(&use_.title, use_.credits, &prior.title, prior.credits)
+                }) {
+                    let better = if repeated.is_completed() == use_.is_completed() {
+                        use_.credits > repeated.credits
+                    } else {
+                        use_.is_completed()
+                    };
+                    if better {
+                        use_.instance = repeated.instance;
+                        engine.pool.insert(use_.id(), use_);
+                    }
+                    return;
                 }
-                return;
             }
             use_.instance = earlier.len() as i32;
             let id = use_.id();
@@ -807,14 +827,19 @@ impl AuditEngine {
                 .cloned()
                 .unwrap_or_default();
             for substitution in subs {
-                let SubstitutionChange::CountCourse(key) = &substitution.change else {
+                let SubstitutionChange::CountCourse(counted) = &substitution.change else {
                     continue;
                 };
-                let Some(taken) = self.stand_in(key, &HashSet::new()) else {
+                let taken = if let Some(row) = counted.row {
+                    self.row_use(row)
+                } else {
+                    self.stand_in(&counted.course, &HashSet::new())
+                };
+                let Some(taken) = taken else {
                     self.unmatched.push(substitution);
                     continue;
                 };
-                self.consume(&taken, &rule.id, true, Some(key.clone()));
+                self.consume(&taken, &rule.id, true, Some(counted.course.clone()));
                 *self.options_counted.entry(rule.id.clone()).or_default() += 1;
             }
         }
@@ -1256,6 +1281,16 @@ impl AuditEngine {
             .entry(rule_id.to_string())
             .or_default()
             .append(&mut vec![use_]);
+    }
+
+    fn row_use(&self, row: Uuid) -> Option<String> {
+        self.pool.iter().find_map(|(id, use_)| {
+            if use_.row_id == row && self.available.contains(id) {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
     }
 
     fn stand_in(&self, required: &CourseKey, claimed: &HashSet<String>) -> Option<String> {
@@ -2392,7 +2427,19 @@ fn major_hours(note: &str) -> Option<f64> {
     re.captures(note)?.get(1)?.as_str().parse().ok()
 }
 
-fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, String) {
+/// How a semester-hour minimum stands, for the university minimum, the program
+/// total, and hours in the major.
+///
+/// `completed` is credits already earned. `planned` is credits in later terms.
+/// The line is `"{completed} of {required} semester hours"`, then
+/// `" · {planned} planned"` when `planned > 0`. The first number is
+/// `completed` alone. It is not `completed + planned`.
+///
+/// Status matches the other requirement rows. Complete when
+/// `completed >= required`. Planned when completed credits fall short but
+/// `completed + planned >= required`. Partial when `completed + planned > 0`
+/// and that sum is still under `required`. Missing when both are 0.
+pub fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, String) {
     let status = if completed >= required {
         AuditStatus::Complete
     } else if completed + planned >= required {
@@ -2404,13 +2451,27 @@ fn hours_status(completed: f64, planned: f64, required: f64) -> (AuditStatus, St
     };
     let mut detail = format!(
         "{} of {} semester hours",
-        hours_text(completed + planned),
+        hours_text(completed),
         hours_text(required)
     );
     if planned > 0.0 {
         detail.push_str(&format!(" · {} planned", hours_text(planned)));
     }
     (status, detail)
+}
+
+/// `105 of 134 credits done · 30 planned`. The first number is completed
+/// credits. Planned credits are the separate suffix.
+pub fn credits_line(audit: &DegreeAudit) -> String {
+    let done = hours_text(audit.completed_hours);
+    let mut line = match audit.required_hours {
+        Some(required) => format!("{done} of {} credits done", hours_text(required)),
+        None => format!("{done} credits done"),
+    };
+    if audit.planned_hours > 0.0 {
+        line.push_str(&format!(" · {} planned", hours_text(audit.planned_hours)));
+    }
+    line
 }
 
 fn describe(uses: &[CourseUse]) -> String {
@@ -3087,7 +3148,7 @@ pub fn counting_note(key: &CourseKey, result: &RuleResult) -> Option<String> {
         .substitutions
         .iter()
         .find(
-            |item| matches!(&item.change, SubstitutionChange::CountCourse(course) if course == key),
+            |item| matches!(&item.change, SubstitutionChange::CountCourse(counted) if &counted.course == key),
         )
         .and_then(substitution_caption)
 }

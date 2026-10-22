@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::calendar;
 use termorganize_core::index::CatalogIndex;
 use termorganize_core::model::*;
@@ -122,6 +122,10 @@ fn section(
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -150,6 +154,7 @@ fn input(
         excluded_crns: HashSet::new(),
         min_credits: credits,
         max_credits: credits,
+        unavailable_pin: None,
     }
 }
 
@@ -246,6 +251,10 @@ fn plan_with(codes: &[&str], selected: &[&str]) -> SchedulePlan {
             is_required: true,
             excluded_crns: HashSet::new(),
             color_index: offset as i32,
+
+            pinned_crn: None,
+            degree_row_id: None,
+            credits: None,
         });
     }
     plan.selected_crns = selected.iter().map(|crn| (*crn).to_string()).collect();
@@ -260,6 +269,7 @@ fn listed_course(subject: &str, number: &str, credits: f64) -> Course {
         description: String::new(),
         min_credits: credits,
         max_credits: credits,
+        credit_hours: None,
         attributes: vec![],
         prereqs: None,
         coreqs: None,
@@ -318,7 +328,7 @@ fn clashing_index() -> CatalogIndex {
 fn catalog() -> &'static CatalogIndex {
     static INDEX: OnceLock<CatalogIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
-        let path = bundled_catalog_path().expect("bundled catalog");
+        let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
         let catalog = archive::read(&path).expect("read catalog");
         CatalogIndex::build(catalog)
     })
@@ -803,6 +813,7 @@ fn catalog_inputs(index: &CatalogIndex, codes: &[&str]) -> Vec<ScheduleCourseInp
                 max_credits: course
                     .map(|course| course.max_credits.ceil() as i32)
                     .unwrap_or(0),
+                unavailable_pin: None,
             })
         })
         .collect()
@@ -1175,6 +1186,10 @@ fn plansSavedBeforePreferencesExistStillLoad() {
         is_required: true,
         excluded_crns: HashSet::new(),
         color_index: 0,
+
+        pinned_crn: None,
+        degree_row_id: None,
+        credits: None,
     }];
     let mut value = serde_json::to_value(&plan).unwrap();
     assert!(
@@ -3385,12 +3400,20 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
             is_required: true,
             excluded_crns: HashSet::new(),
             color_index: 0,
+
+            pinned_crn: None,
+            degree_row_id: None,
+            credits: None,
         },
         PlanCourse {
             key: key("MATH", "2331"),
             is_required: false,
             excluded_crns: HashSet::new(),
             color_index: 1,
+
+            pinned_crn: None,
+            degree_row_id: None,
+            credits: None,
         },
     ];
     let context = schedule::preferences_context(&plan, Some(index));
@@ -3430,6 +3453,10 @@ fn excludedSectionsDontOfferTheirInstructors() {
         is_required: true,
         excluded_crns: HashSet::new(),
         color_index: 0,
+
+        pinned_crn: None,
+        degree_row_id: None,
+        credits: None,
     }];
     let everyone = schedule::preferences_context(&plan, Some(index)).instructors;
     plan.courses[0].excluded_crns = index

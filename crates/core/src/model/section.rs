@@ -368,9 +368,26 @@ pub struct CourseSection {
     pub prereqs: Option<super::requisite::Requisite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coreqs: Option<super::requisite::Requisite>,
+    /// Banner `creditHours` for this section. A default, not the high value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hour_low: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hour_high: Option<f64>,
+    /// Parsed enrollment restrictions. Absent until the lazy details load stores them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrictions: Option<Vec<super::restriction::EnrollmentRestriction>>,
 }
 
 impl CourseSection {
+    /// `None` until restrictions have been loaded. `Some(true)` when the section is CPS-only.
+    pub fn cps_only(&self) -> Option<bool> {
+        self.restrictions
+            .as_ref()
+            .map(|restrictions| super::restriction::is_cps_only(restrictions))
+    }
+
     pub fn course_key(&self) -> CourseKey {
         CourseKey {
             subject: self.subject.clone(),

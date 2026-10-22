@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::banner::{self, SubjectLookup};
 use termorganize_core::html;
 use termorganize_core::index::{BuildingSummary, CatalogIndex, RoomBooking, RoomSchedule};
@@ -70,6 +70,10 @@ fn schedule_plan(
                 .map(str::to_string)
                 .collect(),
             color_index: 0,
+
+            pinned_crn: None,
+            degree_row_id: None,
+            credits: None,
         }],
         selected_crns: vec!["10004".into()],
         filters: ScheduleFilters::default(),
@@ -190,7 +194,7 @@ fn renamed_without_entitlement() -> String {
 fn bundled_index() -> &'static CatalogIndex {
     static INDEX: OnceLock<CatalogIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
-        let path = bundled_catalog_path().expect("bundled catalog");
+        let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
         CatalogIndex::build(archive::read(&path).expect("catalog"))
     })
 }
@@ -236,6 +240,10 @@ fn shell_section(crn: &str, seats: i32, waitlist: i32, capacity: i32) -> CourseS
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -2202,6 +2210,10 @@ fn professor_page_texts() {
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
+        restrictions: None,
     };
     let sections = vec![section(&a, "01"), section(&a, "04"), section(&b, "02")];
     assert_eq!(
@@ -2579,6 +2591,7 @@ fn catalog_archive_round_trip() {
         description: "Introduces…".into(),
         min_credits: 4.0,
         max_credits: 4.0,
+        credit_hours: None,
         attributes: vec!["NCFQ".into()],
         prereqs: Some(Requisite::Course(key("CS", "2100"))),
         coreqs: None,

@@ -1,7 +1,8 @@
 //! Instructor addresses stored in a catalog snapshot.
 //!
 //! Banner sometimes puts several addresses in one field, and some of those are
-//! personal. The bundled snapshot keeps Northeastern addresses only.
+//! personal. A kept address has the domain northeastern.edu or neu.edu exactly.
+//! Subdomains such as husky.neu.edu, ccs.neu.edu, and mail.neu.edu are dropped.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -24,10 +25,7 @@ pub fn is_northeastern_address(address: &str) -> bool {
     if domain.is_empty() || domain.contains('@') || domain.contains(' ') || !domain.contains('.') {
         return false;
     }
-    domain == "northeastern.edu"
-        || domain.ends_with(".northeastern.edu")
-        || domain == "neu.edu"
-        || domain.ends_with(".neu.edu")
+    domain == "northeastern.edu" || domain == "neu.edu"
 }
 
 /// Keep Northeastern addresses from a Banner field. Fields often list more than
@@ -210,7 +208,6 @@ fn is_domain_byte(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::archive;
-    use std::path::PathBuf;
 
     #[test]
     fn mixed_banner_field_keeps_northeastern_addresses() {
@@ -223,13 +220,13 @@ mod tests {
             retain_northeastern_addresses("Ada@neu.edu").as_deref(),
             Some("Ada@neu.edu")
         );
-        assert_eq!(
-            retain_northeastern_addresses("person@husky.neu.edu, other@coe.neu.edu").as_deref(),
-            Some("person@husky.neu.edu other@coe.neu.edu")
-        );
-        assert!(is_northeastern_address("x@ccs.neu.edu"));
-        assert!(is_northeastern_address("x@ece.neu.edu"));
-        assert!(is_northeastern_address("x@sub.northeastern.edu"));
+        assert!(retain_northeastern_addresses("person@husky.neu.edu, other@coe.neu.edu").is_none());
+        assert!(!is_northeastern_address("x@ccs.neu.edu"));
+        assert!(!is_northeastern_address("x@ece.neu.edu"));
+        assert!(!is_northeastern_address("x@sub.northeastern.edu"));
+        assert!(!is_northeastern_address("albanese.d@husky.neu.edu"));
+        assert!(!is_northeastern_address("viola@ccs.neu.edu"));
+        assert!(!is_northeastern_address("lab@mail.neu.edu"));
         assert!(!is_northeastern_address("x@gmail.com"));
         assert!(!is_northeastern_address("x@harvard.edu"));
         assert!(!is_northeastern_address("x@va.gov"));
@@ -253,31 +250,79 @@ mod tests {
 
     #[test]
     fn bundled_catalog_addresses_are_northeastern() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/catalog/term-202710.catalog");
-        let raw = std::fs::read(&path).expect("bundled catalog");
-        let json = archive::json_bytes(&raw).expect("catalog json");
-        let mut value: Value = serde_json::from_slice(&json).expect("catalog json");
-        let courses = value["courses"]
-            .as_array()
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        let sections = value["sections"]
-            .as_array()
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        assert!(courses > 2_500, "courses {courses}");
-        assert!(sections > 7_000, "sections {sections}");
-        let scan = redact_json_emails(&mut value);
-        assert!(
-            scan.kept > 1_000,
-            "expected the published northeastern addresses, kept {}",
-            scan.kept
-        );
-        assert!(
-            scan.removed_by_domain.is_empty(),
-            "bundled catalog still has non-university addresses: {:?}",
-            scan.removed_by_domain
-        );
+        let paths = archive::bundled_catalog_paths();
+        let codes: Vec<String> = paths
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(archive::term_code_from_file_name)
+            })
+            .collect();
+        assert!(codes.iter().any(|code| code == "202710"));
+        assert!(codes.iter().any(|code| code == "202730"));
+        for path in paths {
+            let raw = std::fs::read(&path).expect("bundled catalog");
+            let json = archive::json_bytes(&raw).expect("catalog json");
+            let mut value: Value = serde_json::from_slice(&json).expect("catalog json");
+            let code = value["term"]["code"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let courses = value["courses"]
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            let sections = value["sections"]
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            assert!(courses > 2_500, "{code} courses {courses}");
+            assert!(sections > 7_000, "{code} sections {sections}");
+            let raw = serde_json::to_string(&value).expect("catalog text");
+            let lower = raw.to_ascii_lowercase();
+            if code == "202710" {
+                assert!(
+                    lower.contains("albanese.d@husky.neu.edu"),
+                    "Fall 2026 should still store the student-domain address so the filter is what hides it"
+                );
+                assert!(
+                    lower.contains("viola@ccs.neu.edu"),
+                    "Fall 2026 should still store the ccs.neu.edu address so the filter is what hides it"
+                );
+            }
+            let scan = redact_json_emails(&mut value);
+            assert!(
+                scan.kept > 500,
+                "{code}: expected published northeastern addresses, kept {}",
+                scan.kept
+            );
+            if code == "202710" {
+                assert!(scan.kept > 1_000, "fall snapshot kept {}", scan.kept);
+                assert!(
+                    scan.removed_by_domain.contains_key("husky.neu.edu"),
+                    "husky.neu.edu should be dropped: {:?}",
+                    scan.removed_by_domain
+                );
+                assert!(
+                    scan.removed_by_domain.contains_key("ccs.neu.edu"),
+                    "ccs.neu.edu should be dropped: {:?}",
+                    scan.removed_by_domain
+                );
+            }
+            let redacted = serde_json::to_string(&value).expect("redacted catalog");
+            let redacted_lower = redacted.to_ascii_lowercase();
+            assert!(!redacted_lower.contains("albanese.d@husky.neu.edu"));
+            assert!(!redacted_lower.contains("viola@ccs.neu.edu"));
+            assert!(!redacted_lower.contains("@husky.neu.edu"));
+            assert!(!redacted_lower.contains("@ccs.neu.edu"));
+            assert!(!redacted_lower.contains("@mail.neu.edu"));
+            for address in addresses_in(&redacted) {
+                assert!(
+                    is_northeastern_address(address),
+                    "{code} kept a non-exact domain: {address}"
+                );
+            }
+        }
     }
 }

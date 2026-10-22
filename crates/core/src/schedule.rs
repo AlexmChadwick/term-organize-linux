@@ -151,6 +151,10 @@ pub struct ScheduleCourseInput {
     pub excluded_crns: HashSet<String>,
     pub min_credits: i32,
     pub max_credits: i32,
+    /// Set when this row is locked to a CRN the catalog does not have for this
+    /// course. `sections` is then empty. Generation reports the row as
+    /// unavailable and does not substitute another section of the same number.
+    pub unavailable_pin: Option<String>,
 }
 
 impl ScheduleCourseInput {
@@ -164,6 +168,7 @@ impl ScheduleCourseInput {
             excluded_crns: HashSet::new(),
             min_credits: 0,
             max_credits: 0,
+            unavailable_pin: None,
         }
     }
 }
@@ -293,6 +298,9 @@ pub struct CourseReport {
     pub total_sections: usize,
     pub remaining_sections: usize,
     pub rejections: HashMap<FilterReason, i32>,
+    /// The CRN this row is locked to when the catalog no longer has it.
+    /// Empty `total_sections` then means unavailable, not "not offered".
+    pub unavailable_pin: Option<String>,
 }
 
 impl CourseReport {
@@ -1583,6 +1591,7 @@ fn run(
             total_sections: course.sections.len(),
             remaining_sections: remaining.len(),
             rejections,
+            unavailable_pin: course.unavailable_pin.clone(),
         });
         kept.push(remaining);
     }
@@ -3262,26 +3271,24 @@ impl ResolvedPlan {
                 }
             }
         }
+        let pins = pinned_sections(plan, index);
         let mut entries = vec![];
         let mut claimed = HashSet::new();
-        for plan_course in &plan.courses {
+        for (plan_course, selected) in plan.courses.iter().zip(pins.iter()) {
+            for section in selected {
+                claimed.insert(section.crn.clone());
+            }
+            if let Some(crn) = plan_course.pinned_crn.as_deref() {
+                claimed.insert(crn.to_string());
+            }
             let all = index
                 .map(|index| index.sections_for(&plan_course.key))
                 .unwrap_or_default();
-            let mut selected = vec![];
-            for crn in &plan.selected_crns {
-                if let Some(section) = by_section.get(crn) {
-                    if section.course_key() == plan_course.key {
-                        claimed.insert(crn.clone());
-                        selected.push(section.clone());
-                    }
-                }
-            }
             entries.push(PlanEntry {
                 plan_course: plan_course.clone(),
                 course: index.and_then(|index| index.course(&plan_course.key).cloned()),
                 all_sections: all,
-                selected,
+                selected: selected.clone(),
                 catalog_available: index.is_some(),
             });
         }
@@ -3327,8 +3334,14 @@ impl ResolvedPlan {
                 continue;
             }
             if let Some(course) = &entry.course {
-                credits_min += course.min_credits;
-                credits_max += course.max_credits;
+                let copies = if course.special_topics && !entry.selected.is_empty() {
+                    entry.selected.len() as f64
+                } else {
+                    1.0
+                };
+                let each = chosen_row_credits(&entry.plan_course, Some(course));
+                credits_min += each * copies;
+                credits_max += each * copies;
             }
         }
         Self {
@@ -3631,24 +3644,166 @@ fn credit_number(value: f64) -> String {
     }
 }
 
+/// Sections generation is allowed to use for each plan row.
+///
+/// A chosen CRN is the only candidate for that row. Two special-topics
+/// sections that share a course number stay two candidates, and a CRN is
+/// given to at most one row.
+pub fn pinned_sections(
+    plan: &SchedulePlan,
+    index: Option<&crate::index::CatalogIndex>,
+) -> Vec<Vec<CourseSection>> {
+    let Some(index) = index else {
+        return vec![Vec::new(); plan.courses.len()];
+    };
+    let mut claimed = HashSet::new();
+    let mut rows = Vec::with_capacity(plan.courses.len());
+    for (row_index, course) in plan.courses.iter().enumerate() {
+        if let Some(crn) = crate::planlogic::chosen_crn(course.pinned_crn.as_deref()) {
+            let mut selected = Vec::new();
+            if claimed.insert(crn.to_string()) {
+                if let Some(section) = index.section_crn(crn) {
+                    if section.course_key() == course.key {
+                        selected.push(section.clone());
+                    }
+                }
+            }
+            rows.push(selected);
+            continue;
+        }
+        let later = plan
+            .courses
+            .iter()
+            .skip(row_index + 1)
+            .filter(|other| other.key == course.key && other.pinned_crn.is_none())
+            .count();
+        let mut selected = Vec::new();
+        for crn in &plan.selected_crns {
+            if claimed.contains(crn) {
+                continue;
+            }
+            let Some(section) = index.section_crn(crn) else {
+                continue;
+            };
+            if section.course_key() != course.key {
+                continue;
+            }
+            claimed.insert(crn.clone());
+            selected.push(section.clone());
+            if later > 0 {
+                break;
+            }
+        }
+        rows.push(selected);
+    }
+    rows
+}
+
+fn chosen_row_credits(course: &PlanCourse, listed: Option<&Course>) -> f64 {
+    if let Some(value) = course.credits {
+        return value;
+    }
+    listed.map(|course| course.default_credits()).unwrap_or(0.0)
+}
+
+fn input_for(
+    course: &PlanCourse,
+    sections: Vec<CourseSection>,
+    index: &crate::index::CatalogIndex,
+) -> ScheduleCourseInput {
+    let listed = index.course(&course.key);
+    let whole = chosen_row_credits(course, listed).round() as i32;
+    ScheduleCourseInput {
+        key: course.key.clone(),
+        is_required: course.is_required,
+        sections,
+        excluded_crns: course.excluded_crns.clone(),
+        min_credits: whole,
+        max_credits: whole,
+        unavailable_pin: None,
+    }
+}
+
+fn locked_input(
+    course: &PlanCourse,
+    index: &crate::index::CatalogIndex,
+    pin: &str,
+) -> ScheduleCourseInput {
+    let mut input = input_for(course, Vec::new(), index);
+    input.unavailable_pin = Some(pin.to_string());
+    input
+}
+
 pub fn inputs_for(
     plan: &SchedulePlan,
     index: &crate::index::CatalogIndex,
 ) -> Vec<ScheduleCourseInput> {
-    plan.courses
+    let pins = pinned_sections(plan, Some(index));
+    let claimed: HashSet<String> = pins
         .iter()
-        .map(|course| {
-            let listed = index.course(&course.key);
-            ScheduleCourseInput {
-                key: course.key.clone(),
-                is_required: course.is_required,
-                sections: index.sections_for(&course.key),
-                excluded_crns: course.excluded_crns.clone(),
-                min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
-                max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
+        .flatten()
+        .map(|section| section.crn.clone())
+        .collect();
+    let mut inputs = Vec::new();
+    for (row_index, (course, selected)) in plan.courses.iter().zip(pins).enumerate() {
+        let topics = index
+            .course(&course.key)
+            .is_some_and(|listed| listed.special_topics);
+        if let Some(crn) = crate::planlogic::chosen_crn(course.pinned_crn.as_deref()) {
+            if selected.is_empty() {
+                let listed = index.section_crn(crn);
+                let missing = listed.is_none_or(|section| section.course_key() != course.key);
+                if missing {
+                    inputs.push(locked_input(course, index, crn));
+                    continue;
+                }
             }
-        })
-        .collect()
+        } else if selected.is_empty() {
+            let siblings =
+                plan.courses.iter().enumerate().any(|(other_index, other)| {
+                    other_index != row_index && other.key == course.key
+                });
+            if !siblings {
+                let listed_elsewhere = plan.selected_crns.iter().any(|crn| {
+                    index
+                        .section_crn(crn)
+                        .is_some_and(|section| section.course_key() != course.key)
+                });
+                if !listed_elsewhere {
+                    if let Some(missing) = plan
+                        .selected_crns
+                        .iter()
+                        .find(|crn| index.section_crn(crn).is_none())
+                    {
+                        inputs.push(locked_input(course, index, missing));
+                        continue;
+                    }
+                }
+            }
+        }
+        if !selected.is_empty() {
+            if selected.len() > 1 {
+                for (offset, section) in selected.into_iter().enumerate() {
+                    let mut input = input_for(course, vec![section], index);
+                    if !topics && offset > 0 {
+                        input.min_credits = 0;
+                        input.max_credits = 0;
+                    }
+                    inputs.push(input);
+                }
+            } else {
+                inputs.push(input_for(course, selected, index));
+            }
+            continue;
+        }
+        let sections = index
+            .sections_for(&course.key)
+            .into_iter()
+            .filter(|section| !claimed.contains(&section.crn))
+            .collect();
+        inputs.push(input_for(course, sections, index));
+    }
+    inputs
 }
 
 pub fn favorites_of(
@@ -3737,6 +3892,8 @@ impl BlockerOption {
 pub struct BlockerAnalysis {
     pub required_count: usize,
     pub not_offered: Vec<CourseKey>,
+    /// Required courses locked to a CRN the catalog no longer has.
+    pub unavailable: Vec<CourseKey>,
     pub filtered_out: Vec<CourseKey>,
     pub options: Vec<BlockerOption>,
     pub conflicting_pairs: Vec<ConflictPair>,
@@ -3820,7 +3977,9 @@ pub fn analyze_blockers(
     for index in &required {
         if base.courses[*index].is_blocked() {
             dead.push(*index);
-            if base.courses[*index].total_sections == 0 {
+            if base.courses[*index].unavailable_pin.is_some() {
+                analysis.unavailable.push(courses[*index].key.clone());
+            } else if base.courses[*index].total_sections == 0 {
                 analysis.not_offered.push(courses[*index].key.clone());
             } else {
                 analysis.filtered_out.push(courses[*index].key.clone());
@@ -3989,7 +4148,9 @@ pub fn blocker_detail(
         format!("{} {noun}", option.schedule_count)
     }];
     for key in &option.courses {
-        if blockers.not_offered.contains(key) {
+        if blockers.unavailable.contains(key) {
+            parts.push(format!("{key}'s chosen section is unavailable"));
+        } else if blockers.not_offered.contains(key) {
             parts.push(format!("{key} isn’t offered in {term_name}"));
         } else if blockers.filtered_out.contains(key) {
             parts.push(format!("your rules rule out every {key} section"));
@@ -4021,7 +4182,15 @@ pub fn no_results_reasons(
         .iter()
         .filter(|report| report.is_blocked() && report.is_required)
     {
-        if report.total_sections == 0 {
+        if let Some(pin) = &report.unavailable_pin {
+            result.push(NoResultReason {
+                symbol: "lock".into(),
+                title: format!("{} is unavailable", report.key),
+                detail: Some(format!(
+                    "CRN {pin} is no longer in the {term_name} catalog. Another section was not substituted."
+                )),
+            });
+        } else if report.total_sections == 0 {
             result.push(NoResultReason {
                 symbol: "questionmark.folder".into(),
                 title: format!("{} isn’t offered in {term_name}", report.key),
@@ -4519,8 +4688,9 @@ pub fn preferences_context(
     let mut total_credits = 0;
     for plan_course in &plan.courses {
         let course = index.course(&plan_course.key);
-        let least = course.map(|c| c.min_credits.ceil() as i32).unwrap_or(0);
-        let most = course.map(|c| c.max_credits.ceil() as i32).unwrap_or(0);
+        let whole = chosen_row_credits(plan_course, course).round() as i32;
+        let least = whole;
+        let most = whole;
         if plan_course.is_required {
             required_credits += least;
         } else {
@@ -4612,6 +4782,9 @@ pub fn add_course(
         is_required: required,
         excluded_crns: HashSet::new(),
         color_index: color,
+        pinned_crn: None,
+        degree_row_id: None,
+        credits: None,
     });
     true
 }
@@ -4625,8 +4798,19 @@ pub fn remove_course(
     let Some(plan) = data.plans.iter_mut().find(|plan| plan.id == plan_id) else {
         return;
     };
-    plan.courses.retain(|course| &course.key != key);
-    let crns: HashSet<&str> = sections_of_course.iter().map(String::as_str).collect();
+    let Some(position) = plan.courses.iter().position(|course| &course.key == key) else {
+        return;
+    };
+    let removed = plan.courses.remove(position);
+    let another = plan.courses.iter().any(|course| &course.key == key);
+    let mut crn_list: Vec<&str> = sections_of_course.iter().map(String::as_str).collect();
+    if another {
+        crn_list.clear();
+        if let Some(pin) = removed.pinned_crn.as_deref() {
+            crn_list.push(pin);
+        }
+    }
+    let crns: HashSet<&str> = crn_list.into_iter().collect();
     plan.selected_crns
         .retain(|crn| !crns.contains(crn.as_str()));
     plan.favorite_combinations
@@ -4650,13 +4834,32 @@ pub fn remove_plan_course(
     let plan = data.plans.iter().find(|plan| plan.id == plan_id)?.clone();
     let resolved = ResolvedPlan::resolve(&plan, index);
     let entry = resolved.entries.iter().find(|entry| entry.key() == key)?;
-    let mut crns = entry.course_crns();
-    for section in &entry.selected {
-        crns.insert(section.crn.clone());
-    }
-    if let Some(index) = index {
-        for section in index.sections_for(key) {
-            crns.insert(section.crn);
+    let topics = entry
+        .course
+        .as_ref()
+        .is_some_and(|course| course.special_topics);
+    let rows = plan
+        .courses
+        .iter()
+        .filter(|course| &course.key == key)
+        .count();
+    let mut crns = HashSet::new();
+    if topics || rows > 1 {
+        for section in &entry.selected {
+            crns.insert(section.crn.clone());
+        }
+        if let Some(pin) = &entry.plan_course.pinned_crn {
+            crns.insert(pin.clone());
+        }
+    } else {
+        crns = entry.course_crns();
+        for section in &entry.selected {
+            crns.insert(section.crn.clone());
+        }
+        if let Some(index) = index {
+            for section in index.sections_for(key) {
+                crns.insert(section.crn);
+            }
         }
     }
     let removal = CourseRemoval {

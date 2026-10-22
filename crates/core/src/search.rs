@@ -20,6 +20,15 @@ pub enum InstructionFilter {
     Online,
 }
 
+/// Northeastern course-number band. Undergrad is below 5000. Grad is 5000 and up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CourseLevel {
+    #[default]
+    All,
+    Undergrad,
+    Grad,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchFilters {
     pub subjects: HashSet<String>,
@@ -31,6 +40,12 @@ pub struct SearchFilters {
     pub class_types: HashSet<String>,
     pub honors_only: bool,
     pub open_seats_only: bool,
+    /// Keep courses whose loaded details list no prerequisites. Unknown details are left out.
+    pub no_prerequisites: bool,
+    /// Keep courses whose loaded details list no corequisites. Unknown details are left out.
+    pub no_corequisites: bool,
+    /// Undergrad, grad, or both. Combines with the other filters.
+    pub course_level: CourseLevel,
     pub instruction: InstructionFilter,
     pub allowed_days: Option<DaySet>,
     pub starts_after: Option<i32>,
@@ -49,6 +64,9 @@ impl Default for SearchFilters {
             class_types: HashSet::new(),
             honors_only: false,
             open_seats_only: false,
+            no_prerequisites: false,
+            no_corequisites: false,
+            course_level: CourseLevel::All,
             instruction: InstructionFilter::Any,
             allowed_days: None,
             starts_after: None,
@@ -82,6 +100,15 @@ impl SearchFilters {
             n += 1;
         }
         if self.open_seats_only {
+            n += 1;
+        }
+        if self.no_prerequisites {
+            n += 1;
+        }
+        if self.no_corequisites {
+            n += 1;
+        }
+        if self.course_level != CourseLevel::All {
             n += 1;
         }
         if self.instruction != InstructionFilter::Any {
@@ -131,7 +158,24 @@ impl SearchFilters {
                 return false;
             }
         }
+        if self.no_prerequisites && !course.has_no_prerequisites() {
+            return false;
+        }
+        if self.no_corequisites && !course.has_no_corequisites() {
+            return false;
+        }
+        if !self.matches_level(course) {
+            return false;
+        }
         true
+    }
+    pub fn matches_level(&self, course: &Course) -> bool {
+        let number = course.key().numeric_value();
+        match self.course_level {
+            CourseLevel::All => true,
+            CourseLevel::Undergrad => number < 5000,
+            CourseLevel::Grad => number >= 5000,
+        }
     }
     pub fn matches_section(&self, s: &CourseSection) -> bool {
         if !self.campuses.is_empty() && !self.campuses.contains(&s.campus) {
