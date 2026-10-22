@@ -530,7 +530,6 @@ struct CourseRow {
     key: Option<CourseKey>,
     label: String,
     detail: String,
-    crn: Option<String>,
 }
 
 struct SemesterSnap {
@@ -577,18 +576,11 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                     blocking.push(key.clone());
                 }
             }
-            let crn = editing::clean_crn(course.crn.as_deref());
-            let mut label = format!("{} {}", course.label, course.title);
-            if let Some(pin) = &crn {
-                label.push_str("  CRN ");
-                label.push_str(pin);
-            }
             courses.push(CourseRow {
                 id: course.id,
                 key: course.key.clone(),
-                label,
+                label: format!("{} {}", course.label, course.title),
                 detail,
-                crn,
             });
         }
         let notes = &state.course_notes;
@@ -824,12 +816,11 @@ fn course_drag_row(
     position: i32,
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
-    let outer = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    outer.set_margin_top(6);
-    outer.set_margin_bottom(6);
-    outer.set_margin_start(8);
-    outer.set_margin_end(8);
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    box_.set_margin_top(6);
+    box_.set_margin_bottom(6);
+    box_.set_margin_start(8);
+    box_.set_margin_end(8);
     let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
     text.set_hexpand(true);
     let label = gtk::Label::new(Some(&course.label));
@@ -850,28 +841,6 @@ fn course_drag_row(
         box_.append(&open);
         attach_course_drag(&box_, key);
     }
-    outer.append(&box_);
-    let crn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let crn = gtk::Entry::builder()
-        .placeholder_text("CRN")
-        .width_chars(8)
-        .text(course.crn.as_deref().unwrap_or(""))
-        .build();
-    let save = gtk::Button::with_label("Save CRN");
-    let course_id = course.id;
-    let submit = {
-        let shell = shell.clone();
-        let crn = crn.clone();
-        move || super::save_degree_crn(&shell, course_id, &crn.text())
-    };
-    crn.connect_activate({
-        let submit = submit.clone();
-        move |_| submit()
-    });
-    save.connect_clicked(move |_| submit());
-    crn_row.append(&crn);
-    crn_row.append(&save);
-    outer.append(&crn_row);
     let mut entries = Vec::new();
     if let Some(key) = &course.key {
         let shell_open = shell.clone();
@@ -898,7 +867,7 @@ fn course_drag_row(
         Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
     });
     row.add_controller(source);
-    row.set_child(Some(&outer));
+    row.set_child(Some(&box_));
     attach_semester_drop(&row, shell, term_id, position);
     row
 }
@@ -960,45 +929,26 @@ fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position
         else {
             return false;
         };
-        let placed = if let Some(id) = payload
+        if let Some(id) = payload
             .strip_prefix("id:")
             .and_then(|raw| Uuid::parse_str(raw).ok())
         {
             editing::move_course_at(id, term_id, position, plan);
-            Ok(())
         } else if let Some(course) = added {
             let id = course.id;
-            let key = course.key.clone();
-            let crn = course.crn.clone();
-            if editing::try_add(course, term_id, plan) {
-                editing::move_course_at(id, term_id, position, plan);
-                Ok(())
-            } else {
-                Err(match &key {
-                    Some(key) => editing::block_reason(plan, key, crn.as_deref(), None)
-                        .unwrap_or_else(|| format!("{key} could not be added.")),
-                    None => "That course could not be added.".into(),
-                })
-            }
+            editing::add(course, term_id, plan);
+            editing::move_course_at(id, term_id, position, plan);
         } else {
             return false;
-        };
-        if placed.is_ok() {
-            plan.updated_at = Some(now_secs().to_string());
-            persist(&mut state);
         }
-        placed
+        plan.updated_at = Some(now_secs().to_string());
+        persist(&mut state);
+        true
     };
-    match moved {
-        Ok(()) => {
-            refresh(shell);
-            true
-        }
-        Err(reason) => {
-            toast(shell, &reason);
-            false
-        }
+    if moved {
+        refresh(shell);
     }
+    moved
 }
 
 fn apply_move(shell: &Rc<RefCell<Shell>>, suggestion: &reorder::Suggestion) {
