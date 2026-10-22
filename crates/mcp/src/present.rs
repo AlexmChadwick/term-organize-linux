@@ -4,7 +4,9 @@
 
 use serde_json::{json, Value};
 use termorganize_core::email::retain_northeastern_addresses;
-use termorganize_core::model::{credit_number, label_minutes, Course, CourseSection, Instructor};
+use termorganize_core::model::{
+    course_cps_only, credit_number, label_minutes, Course, CourseSection, Instructor,
+};
 
 pub fn credits_text(min: f64, max: f64) -> String {
     if (min - max).abs() < 1e-9 {
@@ -14,7 +16,7 @@ pub fn credits_text(min: f64, max: f64) -> String {
     }
 }
 
-pub fn course_json(course: &Course) -> Value {
+pub fn course_json(course: &Course, sections: &[CourseSection]) -> Value {
     json!({
         "subject": course.subject,
         "number": course.number,
@@ -26,7 +28,15 @@ pub fn course_json(course: &Course) -> Value {
         "credit_high": course.max_credits,
         "chosen_credits": course.default_credits(),
         "attributes": course.attributes,
+        "cps_only": json_flag(course_cps_only(sections.iter().map(|section| section.cps_only()))),
     })
+}
+
+fn json_flag(flag: Option<bool>) -> Value {
+    match flag {
+        Some(value) => Value::Bool(value),
+        None => Value::Null,
+    }
 }
 
 pub fn kept_email(field: &str) -> Option<String> {
@@ -95,6 +105,7 @@ pub fn section_json(section: &CourseSection) -> Value {
         "instructors": instructors,
         "seats_remaining": section.seats_remaining,
         "seat_capacity": section.seat_capacity,
+        "cps_only": json_flag(section.cps_only()),
     })
 }
 

@@ -285,6 +285,8 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         state.data.preferences.selected_term_code = Some(code.clone());
         planlogic::clamp_saved_credits(&mut state.data, &index.catalog.courses);
         state.index = index;
+        shell_ref.restrictions_loading.borrow_mut().clear();
+        shell_ref.restrictions_attempted.borrow_mut().clear();
         state.live_seats.clear();
         state.generated.clear();
         state.course = None;
@@ -295,6 +297,86 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
     let terms = known_terms(&shell.borrow().state.borrow().index);
     apply_term_model(shell, &terms, &code);
     refresh(shell);
+}
+
+pub(super) fn load_restrictions(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let token = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        format!("{}|{}", state.index.catalog.term.code, key)
+    };
+    let (term, crns) = {
+        let shell_ref = shell.borrow();
+        if shell_ref.restrictions_loading.borrow().contains(&token)
+            || shell_ref.restrictions_attempted.borrow().contains(&token)
+        {
+            return;
+        }
+        let state = shell_ref.state.borrow();
+        let crns: Vec<String> = state
+            .index
+            .sections_for(key)
+            .into_iter()
+            .filter(|section| section.restrictions.is_none())
+            .map(|section| section.crn)
+            .collect();
+        if crns.is_empty() {
+            return;
+        }
+        (state.index.catalog.term.code.clone(), crns)
+    };
+    shell
+        .borrow()
+        .restrictions_loading
+        .borrow_mut()
+        .insert(token.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = BannerClient::default().fetch_section_restrictions(&term, &crns);
+        let _ = tx.send(result);
+    });
+    let shell = shell.clone();
+    let key = key.clone();
+    glib::timeout_add_local(Duration::from_millis(400), move || match rx.try_recv() {
+        Ok(result) => {
+            {
+                let shell_ref = shell.borrow();
+                shell_ref.restrictions_loading.borrow_mut().remove(&token);
+                shell_ref
+                    .restrictions_attempted
+                    .borrow_mut()
+                    .insert(token.clone());
+                if let Ok(updates) = result {
+                    if !updates.is_empty() {
+                        let mut state = shell_ref.state.borrow_mut();
+                        let mut catalog = state.index.catalog.clone();
+                        for section in &mut catalog.sections {
+                            if let Some((_, restrictions)) =
+                                updates.iter().find(|(crn, _)| crn == &section.crn)
+                            {
+                                section.restrictions = Some(restrictions.clone());
+                            }
+                        }
+                        let _ = catalog::save_cached(&catalog);
+                        state.index = CatalogIndex::build(catalog);
+                    }
+                }
+            }
+            refresh(&shell);
+            replace_course_window(&shell, &key);
+            glib::ControlFlow::Break
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            let shell_ref = shell.borrow();
+            shell_ref.restrictions_loading.borrow_mut().remove(&token);
+            shell_ref
+                .restrictions_attempted
+                .borrow_mut()
+                .insert(token.clone());
+            glib::ControlFlow::Break
+        }
+    });
 }
 
 pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
@@ -577,6 +659,7 @@ struct CourseRow {
     detail: String,
     /// Low, high, and the chosen value when this row is variable credit.
     credits: Option<(f64, f64, f64)>,
+    cps: Option<String>,
 }
 
 struct SemesterSnap {
@@ -627,6 +710,10 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
             if let Some(pin) = planlogic::chosen_crn(course.crn.as_deref()) {
                 label.push_str(&format!("  CRN {pin}"));
             }
+            let cps = course.key.as_ref().and_then(|key| {
+                cps_note(state.index.sections_for(key).iter().map(|section| section.cps_only()))
+                    .map(str::to_string)
+            });
             let credits = course.key.as_ref().and_then(|key| {
                 let listed = state.index.course(key)?;
                 if !listed.is_variable_credit() {
@@ -644,6 +731,7 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                 label,
                 detail,
                 credits,
+                cps,
             });
         }
         let notes = &state.course_notes;
@@ -892,6 +980,9 @@ fn course_drag_row(
     text.append(&label);
     if !course.detail.is_empty() {
         text.append(&dim_label(&course.detail));
+    }
+    if let Some(note) = &course.cps {
+        text.append(&dim_label(note));
     }
     if let Some((low, high, value)) = course.credits {
         let course_id = course.id;

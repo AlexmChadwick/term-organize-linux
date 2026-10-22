@@ -111,9 +111,13 @@ Newest term first.
 
 ### search_courses
 
-`term` (name or Banner code), optional `query`, `subject`, `number`, `attribute`, `limit` (default 25, at most 100), `no_prerequisites`, and `no_corequisites`.
+`term` (name or Banner code), optional `query`, `subject`, `number`, `attribute`, `limit` (default 25, at most 100), `no_prerequisites`, `no_corequisites`, and `level`.
 
 `no_prerequisites` and `no_corequisites` default to false. When one is true, a course is kept only when its details were loaded and that requisite was omitted. A course whose details were not loaded is unknown, so it stays out. An empty requisite group counts as none once the details are loaded.
+
+`level` is `all` (the default), `undergrad`, or `grad`. Undergrad is a course number below 5000. Grad is 5000 and up. It combines with the other filters, including the requisite filters.
+
+Each course includes `cps_only`: `true` when every section with loaded restrictions is CPS-only, `false` when a loaded section is not, and `null` when no section has loaded restrictions yet. The same field is on each section. `null` means the restriction page has not been cached with the catalog.
 
 ```json
 {
@@ -125,7 +129,8 @@ Newest term first.
     "credits": "4",
     "min_credits": 4,
     "max_credits": 4,
-    "attributes": []
+    "attributes": [],
+    "cps_only": null
   }]
 }
 ```
@@ -143,7 +148,8 @@ Newest term first.
   "location": "SN 108",
   "instructors": [{ "name": "Ada Lovelace", "email": "lovelace@northeastern.edu" }],
   "seats_remaining": 3,
-  "seat_capacity": 30
+  "seat_capacity": 30,
+  "cps_only": null
 }
 ```
 

@@ -116,6 +116,10 @@ struct Shell {
     /// Owns the `user.json` monitor. Dropping it would stop reload events.
     #[allow(dead_code)]
     user_monitor: Option<gio::FileMonitor>,
+    /// Course keys whose section restrictions are being fetched.
+    restrictions_loading: RefCell<HashSet<String>>,
+    /// Course keys already asked this session, so a miss does not retry immediately.
+    restrictions_attempted: RefCell<HashSet<String>>,
 }
 
 pub(crate) fn course_window_name(key: &CourseKey) -> String {
@@ -346,6 +350,8 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         keep_focus: Cell::new(None),
         reload_pane_share: Cell::new(None),
         user_monitor: None,
+        restrictions_loading: RefCell::new(HashSet::new()),
+        restrictions_attempted: RefCell::new(HashSet::new()),
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -912,6 +918,7 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
+    filters_box.append(&level_filter(shell, &filters));
     filters_box.append(&open_only);
     filters_box.append(&honors);
     filters_box.append(&no_prereqs);
@@ -961,8 +968,18 @@ fn course_list(
         name.set_lines(2);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         name.set_max_width_chars(48);
+        let title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        title_box.set_hexpand(true);
+        title_box.append(&name);
+        let cps = {
+            let sections = shell.borrow().state.borrow().index.sections_for(key);
+            cps_note(sections.iter().map(|section| section.cps_only()))
+        };
+        if let Some(note) = cps {
+            title_box.append(&dim_label(note));
+        }
         row.append(&code);
-        row.append(&name);
+        row.append(&title_box);
         row.append(&meta_label(credits));
         row.append(&meta_label(seats));
         let item = gtk::ListBoxRow::new();
@@ -1094,6 +1111,9 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
             .collect::<Vec<_>>()
             .join(" ")
     )));
+    if let Some(note) = cps_note(sections.iter().map(|section| section.cps_only())) {
+        root.append(&dim_label(note));
+    }
     if !course.description.is_empty() {
         let body = gtk::Label::new(Some(&course.description));
         body.set_wrap(true);
@@ -1160,6 +1180,9 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         detail.set_wrap(true);
         detail.set_max_width_chars(42);
         row.append(&detail);
+        if section.cps_only() == Some(true) {
+            row.append(&dim_label(CPS_ONLY_NOTE));
+        }
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let copy = gtk::Button::with_label("Copy CRN");
         let crn = section.crn.clone();
@@ -1209,6 +1232,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> gtk::Widget {
         }
     });
     root.append(&list);
+    gap::load_restrictions(shell, key);
     root.upcast()
 }
 
@@ -4665,6 +4689,44 @@ fn toast(shell: &Rc<RefCell<Shell>>, text: &str) {
     }
     let toast = adw::Toast::new(text);
     shell.borrow().toast.add_toast(toast);
+}
+
+fn level_filter(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("linked");
+    row.set_widget_name("course-level-filter");
+    let all = gtk::ToggleButton::with_label("All");
+    let undergrad = gtk::ToggleButton::with_label("Undergrad");
+    let grad = gtk::ToggleButton::with_label("Grad");
+    undergrad.set_group(Some(&all));
+    grad.set_group(Some(&all));
+    match filters.course_level {
+        search::CourseLevel::Undergrad => undergrad.set_active(true),
+        search::CourseLevel::Grad => grad.set_active(true),
+        search::CourseLevel::All => all.set_active(true),
+    }
+    for (button, level) in [
+        (all, search::CourseLevel::All),
+        (undergrad, search::CourseLevel::Undergrad),
+        (grad, search::CourseLevel::Grad),
+    ] {
+        button.connect_toggled({
+            let shell = shell.clone();
+            move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                let current = shell.borrow().state.borrow().filters.course_level;
+                if current == level {
+                    return;
+                }
+                shell.borrow().state.borrow_mut().filters.course_level = level;
+                refresh(&shell);
+            }
+        });
+        row.append(&button);
+    }
+    row.upcast()
 }
 
 fn search_filter_row(shell: &Rc<RefCell<Shell>>, filters: &SearchFilters) -> gtk::Widget {

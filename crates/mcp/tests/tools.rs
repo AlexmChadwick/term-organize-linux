@@ -56,14 +56,18 @@ fn every_catalog_tool_reads_the_bundled_terms() {
         limit: Some(5),
         no_prerequisites: false,
         no_corequisites: false,
+        level: tools::SearchLevel::All,
     })
     .unwrap();
     assert_eq!(found["courses"][0]["subject"], "CS");
     assert_eq!(found["courses"][0]["number"], "2100");
     assert!(found["courses"][0]["title"].as_str().unwrap().len() > 3);
     assert!(found["courses"][0].get("credits").is_some());
+    assert!(found["courses"][0]["cps_only"].is_null());
 
     let course = tools::get_course(fall_course()).unwrap();
+    assert!(course["cps_only"].is_null());
+    assert!(course["sections"][0]["cps_only"].is_null());
     let sections = course["sections"].as_array().unwrap();
     assert!(!sections.is_empty());
     let crn = sections[0]["crn"].as_str().unwrap().to_string();
@@ -967,14 +971,17 @@ fn search_tool_requisite_filters_keep_loaded_courses_with_none() {
         .unwrap();
     assert!(props.contains_key("no_prerequisites"));
     assert!(props.contains_key("no_corequisites"));
+    assert!(props.contains_key("level"));
     let description = tool.description.as_deref().unwrap();
     assert!(description.contains("no_prerequisites"));
     assert!(description.contains("no_corequisites"));
+    assert!(description.contains("undergrad"));
 
     let omitted: tools::SearchArgs =
         serde_json::from_str(r#"{"term":"Fall 2026","subject":"CS","limit":5}"#).unwrap();
     assert!(!omitted.no_prerequisites);
     assert!(!omitted.no_corequisites);
+    assert_eq!(omitted.level, tools::SearchLevel::All);
 
     let index = term_organize_mcp::catalogs::catalogs()
         .iter()
@@ -1004,6 +1011,7 @@ fn search_tool_requisite_filters_keep_loaded_courses_with_none() {
             limit: Some(25),
             no_prerequisites: prereq,
             no_corequisites: coreq,
+            level: tools::SearchLevel::All,
         })
         .unwrap();
         found["courses"].as_array().unwrap().iter().any(|row| {
@@ -1028,6 +1036,62 @@ fn search_tool_requisite_filters_keep_loaded_courses_with_none() {
         assert!(!listed(unknown, true, true), "{}", unknown.code());
     }
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn search_level_splits_undergrad_and_grad() {
+    let under = tools::search_courses(tools::SearchArgs {
+        term: "Fall 2026".into(),
+        query: None,
+        subject: Some("CS".into()),
+        number: Some("2100".into()),
+        attribute: None,
+        limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
+        level: tools::SearchLevel::Undergrad,
+    })
+    .unwrap();
+    assert_eq!(under["courses"][0]["number"], "2100");
+    let hidden = tools::search_courses(tools::SearchArgs {
+        term: "Fall 2026".into(),
+        query: None,
+        subject: Some("CS".into()),
+        number: Some("2100".into()),
+        attribute: None,
+        limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
+        level: tools::SearchLevel::Grad,
+    })
+    .unwrap();
+    assert!(hidden["courses"].as_array().unwrap().is_empty());
+    let grad = tools::search_courses(tools::SearchArgs {
+        term: "Fall 2026".into(),
+        query: None,
+        subject: Some("CS".into()),
+        number: Some("5200".into()),
+        attribute: None,
+        limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
+        level: tools::SearchLevel::Grad,
+    })
+    .unwrap();
+    assert_eq!(grad["courses"][0]["number"], "5200");
+    let under_hides_grad = tools::search_courses(tools::SearchArgs {
+        term: "Fall 2026".into(),
+        query: None,
+        subject: Some("CS".into()),
+        number: Some("5200".into()),
+        attribute: None,
+        limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
+        level: tools::SearchLevel::Undergrad,
+    })
+    .unwrap();
+    assert!(under_hides_grad["courses"].as_array().unwrap().is_empty());
 }
 
 fn spring_only_course() -> CourseKey {
@@ -1064,6 +1128,7 @@ fn variable_credit_add_and_set_credits_follow_the_row_rules() {
         limit: Some(5),
         no_prerequisites: false,
         no_corequisites: false,
+        level: tools::SearchLevel::All,
     })
     .unwrap();
     let course = &found["courses"][0];

@@ -152,6 +152,57 @@ pub fn corequisites(html: &str, subjects: &SubjectLookup) -> Option<Requisite> {
     }
 }
 
+/// Headings such as "Must be enrolled in one of the following Levels:" and the values under them.
+/// `None` when the HTML is not a restrictions page, so a failed response stays unknown.
+pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>> {
+    let text = plain_text(html);
+    let lowered = text.to_ascii_lowercase();
+    if !lowered.contains("enrolled in one of the following")
+        && !lowered.contains("not all restrictions")
+    {
+        return None;
+    }
+    let heading = Regex::new(
+        r"(?i)^(must|cannot) be enrolled in one of the following ([^:]+):\s*$",
+    )
+    .unwrap();
+    let mut restrictions = Vec::new();
+    let mut current: Option<EnrollmentRestriction> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(caps) = heading.captures(line) {
+            if let Some(done) = current.take() {
+                if !done.values.is_empty() {
+                    restrictions.push(done);
+                }
+            }
+            let kind = if caps[1].eq_ignore_ascii_case("must") {
+                RestrictionKind::Must
+            } else {
+                RestrictionKind::Cannot
+            };
+            current = Some(EnrollmentRestriction {
+                kind,
+                category: caps[2].trim().to_string(),
+                values: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(restriction) = current.as_mut() {
+            restriction.values.push(line.to_string());
+        }
+    }
+    if let Some(done) = current {
+        if !done.values.is_empty() {
+            restrictions.push(done);
+        }
+    }
+    Some(restrictions)
+}
+
 pub fn description(html: &str) -> String {
     let text = plain_text(html);
     let lowered = text.to_ascii_lowercase();
@@ -826,6 +877,56 @@ impl BannerClient {
         .map_err(|e| e.to_string())
     }
 
+    /// Pause between section restriction requests so a course open does not hammer Banner.
+    pub const RESTRICTION_GAP: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// Restrictions for each CRN, in order. A CRN whose page is not restriction HTML is omitted
+    /// so it stays unknown. One session is opened for the batch.
+    pub fn fetch_section_restrictions(
+        &self,
+        term: &str,
+        crns: &[String],
+    ) -> Result<Vec<(String, Vec<EnrollmentRestriction>)>, String> {
+        if crns.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cookie = self.open_session(term)?;
+        let mut found = Vec::new();
+        for (index, crn) in crns.iter().enumerate() {
+            if index > 0 {
+                std::thread::sleep(Self::RESTRICTION_GAP);
+            }
+            let html = match self.post_restrictions(&cookie, term, crn) {
+                Ok(html) => html,
+                Err(_) => continue,
+            };
+            if let Some(restrictions) = enrollment_restrictions(&html) {
+                found.push((crn.clone(), restrictions));
+            }
+        }
+        Ok(found)
+    }
+
+    fn post_restrictions(&self, cookie: &str, term: &str, crn: &str) -> Result<String, String> {
+        let url = format!("{}searchResults/getRestrictions", self.ssb());
+        let body = format!("term={term}&courseReferenceNumber={crn}");
+        let cookie = cookie.to_string();
+        perform(|| {
+            classify(
+                ureq::post(&url)
+                    .set(
+                        "Content-Type",
+                        "application/x-www-form-urlencoded; charset=UTF-8",
+                    )
+                    .set("Cookie", &cookie)
+                    .timeout(std::time::Duration::from_secs(25))
+                    .send_string(&body),
+            )
+        })?
+        .into_string()
+        .map_err(|e| e.to_string())
+    }
+
     /// Catalog entry for one course in one term. `None` when that catalog does not list it.
     pub fn fetch_course_info(
         &self,
@@ -1007,6 +1108,7 @@ fn section_from_seat(crn: &str, key: &CourseKey, seat: &LiveSeat) -> CourseSecti
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     }
 }
 
@@ -1252,6 +1354,7 @@ mod tests {
             credit_hours: None,
             credit_hour_low: None,
             credit_hour_high: None,
+            restrictions: None,
         }
     }
 }

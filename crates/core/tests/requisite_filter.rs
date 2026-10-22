@@ -187,5 +187,6 @@ fn section(crn: &str, course: &Course) -> CourseSection {
         credit_hours: None,
         credit_hour_low: None,
         credit_hour_high: None,
+        restrictions: None,
     }
 }

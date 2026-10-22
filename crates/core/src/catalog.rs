@@ -325,6 +325,7 @@ pub fn make_sections(
                 credit_hours: section.credit_hours,
                 credit_hour_low: section.credit_hour_low,
                 credit_hour_high: section.credit_hour_high,
+                restrictions: prior.and_then(|p| p.restrictions.clone()),
             }
         })
         .collect()

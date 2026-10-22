@@ -121,6 +121,18 @@ pub struct SearchArgs {
     /// Unknown details are left out.
     #[serde(default)]
     pub no_corequisites: bool,
+    /// `all`, `undergrad` (number below 5000), or `grad` (5000 and up).
+    #[serde(default)]
+    pub level: SearchLevel,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchLevel {
+    #[default]
+    All,
+    Undergrad,
+    Grad,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -291,6 +303,11 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
     }
     filters.no_prerequisites = args.no_prerequisites;
     filters.no_corequisites = args.no_corequisites;
+    filters.course_level = match args.level {
+        SearchLevel::All => termorganize_core::search::CourseLevel::All,
+        SearchLevel::Undergrad => termorganize_core::search::CourseLevel::Undergrad,
+        SearchLevel::Grad => termorganize_core::search::CourseLevel::Grad,
+    };
     let limit = args.limit.unwrap_or(25).clamp(1, 100) as usize;
     let text = args.query.unwrap_or_default();
     let response = search::search(
@@ -318,7 +335,8 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
                 continue;
             }
         }
-        courses.push(course_json(&result.course));
+        let sections = index.sections_for(&result.course.key());
+        courses.push(course_json(&result.course, &sections));
         if courses.len() == limit {
             break;
         }
@@ -339,12 +357,9 @@ pub fn get_course(args: CourseArgs) -> Result<Value, ToolError> {
             parsed.label
         ))
     })?;
-    let sections: Vec<Value> = index
-        .sections_for(&course.key())
-        .iter()
-        .map(section_json)
-        .collect();
-    let mut value = course_json(course);
+    let listed = index.sections_for(&course.key());
+    let sections: Vec<Value> = listed.iter().map(section_json).collect();
+    let mut value = course_json(course, &listed);
     value["term"] = json!({ "term": index.catalog.term.code, "name": parsed.label });
     value["sections"] = json!(sections);
     Ok(value)

@@ -108,7 +108,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Search courses in one bundled term. no_prerequisites and no_corequisites keep a course only when its details were loaded and that requisite was omitted.",
+        description = "Search courses in one bundled term. no_prerequisites and no_corequisites keep a course only when its details were loaded and that requisite was omitted. level is all, undergrad (course number below 5000), or grad (5000 and up), and it combines with the other filters. Course and section results include cps_only (true, false, or null when restrictions are not loaded).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
