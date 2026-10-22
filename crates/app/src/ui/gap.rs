@@ -2,7 +2,7 @@
 //! petition questions, and the rest of the preferences survey.
 
 use super::*;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::catalog;
 use termorganize_core::course_info::{self, CourseInfoRepository};
 use termorganize_core::editing;
@@ -68,7 +68,7 @@ pub fn known_terms(current: &CatalogIndex) -> Vec<(String, String)> {
             .or_insert_with(|| term_label(term));
     };
     add(&current.catalog.term);
-    if let Some(path) = bundled_catalog_path() {
+    for path in archive::bundled_catalog_paths() {
         if let Ok(catalog) = archive::read(&path) {
             add(&catalog.term);
         }
@@ -170,15 +170,10 @@ pub fn index_for_code(code: &str) -> Option<CatalogIndex> {
         catalog.recompute_postreqs();
         return Some(CatalogIndex::build(catalog));
     }
-    if let Some(path) = bundled_catalog_path() {
-        if let Ok(mut catalog) = archive::read(&path) {
-            if catalog.term.code == code {
-                catalog.recompute_postreqs();
-                return Some(CatalogIndex::build(catalog));
-            }
-        }
-    }
-    None
+    let path = archive::bundled_catalog_path_for(code)?;
+    let mut catalog = archive::read(&path).ok()?;
+    catalog.recompute_postreqs();
+    Some(CatalogIndex::build(catalog))
 }
 
 fn switch_term(shell: &Rc<RefCell<Shell>>, code: &str) {
@@ -297,7 +292,7 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         state.course = None;
         state.offering = OfferingHistory::empty();
         state.course_notes.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     let terms = known_terms(&shell.borrow().state.borrow().index);
     apply_term_model(shell, &terms, &code);
@@ -838,12 +833,7 @@ fn plan_keys(plan: &DegreePlan) -> Vec<CourseKey> {
 }
 
 fn local_history(index: &CatalogIndex, keys: &[CourseKey]) -> OfferingHistory {
-    let mut indexes = vec![index.clone()];
-    for extra in catalog::indexes_on_disk() {
-        if extra.catalog.term.code != index.catalog.term.code {
-            indexes.push(extra);
-        }
-    }
+    let indexes = termorganize_core::offering::indexes_for_history(index);
     let terms = indexes
         .iter()
         .map(|index| index.catalog.term.clone())
@@ -877,12 +867,7 @@ fn refresh_older_terms(shell: &Rc<RefCell<Shell>>) {
     toast(shell, "Asking Banner about older terms…");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut indexes = vec![index];
-        for extra in catalog::indexes_on_disk() {
-            if extra.catalog.term.code != indexes[0].catalog.term.code {
-                indexes.push(extra);
-            }
-        }
+        let indexes = termorganize_core::offering::indexes_for_history(&index);
         let now = now_secs();
         let mut offering_repo = OfferingRepository::new(
             BannerClient::default(),
@@ -1031,7 +1016,7 @@ fn course_drag_row(
                     planlogic::CreditEdit::DegreeRow(course_id),
                     chosen,
                 );
-                persist(&state.data);
+                persist(&mut state);
             }
             // Rebuild after the click is finished. Refreshing under a held
             // pointer delivers the rest of the click to the new stepper.
@@ -1154,7 +1139,7 @@ fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position
             return false;
         }
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
         true
     };
     if moved {
@@ -1183,7 +1168,7 @@ fn apply_move(shell: &Rc<RefCell<Shell>>, suggestion: &reorder::Suggestion) {
         };
         reorder::apply(suggestion, plan);
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, &suggestion.title);
     refresh(shell);
@@ -1341,7 +1326,7 @@ fn answer_petition(shell: &Rc<RefCell<Shell>>, id: Uuid, choice: CourseNumberCho
         };
         plan.set_course_numbers(limit, id);
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -2318,7 +2303,7 @@ fn declare_equivalence(shell: &Rc<RefCell<Shell>>, taken: &CourseKey, counts_as:
                 note: String::new(),
             });
             plan.updated_at = Some(now_secs().to_string());
-            persist(&state.data);
+            persist(&mut state);
         }
     }
     refresh(shell);

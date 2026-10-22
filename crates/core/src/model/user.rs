@@ -2,7 +2,7 @@ use super::degree::{CourseEquivalence, DegreePlan, RequirementSubstitution};
 use super::preferences::SchedulePreferences;
 use super::section::{CourseKey, DaySet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -254,7 +254,7 @@ impl Default for AppPreferences {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserData {
     #[serde(default = "one")]
@@ -276,16 +276,22 @@ pub struct UserData {
     /// Dismissed equivalence-suggestion pair ids.
     #[serde(default)]
     pub dismissed_equivalences: Vec<String>,
+    /// Optimistic concurrency counters for degree plans, keyed by plan id.
+    /// A missing or zero id means revision 1. The app and the MCP server share this map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan_revisions: BTreeMap<String, u64>,
 }
 
+pub const USER_FILE_VERSION: i32 = 1;
+
 fn one() -> i32 {
-    1
+    USER_FILE_VERSION
 }
 
 impl Default for UserData {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: USER_FILE_VERSION,
             preferences: AppPreferences::default(),
             saved: vec![],
             recents: vec![],
@@ -294,6 +300,7 @@ impl Default for UserData {
             search_history: vec![],
             degree_plans: vec![],
             dismissed_equivalences: vec![],
+            plan_revisions: BTreeMap::new(),
         }
     }
 }
@@ -321,6 +328,16 @@ impl UserData {
         data.search_history = decode_each(obj.and_then(|o| o.get("searchHistory")));
         data.degree_plans = decode_each(obj.and_then(|o| o.get("degreePlans")));
         data.dismissed_equivalences = decode_each(obj.and_then(|o| o.get("dismissedEquivalences")));
+        if let Some(map) = obj
+            .and_then(|o| o.get("planRevisions"))
+            .and_then(|v| v.as_object())
+        {
+            for (id, value) in map {
+                if let Some(revision) = value.as_u64() {
+                    data.plan_revisions.insert(id.clone(), revision);
+                }
+            }
+        }
         data
     }
 }

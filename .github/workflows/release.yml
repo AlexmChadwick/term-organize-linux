@@ -1,0 +1,92 @@
+# Signed draft releases. Runs only when a v* tag is pushed.
+# Pull requests and branch pushes do not build or publish anything.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            flatpak flatpak-builder rsync gnupg \
+            libgtk-4-dev libadwaita-1-dev \
+            dpkg-dev librsvg2-bin librsvg2-dev gobject-introspection \
+            patchelf file wget ca-certificates desktop-file-utils pkg-config
+
+      - name: Flatpak runtimes
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.gnome.Platform//47 \
+            org.gnome.Sdk//47 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - name: Build Flatpak and AppImage
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: packaging/build-release.sh
+
+      - name: Checksums and signature
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cd dist
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          fingerprint=52763E589A37573E2C755AE2A12052B3ED284C89
+          if ! gpg --batch --with-colons --list-secret-keys "$fingerprint" \
+            | awk -F: '$1 == "fpr" && $10 == "52763E589A37573E2C755AE2A12052B3ED284C89" { found = 1 } END { exit !found }'; then
+            echo "refusing to sign: secret key ${fingerprint} was not imported" >&2
+            exit 1
+          fi
+          gpg --batch --armor --export "$fingerprint" > term-organize-release-key.asc
+          test -s term-organize-release-key.asc
+          sha256sum TermOrganize-"${RELEASE_TAG}"-x86_64.flatpak \
+            TermOrganize-"${RELEASE_TAG}"-x86_64.AppImage \
+            term-organize-release-key.asc > SHA256SUMS
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            --local-user "$fingerprint" \
+            --detach-sign --armor --output SHA256SUMS.asc SHA256SUMS \
+            3<<< "$GPG_PASSPHRASE"
+          gpg --batch --trust-model always --verify SHA256SUMS.asc SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-rc* ]]; then
+            prerelease+=(--prerelease)
+          fi
+          ../packaging/write-release-notes.sh "$RELEASE_TAG" > notes.md
+          gh release create "$RELEASE_TAG" \
+            --draft \
+            --title "Term Organize ${RELEASE_TAG}" \
+            --notes-file notes.md \
+            "${prerelease[@]}" \
+            "TermOrganize-${RELEASE_TAG}-x86_64.flatpak" \
+            "TermOrganize-${RELEASE_TAG}-x86_64.AppImage" \
+            SHA256SUMS \
+            SHA256SUMS.asc \
+            term-organize-release-key.asc

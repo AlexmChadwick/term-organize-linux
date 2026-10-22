@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
-use termorganize_core::archive::{self, bundled_catalog_path};
+use termorganize_core::archive;
 use termorganize_core::banner::{self, SubjectLookup};
 use termorganize_core::html;
 use termorganize_core::index::{BuildingSummary, CatalogIndex, RoomBooking, RoomSchedule};
@@ -194,7 +194,7 @@ fn renamed_without_entitlement() -> String {
 fn bundled_index() -> &'static CatalogIndex {
     static INDEX: OnceLock<CatalogIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
-        let path = bundled_catalog_path().expect("bundled catalog");
+        let path = archive::bundled_catalog_path_for("202710").expect("fall 2026 catalog");
         CatalogIndex::build(archive::read(&path).expect("catalog"))
     })
 }

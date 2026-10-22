@@ -73,6 +73,8 @@ struct State {
     dismissed_pairs: Vec<String>,
     /// Watch items whose last Banner response did not include the CRN.
     missing_watch: HashSet<String>,
+    /// `user.json` as it was when this window loaded it, or last saved it.
+    stamp: store::FileStamp,
 }
 
 /// Which text field should keep the caret after a rebuild.
@@ -109,6 +111,11 @@ struct Shell {
     windows: RefCell<Vec<adw::Window>>,
     term_menu: gtk::DropDown,
     keep_focus: Cell<Option<KeepFocus>>,
+    /// Divider share captured before an external reload, consumed by the rebuilt page.
+    reload_pane_share: Cell<Option<f64>>,
+    /// Owns the `user.json` monitor. Dropping it would stop reload events.
+    #[allow(dead_code)]
+    user_monitor: Option<gio::FileMonitor>,
     /// Course keys whose section restrictions are being fetched.
     restrictions_loading: RefCell<HashSet<String>>,
     /// Course keys already asked this session, so a miss does not retry immediately.
@@ -203,7 +210,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
             .default_width(520)
             .default_height(240)
             .build();
-        let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-202710.catalog, or run Term Organize from the repository."));
+        let label = gtk::Label::new(Some("No catalog snapshot found. Set TERMORGANIZE_DATA to a directory that contains catalog/term-*.catalog, or run Term Organize from the repository."));
         label.set_wrap(true);
         label.set_margin_top(24);
         label.set_margin_bottom(24);
@@ -213,15 +220,26 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         window.present();
         return;
     };
-    let mut data = store::load();
+    let (mut data, mut stamp) = store::load_stamped(&store::data_dir());
     if data.preferences.selected_term_code.is_none() {
         data.preferences.selected_term_code = Some(index.catalog.term.code.clone());
+    }
+    let loaded = data.clone();
+    planlogic::clamp_saved_credits(&mut data, &index.catalog.courses);
+    if data != loaded {
+        if let Ok((saved, next)) = store::save_merging(&store::data_dir(), &data, &stamp) {
+            data = saved;
+            stamp = next;
+        }
     }
     pull_folder(&mut data);
     let before = serde_json::to_string(&data).unwrap_or_default();
     planlogic::clamp_saved_credits(&mut data, &index.catalog.courses);
     if serde_json::to_string(&data).unwrap_or_default() != before {
-        persist(&data);
+        if let Ok((saved, next)) = store::save_merging(&store::data_dir(), &data, &stamp) {
+            data = saved;
+            stamp = next;
+        }
     }
     apply_scheme(&data.preferences);
     let term_name = index.catalog.term.name();
@@ -252,6 +270,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         term_labels: vec![],
         dismissed_pairs: gap::load_dismissed(),
         missing_watch: HashSet::new(),
+        stamp,
     }));
     load_saved_requirements(&state);
 
@@ -337,6 +356,8 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         windows: RefCell::new(Vec::new()),
         term_menu: term.clone(),
         keep_focus: Cell::new(None),
+        reload_pane_share: Cell::new(None),
+        user_monitor: None,
         restrictions_loading: RefCell::new(HashSet::new()),
         restrictions_attempted: RefCell::new(HashSet::new()),
     }));
@@ -404,6 +425,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         greet(&shell);
     }
     install_drop(&shell);
+    watch_user_file(&shell);
     arm_seat_timer(&shell);
     if !smoke
         && shell
@@ -414,7 +436,7 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
             .preferences
             .background_refresh_enabled
     {
-        request_background();
+        let _ = request_background();
     }
     if smoke {
         window.set_default_size(1440, 900);
@@ -541,6 +563,13 @@ fn select_area(shell: &Rc<RefCell<Shell>>, index: i32) {
 fn refresh(shell: &Rc<RefCell<Shell>>) {
     let saved_scroll = scroll_values(shell.borrow().content.upcast_ref());
     let area_before = shell.borrow().state.borrow().area;
+    let (collapsed, shows_content) = {
+        let shell_ref = shell.borrow();
+        sidebar_after_reload(
+            shell_ref.split.is_collapsed(),
+            shell_ref.split.shows_content(),
+        )
+    };
     let page = build_page(shell);
     fill(&page);
     let shell_ref = shell.borrow();
@@ -575,7 +604,12 @@ fn refresh(shell: &Rc<RefCell<Shell>>) {
     };
     shell_ref.title.set_title(&heading);
     shell_ref.title.set_subtitle(&sub);
-    adapt(&shell_ref.window, &shell_ref.split);
+    // Rebuilding the page must not open the navigation sidebar. `default_width`
+    // stays at the initial 1180 even after the window is narrowed or the user
+    // hides the sidebar, and forcing it open covers the plan list.
+    shell_ref.split.set_collapsed(collapsed);
+    shell_ref.split.set_show_content(shows_content);
+    shell_ref.reload_pane_share.take();
     if let Some(which) = shell_ref.keep_focus.take() {
         restore_focus(&page, which);
     }
@@ -695,10 +729,38 @@ fn hold_focus(shell: &Rc<RefCell<Shell>>, which: KeepFocus) {
     shell.borrow().keep_focus.set(Some(which));
 }
 
-fn adapt(window: &adw::ApplicationWindow, split: &adw::NavigationSplitView) {
-    if window.default_width() > 0 {
-        split.set_collapsed(window.default_width() < 860);
+/// Sidebar flags to put back after a reload. The window's default width is not
+/// the current width, so a reload must not recompute collapsed from it.
+pub(crate) fn sidebar_after_reload(collapsed: bool, shows_content: bool) -> (bool, bool) {
+    (collapsed, shows_content)
+}
+
+/// Divider share for the page rebuilt by a reload. `None` keeps that page's usual share.
+pub(crate) fn pane_share_after_reload(saved: Option<f64>, default_share: f64) -> f64 {
+    let Some(share) = saved else {
+        return default_share;
+    };
+    if !share.is_finite() || share < 0.0 {
+        return default_share;
     }
+    if share == 0.0 {
+        return 0.0;
+    }
+    share.clamp(0.12, 0.7)
+}
+
+fn content_pane_share(content: &gtk::Box) -> Option<f64> {
+    let paned = content.first_child()?.downcast::<gtk::Paned>().ok()?;
+    let width = paned.width();
+    if width < 80 {
+        return None;
+    }
+    let share = paned.position() as f64 / width as f64;
+    share.is_finite().then_some(share)
+}
+
+fn page_pane_share(shell: &Rc<RefCell<Shell>>, default_share: f64) -> f64 {
+    pane_share_after_reload(shell.borrow().reload_pane_share.take(), default_share)
 }
 
 fn build_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
@@ -1585,7 +1647,7 @@ fn subjects_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         (subjects, selected, courses)
     };
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.32);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.32));
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     for (code, name) in &subjects {
@@ -2022,7 +2084,7 @@ fn rooms_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
 fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snapshot = schedule_snapshot(shell);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.26);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.26));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -2180,7 +2242,7 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
                         },
                         chosen,
                     );
-                    persist(&state.data);
+                    persist(&mut state);
                 }
                 let later = shell_spin.clone();
                 glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
@@ -2530,7 +2592,7 @@ fn degrees_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
         }
     }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    install_proportional_pane(&paned, 0.24);
+    install_proportional_pane(&paned, page_pane_share(shell, 0.24));
     let side = gtk::Box::new(gtk::Orientation::Vertical, 6);
     side.set_margin_top(8);
     side.set_margin_start(8);
@@ -3448,7 +3510,7 @@ fn new_schedule(shell: &Rc<RefCell<Shell>>) {
         state.plan = Some(id);
         state.area = 5;
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
         id
     };
     let _ = id;
@@ -3471,7 +3533,7 @@ fn new_degree(shell: &Rc<RefCell<Shell>>) {
         });
         state.degree = Some(id);
         state.area = 6;
-        persist(&state.data);
+        persist(&mut state);
     }
     select_area(shell, 6);
 }
@@ -3547,7 +3609,7 @@ fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&s
             }
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, &format!("Added {key}"));
 }
@@ -3564,7 +3626,7 @@ fn remove_plan_course(shell: &Rc<RefCell<Shell>>, key: &str) {
             plan.updated_at = now_secs();
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3601,7 +3663,7 @@ fn delete_schedule(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             state.plan = None;
         }
         state.generated.clear();
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3614,7 +3676,7 @@ fn delete_degree_plan_ui(shell: &Rc<RefCell<Shell>>, id: Uuid) {
         if state.degree == Some(id) {
             state.degree = state.data.degree_plans.first().map(|plan| plan.id);
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3642,7 +3704,7 @@ fn remove_degree_course(shell: &Rc<RefCell<Shell>>, id: Uuid) {
             term.courses.retain(|course| course.id != id);
         }
         plan.updated_at = Some(now_secs().to_string());
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3656,7 +3718,7 @@ fn unsave_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             .data
             .saved
             .retain(|saved| !(saved.term_code == term && saved.key == *key));
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3713,7 +3775,7 @@ fn apply_nl(shell: &Rc<RefCell<Shell>>, text: &str) {
                         note = prefs.summary_parts().join(" · ");
                         plan.preferences = Some(prefs);
                         plan.updated_at = now_secs();
-                        persist(&state.data);
+                        persist(&mut state);
                     }
                 } else {
                     note = "Make a schedule first".into();
@@ -3842,7 +3904,7 @@ fn add_semester(shell: &Rc<RefCell<Shell>>) {
                 plan.sort_terms();
             }
         }
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -3888,7 +3950,7 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, credits));
         }
-        persist(&state.data);
+        persist(&mut state);
         repeat
     };
     if let Some(message) = repeat {
@@ -3955,7 +4017,7 @@ fn autofill_degree(shell: &Rc<RefCell<Shell>>) {
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, credits));
         }
-        persist(&state.data);
+        persist(&mut state);
         n
     };
     toast(
@@ -4077,7 +4139,7 @@ fn import_degree(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 drop(state);
                 drop(shell_ref);
                 select_area(&shell, 6);
@@ -4119,7 +4181,7 @@ fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                 key: key.clone(),
                 saved_at: now_secs(),
             });
-            persist(&state.data);
+            persist(&mut state);
         }
     }
     toast(shell, "Saved");
@@ -4142,7 +4204,7 @@ fn remember_recent(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         },
     );
     state.data.recents.truncate(40);
-    persist(&state.data);
+    persist(&mut state);
 }
 
 fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &str) {
@@ -4178,7 +4240,7 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
             notify_on_waitlist: false,
             last_notified_at: None,
         });
-        persist(&state.data);
+        persist(&mut state);
     }
     toast(shell, "Watching that section");
 }
@@ -4190,7 +4252,7 @@ fn set_waitlist(shell: &Rc<RefCell<Shell>>, crn: &str, on: bool) {
         if let Some(item) = state.data.watchlist.iter_mut().find(|w| w.crn == crn) {
             item.notify_on_waitlist = on;
         }
-        persist(&state.data);
+        persist(&mut state);
     }
 }
 
@@ -4199,7 +4261,7 @@ fn remove_watch(shell: &Rc<RefCell<Shell>>, crn: &str) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.watchlist.retain(|w| w.crn != crn);
-        persist(&state.data);
+        persist(&mut state);
     }
     refresh(shell);
 }
@@ -4250,7 +4312,7 @@ fn apply_link(shell: &Rc<RefCell<Shell>>, link: AppLink) {
                     let id = state.data.add_degree_plan(plan);
                     state.degree = Some(id);
                     state.area = 6;
-                    persist(&state.data);
+                    persist(&mut state);
                 }
             } else if let Ok(html) = std::fs::read_to_string(&path) {
                 if let Some(id) = shell.borrow().state.borrow().degree {
@@ -4320,7 +4382,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
                 let mut state = shell.state.borrow_mut();
                 state.data.preferences.color_scheme = value;
                 apply_scheme(&state.data.preferences);
-                persist(&state.data);
+                persist(&mut state);
             }
         }
     });
@@ -4334,7 +4396,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.show_weekends = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     appearance.add(&weekends);
@@ -4363,7 +4425,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.auto_refresh_seats = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&auto);
@@ -4384,7 +4446,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.seat_check_minutes = row.value() as i32;
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     alerts.add(&minutes);
@@ -4411,7 +4473,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.include_student_in_export = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&include);
@@ -4432,7 +4494,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_enabled = row.is_active();
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&sync_on);
@@ -4457,7 +4519,7 @@ fn open_settings(shell: &Rc<RefCell<Shell>>) {
             let mut state = shell.state.borrow_mut();
             state.data.preferences.folder_sync_path =
                 if text.is_empty() { None } else { Some(text) };
-            persist(&state.data);
+            persist(&mut state);
         }
     });
     data_group.add(&path_row);
@@ -4531,7 +4593,7 @@ fn greet(shell: &Rc<RefCell<Shell>>) {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         state.data.preferences.has_completed_onboarding = true;
-        persist(&state.data);
+        persist(&mut state);
     });
     dialog.present(Some(&window));
 }
@@ -4553,7 +4615,7 @@ fn import_user(shell: &Rc<RefCell<Shell>>) {
             let shell = shell.borrow();
             let mut state = shell.state.borrow_mut();
             state.data = imported;
-            persist(&state.data);
+            persist(&mut state);
         }
         refresh(&shell);
         toast(&shell, "Data imported");
@@ -4677,7 +4739,7 @@ fn check_seats(shell: &Rc<RefCell<Shell>>) {
                 let report = watchlist::compare(&state.data.watchlist, &live, now_secs());
                 state.missing_watch = report.missing_ids.iter().cloned().collect();
                 state.data.watchlist = report.items;
-                persist(&state.data);
+                persist(&mut state);
                 report.alerts
             };
             if let Some(message) = error {
@@ -4726,16 +4788,99 @@ fn save_bytes(shell: &Rc<RefCell<Shell>>, name: &str, bytes: &[u8], message: &st
     });
 }
 
-fn persist(data: &UserData) {
-    let _ = store::save(data);
-    if data.preferences.folder_sync_enabled {
-        if let Some(dir) = &data.preferences.folder_sync_path {
+fn persist(state: &mut State) {
+    if let Ok((data, stamp)) = store::save_merging(&store::data_dir(), &state.data, &state.stamp) {
+        state.data = data;
+        state.stamp = stamp;
+    }
+    if state.data.preferences.folder_sync_enabled {
+        if let Some(dir) = &state.data.preferences.folder_sync_path {
             let dir = PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
-            let text = store::export_json(data, false);
+            let text = store::export_json(&state.data, false);
             let _ = std::fs::write(dir.join("user.json"), text);
         }
     }
+}
+
+/// Reloads `user.json` when another process writes it. Events are debounced so a
+/// temp-file rename settles into one read.
+fn watch_user_file(shell: &Rc<RefCell<Shell>>) {
+    let path = store::user_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let directory = gio::File::for_path(parent);
+    let Ok(monitor) = directory.monitor_directory(
+        gio::FileMonitorFlags::WATCH_MOVES,
+        None::<&gio::Cancellable>,
+    ) else {
+        return;
+    };
+    let generation = Rc::new(Cell::new(0u64));
+    let shell_for_events = shell.clone();
+    let generation_for_events = generation.clone();
+    monitor.connect_changed(move |_, file, other, event| {
+        if !matches!(
+            event,
+            gio::FileMonitorEvent::Changed
+                | gio::FileMonitorEvent::ChangesDoneHint
+                | gio::FileMonitorEvent::Created
+                | gio::FileMonitorEvent::Deleted
+                | gio::FileMonitorEvent::Renamed
+                | gio::FileMonitorEvent::Moved
+                | gio::FileMonitorEvent::MovedIn
+        ) {
+            return;
+        }
+        let touches_user = basename_is_user_json(file) || other.is_some_and(basename_is_user_json);
+        if !touches_user {
+            return;
+        }
+        let next = generation_for_events.get().wrapping_add(1);
+        generation_for_events.set(next);
+        let generation = generation_for_events.clone();
+        let shell = shell_for_events.clone();
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            if generation.get() != next {
+                return glib::ControlFlow::Break;
+            }
+            apply_external_file(&shell);
+            glib::ControlFlow::Break
+        });
+    });
+    shell.borrow_mut().user_monitor = Some(monitor);
+}
+
+fn basename_is_user_json(file: &gio::File) -> bool {
+    file.basename()
+        .as_deref()
+        .is_some_and(|name| name == std::ffi::OsStr::new("user.json"))
+}
+
+fn apply_external_file(shell: &Rc<RefCell<Shell>>) {
+    {
+        let shell_ref = shell.borrow();
+        shell_ref
+            .reload_pane_share
+            .set(content_pane_share(&shell_ref.content));
+    }
+    let (data, stamp) = {
+        let shell = shell.borrow();
+        let state = shell.state.borrow();
+        (state.data.clone(), state.stamp.clone())
+    };
+    let Ok(Some((data, stamp))) = store::fold_external(&store::data_dir(), &data, &stamp) else {
+        return;
+    };
+    {
+        let shell = shell.borrow();
+        let mut state = shell.state.borrow_mut();
+        state.data = data;
+        state.stamp = stamp;
+    }
+    refresh(shell);
 }
 
 fn pull_folder(data: &mut UserData) {
@@ -5208,7 +5353,7 @@ fn update_prefs(shell: &Rc<RefCell<Shell>>, change: impl FnOnce(&mut SchedulePre
             change(&mut prefs);
             plan.preferences = Some(prefs.normalized());
             plan.updated_at = now_secs();
-            persist(&state.data);
+            persist(&mut state);
         }
         state.generated.clear();
     }
@@ -5340,7 +5485,7 @@ fn install_drop(shell: &Rc<RefCell<Shell>>) {
                 let id = state.data.add_degree_plan(plan);
                 state.degree = Some(id);
                 state.area = 6;
-                persist(&state.data);
+                persist(&mut state);
                 std::mem::drop(state);
                 std::mem::drop(shell_ref);
                 select_area(&dropped, 6);
@@ -5427,7 +5572,7 @@ fn view_text(shell: &Rc<RefCell<Shell>>) -> String {
     lines.join("\n")
 }
 
-fn request_background() {
+fn request_background() -> bool {
     let Ok(proxy) = gio::DBusProxy::for_bus_sync(
         gio::BusType::Session,
         gio::DBusProxyFlags::NONE,
@@ -5437,18 +5582,18 @@ fn request_background() {
         "org.freedesktop.portal.Background",
         gio::Cancellable::NONE,
     ) else {
-        return;
+        return false;
     };
     let exe = std::env::current_exe().ok();
-    let Some(exe) = exe else { return };
+    let Some(exe) = exe else { return false };
     let command = [exe.to_string_lossy().to_string(), "--seat-watch".into()];
-    let commandline =
-        glib::Variant::array_from_iter::<glib::Variant>(command.iter().map(|s| s.to_variant()));
+    // RequestBackground's commandline option is an array of strings ("as").
+    let commandline = background_commandline(&command);
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", "termorganize");
     options.insert("reason", "Check watched sections for open seats");
     options.insert("autostart", true);
-    options.insert("commandline", &commandline);
+    options.insert_value("commandline", &commandline);
     let params = glib::Variant::tuple_from_iter(["".to_variant(), options.end()]);
     let _ = proxy.call_sync(
         "RequestBackground",
@@ -5457,6 +5602,7 @@ fn request_background() {
         1000,
         gio::Cancellable::NONE,
     );
+    true
 }
 
 fn parse_clock(text: &str) -> Option<i32> {
@@ -5486,4 +5632,57 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+fn background_commandline(command: &[String]) -> glib::Variant {
+    glib::Variant::array_from_iter::<String>(command.iter().map(|part| part.to_variant()))
+}
+
+#[cfg(test)]
+mod portal_tests {
+    use super::*;
+
+    #[test]
+    fn background_commandline_is_an_array_of_strings() {
+        let command = ["termorganize".to_string(), "--seat-watch".to_string()];
+        let commandline = background_commandline(&command);
+        assert_eq!(commandline.type_().as_str(), "as");
+        let argv: Vec<String> = commandline
+            .array_iter_str()
+            .expect("commandline")
+            .map(str::to_string)
+            .collect();
+        assert_eq!(argv, command);
+    }
+
+    /// Launch calls `request_background` whenever a session bus is up.
+    /// `dbus-run-session` in CI is what used to abort in the variant builder.
+    #[test]
+    #[ignore = "run under dbus-run-session; see .github/workflows/ci.yml"]
+    fn background_request_survives_a_session_bus() {
+        assert!(
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|value| !value.is_empty()),
+            "run under dbus-run-session"
+        );
+        assert!(
+            request_background(),
+            "session bus did not reach RequestBackground"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reload_layout {
+    use super::{pane_share_after_reload, sidebar_after_reload};
+
+    #[test]
+    fn an_external_reload_keeps_the_sidebar_and_the_plan_list_width() {
+        assert_eq!(sidebar_after_reload(true, true), (true, true));
+        assert_eq!(sidebar_after_reload(false, false), (false, false));
+        assert_eq!(pane_share_after_reload(Some(0.41), 0.24), 0.41);
+        assert_eq!(pane_share_after_reload(Some(0.0), 0.24), 0.0);
+        assert_eq!(pane_share_after_reload(None, 0.24), 0.24);
+        assert_eq!(pane_share_after_reload(Some(0.95), 0.24), 0.7);
+        assert_eq!(pane_share_after_reload(Some(f64::NAN), 0.24), 0.24);
+    }
 }

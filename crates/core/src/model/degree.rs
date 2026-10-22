@@ -157,7 +157,7 @@ impl DegreePlanTerm {
         format!("{} {}", self.season.short_name(), self.year)
     }
     pub fn credits(&self) -> f64 {
-        self.courses.iter().map(|c| c.credits).sum()
+        canonical_credits(self.courses.iter().map(|c| c.credits).sum())
     }
     pub fn month_index(&self) -> i32 {
         self.year * 12 + self.season.start_month() - 1
@@ -271,6 +271,15 @@ fn default_plan_name() -> String {
     "Degree Plan".into()
 }
 
+/// An empty `f64` sum is negative zero, and `{:.1}` prints that as `-0.0`.
+fn canonical_credits(value: f64) -> f64 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value
+    }
+}
+
 impl Default for DegreePlan {
     fn default() -> Self {
         Self {
@@ -307,10 +316,10 @@ pub fn shown_degree_plan_id(selected: Option<Uuid>, plans: &[DegreePlan]) -> Opt
 
 impl DegreePlan {
     pub fn completed_credits(&self) -> f64 {
-        self.completed.iter().map(|c| c.credits).sum()
+        canonical_credits(self.completed.iter().map(|c| c.credits).sum())
     }
     pub fn planned_credits(&self) -> f64 {
-        self.terms.iter().map(|t| t.credits()).sum()
+        canonical_credits(self.terms.iter().map(|t| t.credits()).sum())
     }
     pub fn completed_keys(&self) -> std::collections::BTreeSet<CourseKey> {
         self.completed
@@ -508,5 +517,36 @@ mod tests {
         let gone = Uuid::new_v4();
         assert_eq!(shown_degree_plan_id(Some(gone), &plans), Some(first.id));
         assert_eq!(shown_degree_plan_id(None, &[]), None);
+    }
+
+    #[test]
+    fn empty_credit_totals_format_as_positive_zero() {
+        let plan = DegreePlan::default();
+        let term = DegreePlanTerm::new(PlanSeason::Fall, 2026);
+        assert_eq!(term.credits().to_bits(), 0);
+        assert_eq!(plan.completed_credits().to_bits(), 0);
+        assert_eq!(plan.planned_credits().to_bits(), 0);
+        assert_eq!(
+            format!("{:.1} completed", plan.completed_credits()),
+            "0.0 completed"
+        );
+        assert_eq!(
+            format!("{:.1} planned", plan.planned_credits()),
+            "0.0 planned"
+        );
+        assert_eq!(
+            format!("{} · {:.1} credits", term.name(), term.credits()),
+            "Fall 2026 · 0.0 credits"
+        );
+
+        let course = DegreePlanCourse::other("CS 2500", "Fundamentals I", 4.0);
+        let mut filled = term.clone();
+        filled.courses.push(course.clone());
+        let mut with_term = plan.clone();
+        with_term.completed.push(course);
+        with_term.terms.push(filled);
+        assert_eq!(with_term.completed_credits(), 4.0);
+        assert_eq!(with_term.planned_credits(), 4.0);
+        assert_eq!(format!("{:.1}", with_term.terms[0].credits()), "4.0");
     }
 }
