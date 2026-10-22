@@ -581,10 +581,14 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
                     blocking.push(key.clone());
                 }
             }
+            let mut label = format!("{} {}", course.label, course.title);
+            if let Some(pin) = planlogic::chosen_crn(course.crn.as_deref()) {
+                label.push_str(&format!("  CRN {pin}"));
+            }
             courses.push(CourseRow {
                 id: course.id,
                 key: course.key.clone(),
-                label: format!("{} {}", course.label, course.title),
+                label,
                 detail,
             });
         }

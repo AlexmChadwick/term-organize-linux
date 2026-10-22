@@ -72,6 +72,7 @@ fn schedule_plan(
             color_index: 0,
 
             pinned_crn: None,
+            degree_row_id: None,
         }],
         selected_crns: vec!["10004".into()],
         filters: ScheduleFilters::default(),

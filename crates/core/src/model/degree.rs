@@ -100,8 +100,8 @@ pub struct DegreePlanCourse {
     pub title: String,
     #[serde(default)]
     pub credits: f64,
-    /// Section chosen for this row. Special topics that share a number stay
-    /// distinct when each row has a different CRN.
+    /// Section stored on this row. It is a label, not an editor, and a second
+    /// copy of the course is allowed with or without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crn: Option<String>,
 }
@@ -337,12 +337,37 @@ pub struct CourseEquivalence {
     pub note: String,
 }
 
+/// A course counted toward a requirement, optionally one specific degree-plan row.
+///
+/// Older files store only the course number. `row` is absent on those, and a
+/// substitution without it still matches the course number.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountedCourse {
+    #[serde(flatten)]
+    pub course: CourseKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<Uuid>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SubstitutionChange {
-    CountCourse(CourseKey),
+    CountCourse(CountedCourse),
     Replace(RequirementReplacement),
     Waive,
+}
+
+impl SubstitutionChange {
+    pub fn count_course(course: CourseKey) -> Self {
+        Self::CountCourse(CountedCourse { course, row: None })
+    }
+
+    pub fn count_row(course: CourseKey, row: Uuid) -> Self {
+        Self::CountCourse(CountedCourse {
+            course,
+            row: Some(row),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

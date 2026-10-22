@@ -112,6 +112,9 @@ pub struct PlanCourse {
     /// Section the user picked. Empty means the schedule may choose one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_crn: Option<String>,
+    /// Degree-plan row this schedule row was copied from, when sync created it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degree_row_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -408,6 +411,7 @@ impl UserData {
             excluded_crns: HashSet::new(),
             color_index,
             pinned_crn: None,
+            degree_row_id: None,
         });
         true
     }

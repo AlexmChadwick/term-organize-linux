@@ -1,6 +1,6 @@
 //! A chosen CRN stays the section. Special topics share a course number, so a
-//! section is the term plus the CRN. The same subject and number may be listed
-//! more than once only when every copy has its own CRN.
+//! section is the term plus the CRN. A degree plan may list the same subject
+//! and number more than once; a schedule still needs a distinct CRN for each copy.
 
 use std::collections::HashSet;
 use termorganize_core::catalog::{self, BannerAttribute, BannerSection};
@@ -75,6 +75,7 @@ fn plan_with(keys: &[&str], selected: &[&str]) -> SchedulePlan {
             excluded_crns: HashSet::new(),
             color_index: offset as i32,
             pinned_crn: None,
+            degree_row_id: None,
         });
     }
     plan
@@ -198,6 +199,7 @@ fn removing_one_topic_leaves_the_other_pin() {
             excluded_crns: HashSet::new(),
             color_index: 1,
             pinned_crn: Some("55555".into()),
+            degree_row_id: None,
         });
         plan.selected_crns = vec!["44444".into(), "55555".into()];
     });
@@ -323,9 +325,19 @@ fn audit_nupath_and_credits_count_each_pinned_copy() {
         &attributes,
     );
     assert!(
-        (merged.planned_hours - 4.0).abs() < 1e-9,
-        "without manual CRNs the second copy does not add hours"
+        (merged.planned_hours - 8.0).abs() < 1e-9,
+        "each copy still counts, including a repeat with no CRN"
     );
+    let mut ids: Vec<String> = merged
+        .rule_results()
+        .into_iter()
+        .flat_map(|result| result.used.iter())
+        .chain(merged.unused.iter())
+        .map(|use_| use_.id())
+        .filter(|id| id.starts_with("CS 5976"))
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["CS 5976", "CS 5976 (2)"]);
     let _ = first;
 }
 
@@ -377,10 +389,9 @@ fn reordering_a_pinned_course_keeps_its_crn() {
     let mut same = DegreePlanCourse::catalog(key.clone(), "Directed Study", 4.0);
     same.crn = None;
     plan.terms[1].courses.push(same);
-    let before = plan.clone();
     reorder::apply(
         &Suggestion {
-            id: "blocked".into(),
+            id: "again".into(),
             moves: vec![Move {
                 course: key,
                 from: plan.terms[0].id,
@@ -392,8 +403,14 @@ fn reordering_a_pinned_course_keeps_its_crn() {
         },
         &mut plan,
     );
-    assert_eq!(plan.terms[0].courses.len(), before.terms[0].courses.len());
-    assert_eq!(plan.terms[1].courses.len(), before.terms[1].courses.len());
+    assert!(plan.terms[0].courses.is_empty());
+    assert_eq!(plan.terms[1].courses.len(), 3);
+    let crns: Vec<_> = plan.terms[1]
+        .courses
+        .iter()
+        .map(|course| course.crn.clone())
+        .collect();
+    assert_eq!(crns, vec![Some("44444".into()), None, Some("55555".into())]);
     let _ = spring;
 }
 
@@ -521,8 +538,8 @@ fn autofill_keeps_each_pinned_topic() {
         &HashSet::new(),
         Some(&catalog),
     );
-    assert_eq!(suggestions[0].courses.len(), 1);
-    assert_eq!(suggestions[0].crns, vec![None]);
+    assert_eq!(suggestions[0].courses.len(), 2);
+    assert_eq!(suggestions[0].crns, vec![None, None]);
 }
 
 #[test]

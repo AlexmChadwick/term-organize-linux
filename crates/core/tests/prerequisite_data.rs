@@ -1778,7 +1778,7 @@ fn substitutionsAcceptEquivalentsToo() {
         id: Uuid::new_v4(),
         rule_id: rule.id.clone(),
         rule_title: "Software development".into(),
-        change: SubstitutionChange::CountCourse(cs3000.clone()),
+        change: SubstitutionChange::count_course(cs3000.clone()),
         note: String::new(),
         approved_on: None,
         created_at: None,

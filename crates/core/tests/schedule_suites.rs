@@ -249,6 +249,7 @@ fn plan_with(codes: &[&str], selected: &[&str]) -> SchedulePlan {
             color_index: offset as i32,
 
             pinned_crn: None,
+            degree_row_id: None,
         });
     }
     plan.selected_crns = selected.iter().map(|crn| (*crn).to_string()).collect();
@@ -1181,6 +1182,7 @@ fn plansSavedBeforePreferencesExistStillLoad() {
         color_index: 0,
 
         pinned_crn: None,
+        degree_row_id: None,
     }];
     let mut value = serde_json::to_value(&plan).unwrap();
     assert!(
@@ -3393,6 +3395,7 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
             color_index: 0,
 
             pinned_crn: None,
+            degree_row_id: None,
         },
         PlanCourse {
             key: key("MATH", "2331"),
@@ -3401,6 +3404,7 @@ fn campusesInstructorsAndCreditsComeFromThePlansCourses() {
             color_index: 1,
 
             pinned_crn: None,
+            degree_row_id: None,
         },
     ];
     let context = schedule::preferences_context(&plan, Some(index));
@@ -3442,6 +3446,7 @@ fn excludedSectionsDontOfferTheirInstructors() {
         color_index: 0,
 
         pinned_crn: None,
+        degree_row_id: None,
     }];
     let everyone = schedule::preferences_context(&plan, Some(index)).instructors;
     plan.courses[0].excluded_crns = index

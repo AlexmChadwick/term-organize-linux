@@ -2291,14 +2291,7 @@ fn degree_snapshot(shell: &Rc<RefCell<Shell>>) -> DegreeSnap {
     );
     let dupes = planlogic::duplicate_keys(plan);
     if !dupes.is_empty() {
-        checks.push(format!(
-            "Listed more than once: {}",
-            dupes
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        checks.push(planlogic::duplicate_plan_notice(dupes.len()));
     }
     for (index, term) in plan.terms.iter().enumerate() {
         for course in &term.courses {
@@ -3084,6 +3077,7 @@ fn add_pinned_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, crn: Option<&s
                     excluded_crns: HashSet::new(),
                     color_index: color,
                     pinned_crn: pin.clone(),
+                    degree_row_id: None,
                 });
                 if let Some(pin) = pin {
                     if !plan.selected_crns.iter().any(|item| item == &pin) {
@@ -3399,7 +3393,7 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
         toast(shell, "Use a course code like CS 3000");
         return;
     };
-    {
+    let repeat = {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
         let title = state
@@ -3416,16 +3410,30 @@ fn add_degree_course(shell: &Rc<RefCell<Shell>>, text: &str) {
             return;
         };
         state.degree = Some(id);
+        let mut repeat = None;
         if let Some(plan) = state.data.degree_plans.iter_mut().find(|p| p.id == id) {
             if plan.terms.is_empty() {
                 plan.terms.push(DegreePlanTerm::new(PlanSeason::Fall, 2026));
             }
+            repeat = plan
+                .terms
+                .iter()
+                .find(|term| {
+                    term.courses
+                        .iter()
+                        .any(|course| course.key.as_ref() == Some(&key))
+                })
+                .map(|term| planlogic::already_in_plan_notice(&term.name()));
             let last = plan.terms.len() - 1;
             plan.terms[last]
                 .courses
                 .push(DegreePlanCourse::catalog(key, title, credits));
         }
         persist(&state.data);
+        repeat
+    };
+    if let Some(message) = repeat {
+        toast(shell, &message);
     }
     refresh(shell);
 }
