@@ -2146,6 +2146,7 @@ fn loaded_index() -> CatalogIndex {
         description: String::new(),
         min_credits: 4.0,
         max_credits: 4.0,
+        credit_hours: None,
         attributes: vec!["NCW1".into()],
         prereqs: None,
         coreqs: None,
@@ -2179,6 +2180,9 @@ fn loaded_index() -> CatalogIndex {
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
     };
     CatalogIndex::build(TermCatalog {
         version: 1,
@@ -3812,6 +3816,7 @@ fn newPlanDraftCopiesTheLatestPlanAndAddsSchedules() {
 
                 pinned_crn: None,
                 degree_row_id: None,
+                credits: None,
             },
             PlanCourse {
                 key: key("MATH 2331"),
@@ -3821,6 +3826,7 @@ fn newPlanDraftCopiesTheLatestPlanAndAddsSchedules() {
 
                 pinned_crn: None,
                 degree_row_id: None,
+                credits: None,
             },
         ],
         selected_crns: vec![],

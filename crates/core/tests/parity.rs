@@ -74,6 +74,9 @@ fn section(
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
     }
 }
 
@@ -874,6 +877,7 @@ fn prerequisite_summaries_and_autofill() {
 
                 pinned_crn: None,
                 degree_row_id: None,
+                credits: None,
             },
             PlanCourse {
                 key: CourseKey::parse("MATH 2331").unwrap(),
@@ -883,6 +887,7 @@ fn prerequisite_summaries_and_autofill() {
 
                 pinned_crn: None,
                 degree_row_id: None,
+                credits: None,
             },
         ],
         selected_crns: vec![],

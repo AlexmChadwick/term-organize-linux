@@ -147,6 +147,7 @@ fn course(
         description: String::new(),
         min_credits: 4.0,
         max_credits: 4.0,
+        credit_hours: None,
         attributes: vec![],
         prereqs,
         coreqs,
@@ -183,5 +184,8 @@ fn section(crn: &str, course: &Course) -> CourseSection {
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
     }
 }

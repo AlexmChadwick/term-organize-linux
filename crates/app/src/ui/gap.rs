@@ -288,6 +288,7 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         let shell_ref = shell.borrow();
         let mut state = shell_ref.state.borrow_mut();
         state.data.preferences.selected_term_code = Some(code.clone());
+        planlogic::clamp_saved_credits(&mut state.data, &index.catalog.courses);
         state.index = index;
         state.live_seats.clear();
         state.generated.clear();
@@ -508,6 +509,50 @@ fn chip(shell: &Rc<RefCell<Shell>>, item: &RequisiteItem) -> gtk::Widget {
     button.upcast()
 }
 
+/// Small whole-number stepper. The label reads `Credits: 4 (1 to 8)`.
+pub fn credit_spin(low: f64, high: f64, value: f64, changed: impl Fn(f64) + 'static) -> gtk::Box {
+    use std::cell::Cell;
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_valign(gtk::Align::Center);
+    let label_text = move |chosen: f64| {
+        format!(
+            "Credits: {} ({} to {})",
+            termorganize_core::model::credit_number(chosen),
+            termorganize_core::model::credit_number(low),
+            termorganize_core::model::credit_number(high)
+        )
+    };
+    let label = gtk::Label::new(Some(&label_text(value)));
+    label.add_css_class("dim-label");
+    label.set_xalign(0.0);
+    let spin = gtk::SpinButton::with_range(low.ceil(), high.floor().max(low.ceil()), 1.0);
+    spin.set_digits(0);
+    spin.set_snap_to_ticks(true);
+    spin.set_numeric(true);
+    spin.set_value(value.clamp(low.ceil(), high.floor().max(low.ceil())));
+    let guard = Rc::new(Cell::new(false));
+    spin.connect_value_changed({
+        let label = label.clone();
+        let guard = guard.clone();
+        move |spin| {
+            if guard.get() {
+                return;
+            }
+            let next = spin.value().round();
+            if (next - spin.value()).abs() > 1e-6 {
+                guard.set(true);
+                spin.set_value(next);
+                guard.set(false);
+            }
+            label.set_text(&label_text(next));
+            changed(next);
+        }
+    });
+    row.append(&label);
+    row.append(&spin);
+    row
+}
+
 pub fn semester_section(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     let snap = semester_snapshot(shell);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -535,6 +580,8 @@ struct CourseRow {
     key: Option<CourseKey>,
     label: String,
     detail: String,
+    /// Low, high, and the chosen value when this row is variable credit.
+    credits: Option<(f64, f64, f64)>,
 }
 
 struct SemesterSnap {
@@ -585,11 +632,23 @@ fn semester_snapshot(shell: &Rc<RefCell<Shell>>) -> Vec<SemesterSnap> {
             if let Some(pin) = planlogic::chosen_crn(course.crn.as_deref()) {
                 label.push_str(&format!("  CRN {pin}"));
             }
+            let credits = course.key.as_ref().and_then(|key| {
+                let listed = state.index.course(key)?;
+                if !listed.is_variable_credit() {
+                    return None;
+                }
+                Some((
+                    listed.min_credits,
+                    listed.max_credits,
+                    listed.clamp_credits(course.credits),
+                ))
+            });
             courses.push(CourseRow {
                 id: course.id,
                 key: course.key.clone(),
                 label,
                 detail,
+                credits,
             });
         }
         let notes = &state.course_notes;
@@ -849,6 +908,29 @@ fn course_drag_row(
     if !course.detail.is_empty() {
         text.append(&dim_label(&course.detail));
     }
+    if let Some((low, high, value)) = course.credits {
+        let course_id = course.id;
+        let shell_spin = shell.clone();
+        text.append(&credit_spin(low, high, value, move |chosen| {
+            {
+                let shell_ref = shell_spin.borrow();
+                let mut state = shell_ref.state.borrow_mut();
+                planlogic::set_chosen_credits(
+                    &mut state.data,
+                    planlogic::CreditEdit::DegreeRow(course_id),
+                    chosen,
+                );
+                persist(&state.data);
+            }
+            // Rebuild after the click is finished. Refreshing under a held
+            // pointer delivers the rest of the click to the new stepper.
+            let later = shell_spin.clone();
+            glib::timeout_add_local(Duration::from_millis(250), move || {
+                refresh(&later);
+                glib::ControlFlow::Break
+            });
+        }));
+    }
     box_.append(&text);
     if let Some(key) = &course.key {
         let open = gtk::Button::with_label("Open");
@@ -924,7 +1006,7 @@ fn apply_drop(shell: &Rc<RefCell<Shell>>, payload: &str, term_id: Uuid, position
             state
                 .index
                 .course(&key)
-                .map(|course| (course.title.clone(), course.max_credits))
+                .map(|course| (course.title.clone(), course.default_credits()))
                 .unwrap_or_else(|| (key.to_string(), 4.0))
         };
         Some(DegreePlanCourse::catalog(key, title, credits))

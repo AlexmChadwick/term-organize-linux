@@ -1004,6 +1004,9 @@ fn section_from_seat(crn: &str, key: &CourseKey, seat: &LiveSeat) -> CourseSecti
         description: None,
         prereqs: None,
         coreqs: None,
+        credit_hours: None,
+        credit_hour_low: None,
+        credit_hour_high: None,
     }
 }
 
@@ -1246,6 +1249,9 @@ mod tests {
             description: None,
             prereqs: None,
             coreqs: None,
+            credit_hours: None,
+            credit_hour_low: None,
+            credit_hour_high: None,
         }
     }
 }

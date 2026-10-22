@@ -3339,8 +3339,9 @@ impl ResolvedPlan {
                 } else {
                     1.0
                 };
-                credits_min += course.min_credits * copies;
-                credits_max += course.max_credits * copies;
+                let each = chosen_row_credits(&entry.plan_course, Some(course));
+                credits_min += each * copies;
+                credits_max += each * copies;
             }
         }
         Self {
@@ -3698,19 +3699,27 @@ pub fn pinned_sections(
     rows
 }
 
+fn chosen_row_credits(course: &PlanCourse, listed: Option<&Course>) -> f64 {
+    if let Some(value) = course.credits {
+        return value;
+    }
+    listed.map(|course| course.default_credits()).unwrap_or(0.0)
+}
+
 fn input_for(
     course: &PlanCourse,
     sections: Vec<CourseSection>,
     index: &crate::index::CatalogIndex,
 ) -> ScheduleCourseInput {
     let listed = index.course(&course.key);
+    let whole = chosen_row_credits(course, listed).round() as i32;
     ScheduleCourseInput {
         key: course.key.clone(),
         is_required: course.is_required,
         sections,
         excluded_crns: course.excluded_crns.clone(),
-        min_credits: listed.map(|c| c.min_credits.ceil() as i32).unwrap_or(0),
-        max_credits: listed.map(|c| c.max_credits.ceil() as i32).unwrap_or(0),
+        min_credits: whole,
+        max_credits: whole,
         unavailable_pin: None,
     }
 }
@@ -4679,8 +4688,9 @@ pub fn preferences_context(
     let mut total_credits = 0;
     for plan_course in &plan.courses {
         let course = index.course(&plan_course.key);
-        let least = course.map(|c| c.min_credits.ceil() as i32).unwrap_or(0);
-        let most = course.map(|c| c.max_credits.ceil() as i32).unwrap_or(0);
+        let whole = chosen_row_credits(plan_course, course).round() as i32;
+        let least = whole;
+        let most = whole;
         if plan_course.is_required {
             required_credits += least;
         } else {
@@ -4774,6 +4784,7 @@ pub fn add_course(
         color_index: color,
         pinned_crn: None,
         degree_row_id: None,
+        credits: None,
     });
     true
 }

@@ -368,6 +368,13 @@ pub struct CourseSection {
     pub prereqs: Option<super::requisite::Requisite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coreqs: Option<super::requisite::Requisite>,
+    /// Banner `creditHours` for this section. A default, not the high value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hour_low: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_hour_high: Option<f64>,
 }
 
 impl CourseSection {
