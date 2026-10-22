@@ -837,6 +837,24 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
             refresh(&shell);
         }
     });
+    let no_prereqs = gtk::CheckButton::with_label("No prerequisites");
+    no_prereqs.set_active(filters.no_prerequisites);
+    no_prereqs.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.no_prerequisites = b.is_active();
+            refresh(&shell);
+        }
+    });
+    let no_coreqs = gtk::CheckButton::with_label("No corequisites");
+    no_coreqs.set_active(filters.no_corequisites);
+    no_coreqs.connect_toggled({
+        let shell = shell.clone();
+        move |b| {
+            shell.borrow().state.borrow_mut().filters.no_corequisites = b.is_active();
+            refresh(&shell);
+        }
+    });
     let subject = gtk::Entry::builder()
         .placeholder_text("Subject")
         .text(filters.subjects.iter().next().cloned().unwrap_or_default())
@@ -888,6 +906,8 @@ fn search_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
     });
     filters_box.append(&open_only);
     filters_box.append(&honors);
+    filters_box.append(&no_prereqs);
+    filters_box.append(&no_coreqs);
     filters_box.append(&subject);
     filters_box.append(&sort_box);
     root.append(&filters_box);

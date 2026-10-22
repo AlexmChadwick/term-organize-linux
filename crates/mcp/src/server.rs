@@ -107,7 +107,7 @@ impl TermOrganize {
     }
 
     #[tool(
-        description = "Search courses in one bundled term.",
+        description = "Search courses in one bundled term. no_prerequisites and no_corequisites keep a course only when its details were loaded and that requisite was omitted.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

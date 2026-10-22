@@ -113,6 +113,14 @@ pub struct SearchArgs {
     pub attribute: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Keep courses whose loaded details list no prerequisites.
+    /// A course whose details were not loaded is unknown and is left out.
+    #[serde(default)]
+    pub no_prerequisites: bool,
+    /// Keep courses whose loaded details list no corequisites.
+    /// Unknown details are left out.
+    #[serde(default)]
+    pub no_corequisites: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -266,6 +274,8 @@ pub fn search_courses(args: SearchArgs) -> Result<Value, ToolError> {
     if let Some(subject) = args.subject.as_deref() {
         filters.subjects.insert(subject.trim().to_ascii_uppercase());
     }
+    filters.no_prerequisites = args.no_prerequisites;
+    filters.no_corequisites = args.no_corequisites;
     let limit = args.limit.unwrap_or(25).clamp(1, 100) as usize;
     let text = args.query.unwrap_or_default();
     let response = search::search(

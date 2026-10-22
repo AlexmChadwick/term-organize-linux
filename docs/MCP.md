@@ -111,7 +111,9 @@ Newest term first.
 
 ### search_courses
 
-`term` (name or Banner code), optional `query`, `subject`, `number`, `attribute`, `limit` (default 25, at most 100).
+`term` (name or Banner code), optional `query`, `subject`, `number`, `attribute`, `limit` (default 25, at most 100), `no_prerequisites`, and `no_corequisites`.
+
+`no_prerequisites` and `no_corequisites` default to false. When one is true, a course is kept only when its details were loaded and that requisite was omitted. A course whose details were not loaded is unknown, so it stays out. An empty requisite group counts as none once the details are loaded.
 
 ```json
 {

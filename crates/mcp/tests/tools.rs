@@ -50,6 +50,8 @@ fn every_catalog_tool_reads_the_bundled_terms() {
         number: Some("2100".into()),
         attribute: None,
         limit: Some(5),
+        no_prerequisites: false,
+        no_corequisites: false,
     })
     .unwrap();
     assert_eq!(found["courses"][0]["subject"], "CS");
@@ -886,6 +888,85 @@ fn distinct_crns_stay_separate_and_a_move_keeps_the_pin() {
     )
     .unwrap();
     assert_eq!(kept["terms"][1]["courses"][0]["crn"], first);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn search_tool_requisite_filters_keep_loaded_courses_with_none() {
+    let dir = temp_dir("req-filter");
+    let server = TermOrganize::new(dir.clone(), false);
+    let tools = server.tool_definitions();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "search_courses")
+        .unwrap();
+    let props = tool
+        .input_schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .unwrap();
+    assert!(props.contains_key("no_prerequisites"));
+    assert!(props.contains_key("no_corequisites"));
+    let description = tool.description.as_deref().unwrap();
+    assert!(description.contains("no_prerequisites"));
+    assert!(description.contains("no_corequisites"));
+
+    let omitted: tools::SearchArgs =
+        serde_json::from_str(r#"{"term":"Fall 2026","subject":"CS","limit":5}"#).unwrap();
+    assert!(!omitted.no_prerequisites);
+    assert!(!omitted.no_corequisites);
+
+    let index = term_organize_mcp::catalogs::catalogs()
+        .iter()
+        .find(|index| index.catalog.term.code == "202710")
+        .unwrap();
+    let courses = &index.catalog.courses;
+    let open = courses
+        .iter()
+        .find(|course| course.has_no_prerequisites() && course.has_no_corequisites())
+        .expect("loaded course with neither requisite");
+    let needs = courses
+        .iter()
+        .find(|course| course.details_loaded && !course.has_no_prerequisites())
+        .expect("loaded course with prerequisites");
+    let needs_coreq = courses
+        .iter()
+        .find(|course| course.details_loaded && !course.has_no_corequisites())
+        .expect("loaded course with corequisites");
+
+    let listed = |course: &termorganize_core::model::Course, prereq: bool, coreq: bool| {
+        let found = tools::search_courses(tools::SearchArgs {
+            term: "202710".into(),
+            query: None,
+            subject: Some(course.subject.clone()),
+            number: Some(course.number.clone()),
+            attribute: None,
+            limit: Some(25),
+            no_prerequisites: prereq,
+            no_corequisites: coreq,
+        })
+        .unwrap();
+        found["courses"].as_array().unwrap().iter().any(|row| {
+            row["subject"].as_str() == Some(course.subject.as_str())
+                && row["number"].as_str() == Some(course.number.as_str())
+        })
+    };
+
+    assert!(listed(open, true, true), "{}", open.code());
+    assert!(!listed(needs, true, false), "{}", needs.code());
+    assert!(!listed(needs_coreq, false, true), "{}", needs_coreq.code());
+    if let Some(unknown) = courses.iter().find(|course| {
+        !course.details_loaded
+            && !courses.iter().any(|other| {
+                other.details_loaded
+                    && other.subject == course.subject
+                    && other.number == course.number
+                    && other.has_no_prerequisites()
+                    && other.has_no_corequisites()
+            })
+    }) {
+        assert!(!listed(unknown, true, true), "{}", unknown.code());
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -31,6 +31,10 @@ pub struct SearchFilters {
     pub class_types: HashSet<String>,
     pub honors_only: bool,
     pub open_seats_only: bool,
+    /// Keep courses whose loaded details list no prerequisites. Unknown details are left out.
+    pub no_prerequisites: bool,
+    /// Keep courses whose loaded details list no corequisites. Unknown details are left out.
+    pub no_corequisites: bool,
     pub instruction: InstructionFilter,
     pub allowed_days: Option<DaySet>,
     pub starts_after: Option<i32>,
@@ -49,6 +53,8 @@ impl Default for SearchFilters {
             class_types: HashSet::new(),
             honors_only: false,
             open_seats_only: false,
+            no_prerequisites: false,
+            no_corequisites: false,
             instruction: InstructionFilter::Any,
             allowed_days: None,
             starts_after: None,
@@ -82,6 +88,12 @@ impl SearchFilters {
             n += 1;
         }
         if self.open_seats_only {
+            n += 1;
+        }
+        if self.no_prerequisites {
+            n += 1;
+        }
+        if self.no_corequisites {
             n += 1;
         }
         if self.instruction != InstructionFilter::Any {
@@ -130,6 +142,12 @@ impl SearchFilters {
             if course.min_credits > max {
                 return false;
             }
+        }
+        if self.no_prerequisites && !course.has_no_prerequisites() {
+            return false;
+        }
+        if self.no_corequisites && !course.has_no_corequisites() {
+            return false;
         }
         true
     }
