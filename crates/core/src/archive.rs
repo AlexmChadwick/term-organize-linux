@@ -108,20 +108,38 @@ fn decompress_lzfse(src: &[u8]) -> Result<Vec<u8>, String> {
 /// Directories searched for shipped `term-*.catalog` files.
 ///
 /// `TERMORGANIZE_DATA/catalog` replaces the shipped set when it already holds
-/// at least one snapshot. Otherwise the repo data, the Flatpak share path, and
-/// `data/catalog` next to the working directory are all searched.
+/// at least one snapshot. Otherwise the search includes the install prefix
+/// next to the executable (`bin/../share/termorganize/catalog`, which is where
+/// the Flatpak and the AppImage put the snapshots), the repo
+/// data, the Flatpak share path, and `data/catalog` next to the working directory.
 pub fn bundled_catalog_directories() -> Vec<PathBuf> {
-    if let Ok(dir) = std::env::var("TERMORGANIZE_DATA") {
-        let catalog = PathBuf::from(dir).join("catalog");
+    let exe = std::env::current_exe().ok();
+    bundled_catalog_directories_from(
+        std::env::var_os("TERMORGANIZE_DATA").map(PathBuf::from),
+        exe.as_deref(),
+    )
+}
+
+fn bundled_catalog_directories_from(
+    data_override: Option<PathBuf>,
+    exe: Option<&Path>,
+) -> Vec<PathBuf> {
+    if let Some(dir) = data_override {
+        let catalog = dir.join("catalog");
         if !catalogs_from_dirs(std::slice::from_ref(&catalog)).is_empty() {
             return vec![catalog];
         }
     }
-    vec![
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/catalog"),
-        PathBuf::from("/app/share/termorganize/catalog"),
-        PathBuf::from("data/catalog"),
-    ]
+    let mut dirs = Vec::new();
+    if let Some(exe) = exe {
+        if let Some(bin_dir) = exe.parent() {
+            dirs.push(bin_dir.join("../share/termorganize/catalog"));
+        }
+    }
+    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/catalog"));
+    dirs.push(PathBuf::from("/app/share/termorganize/catalog"));
+    dirs.push(PathBuf::from("data/catalog"));
+    dirs
 }
 
 /// Shipped catalogs, newest term code first. The same term is kept once, from
@@ -206,6 +224,30 @@ mod tests {
         assert_ne!(compressed.first(), Some(&b'{'));
         let back = json_bytes(&compressed).expect("decompress");
         assert_eq!(back, src);
+    }
+
+    #[test]
+    fn catalogs_beside_the_executable_are_searched_first() {
+        let root = std::env::temp_dir().join(format!(
+            "termorganize-prefix-{}-catalog",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let catalogs = root.join("share/termorganize/catalog");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&catalogs).unwrap();
+        let exe = bin.join("termorganize");
+        std::fs::write(&exe, b"bin").unwrap();
+        std::fs::write(catalogs.join("term-202730.catalog"), b"spring").unwrap();
+        let dirs = bundled_catalog_directories_from(None, Some(&exe));
+        assert_eq!(
+            dirs.first(),
+            Some(&bin.join("../share/termorganize/catalog"))
+        );
+        let found = catalogs_from_dirs(&dirs[..1]);
+        assert_eq!(std::fs::read(&found[0]).unwrap(), b"spring");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

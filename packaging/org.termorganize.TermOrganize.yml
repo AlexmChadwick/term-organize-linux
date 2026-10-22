@@ -1,5 +1,9 @@
-# Flatpak manifest. Build from a clean tree (no target/):
-#   flatpak-builder --user --install --force-clean build-dir packaging/org.termorganize.TermOrganize.yml
+# Flatpak manifest. Application version 1.1.0 (TERMORGANIZE_VERSION below).
+# Keep it equal to [workspace.package].version and the newest metainfo <release>.
+#
+# Build from a clean tree (no target/). Vendor crates first so the sandbox can
+# build offline; packaging/build-release.sh does that.
+#   flatpak-builder --user --disable-rofiles-fuse --force-clean build-dir packaging/org.termorganize.TermOrganize.yml
 id: org.termorganize.TermOrganize
 runtime: org.gnome.Platform
 runtime-version: "47"
@@ -23,8 +27,11 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/termorganize/cargo
+        TERMORGANIZE_VERSION: "1.1.0"
     build-commands:
-      - cargo build --release --locked --manifest-path Cargo.toml
+      # flatpak-builder's dir source can skip dotfiles, so write the vendor config here.
+      - mkdir -p .cargo && cp packaging/cargo-vendor.config.toml .cargo/config.toml
+      - cargo build --release --locked --offline --manifest-path Cargo.toml
       - install -Dm755 target/release/termorganize /app/bin/termorganize
       - install -Dm644 data/catalog/term-202710.catalog /app/share/termorganize/catalog/term-202710.catalog
       - install -Dm644 data/catalog/term-202730.catalog /app/share/termorganize/catalog/term-202730.catalog

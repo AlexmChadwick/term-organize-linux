@@ -1,0 +1,7 @@
+# Written to .cargo/config.toml by packaging/build-release.sh before the
+# Flatpak sandbox build. Not used for ordinary cargo test / cargo run.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor/cargo"
