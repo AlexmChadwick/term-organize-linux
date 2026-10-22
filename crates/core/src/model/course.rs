@@ -53,6 +53,28 @@ impl Course {
     pub fn nupaths(&self) -> Vec<NuPath> {
         NuPath::from_codes(&self.attributes)
     }
+
+    /// True when the course details were loaded and they list no prerequisites.
+    /// A loaded course omits `prereqs` when there are none. A course whose
+    /// details were not loaded leaves the field empty too, and that is unknown, not none.
+    pub fn has_no_prerequisites(&self) -> bool {
+        self.details_loaded
+            && self
+                .prereqs
+                .as_ref()
+                .is_none_or(|req| req.simplified().is_none())
+    }
+
+    /// True when the course details were loaded and they list no corequisites.
+    /// Same split as [`Self::has_no_prerequisites`]: omitted on a loaded course means none,
+    /// and empty before the details load means unknown.
+    pub fn has_no_corequisites(&self) -> bool {
+        self.details_loaded
+            && self
+                .coreqs
+                .as_ref()
+                .is_none_or(|req| req.simplified().is_none())
+    }
 }
 
 pub fn credit_number(value: f64) -> String {
