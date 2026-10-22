@@ -233,6 +233,14 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         }
     }
     pull_folder(&mut data);
+    let before = serde_json::to_string(&data).unwrap_or_default();
+    planlogic::clamp_saved_credits(&mut data, &index.catalog.courses);
+    if serde_json::to_string(&data).unwrap_or_default() != before {
+        if let Ok((saved, next)) = store::save_merging(&store::data_dir(), &data, &stamp) {
+            data = saved;
+            stamp = next;
+        }
+    }
     apply_scheme(&data.preferences);
     let term_name = index.catalog.term.name();
     let state = Rc::new(RefCell::new(State {
