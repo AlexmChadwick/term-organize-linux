@@ -386,12 +386,13 @@ pub(super) fn load_restrictions(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
 
 pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     remember_recent(shell, key);
-    let page = course_page(shell, key);
+    let page = course_page(shell, key, false);
+    page.set_vexpand(true);
     let clamp = adw::Clamp::new();
     clamp.set_maximum_size(760);
     clamp.set_tightening_threshold(480);
+    clamp.set_vexpand(true);
     clamp.set_child(Some(&page));
-    let scroll = gtk::ScrolledWindow::builder().child(&clamp).build();
     let title = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
@@ -405,7 +406,7 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         .title(&title)
         .default_width(760)
         .default_height(680)
-        .content(&scroll)
+        .content(&clamp)
         .build();
     window.set_widget_name(&super::course_window_name(key));
     if let Some(app) = shell.borrow().window.application() {
@@ -437,6 +438,19 @@ pub fn attach_course_drag(widget: &impl IsA<gtk::Widget>, key: &CourseKey) {
     source.set_actions(gtk::gdk::DragAction::COPY);
     let payload = format!("key:{}", key);
     source.connect_prepare(move |_, _, _| {
+        Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+    });
+    widget.add_controller(source);
+}
+
+/// Drag payload is the row's widget name, so a recycled list row can change course.
+pub fn attach_named_course_drag(widget: &impl IsA<gtk::Widget>) {
+    let source = gtk::DragSource::new();
+    source.set_actions(gtk::gdk::DragAction::COPY);
+    source.connect_prepare(|source, _, _| {
+        let widget = source.widget()?;
+        let key = CourseKey::parse(&widget.widget_name())?;
+        let payload = format!("key:{key}");
         Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
     });
     widget.add_controller(source);
