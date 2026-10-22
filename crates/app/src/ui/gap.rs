@@ -907,7 +907,13 @@ fn course_drag_row(
                 );
                 persist(&mut state);
             }
-            refresh(&shell_spin);
+            // Rebuild after the click is finished. Refreshing under a held
+            // pointer delivers the rest of the click to the new stepper.
+            let later = shell_spin.clone();
+            glib::timeout_add_local(Duration::from_millis(250), move || {
+                refresh(&later);
+                glib::ControlFlow::Break
+            });
         }));
     }
     box_.append(&text);

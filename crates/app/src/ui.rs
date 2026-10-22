@@ -1848,7 +1848,11 @@ fn schedules_page(shell: &Rc<RefCell<Shell>>) -> gtk::Widget {
                     );
                     persist(&mut state);
                 }
-                refresh(&shell_spin);
+                let later = shell_spin.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                    refresh(&later);
+                    glib::ControlFlow::Break
+                });
             }));
         }
         row.append(&text);
