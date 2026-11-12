@@ -534,6 +534,16 @@ pub fn import_folder_json(text: &str, local: &UserData) -> UserData {
     data
 }
 
+/// Whether launch should pull the folder file: only when it has a modified time
+/// and the local file has none or an older one. A missing or unreadable file
+/// reports `None`, which never wins.
+pub fn should_pull_folder(
+    remote_time: Option<SystemTime>,
+    local_time: Option<SystemTime>,
+) -> bool {
+    remote_time > local_time
+}
+
 /// The local user file keeps whole seconds (`JSONEncoder.iso8601` drops fractions).
 pub fn round_trip_user_file(data: &UserData) -> Result<UserData, String> {
     let mut value = serde_json::to_value(data).map_err(|e| e.to_string())?;
@@ -1043,5 +1053,22 @@ mod tests {
         assert!(error.contains("not valid JSON"));
         assert_eq!(fs::read(dir.join("user.json")).unwrap(), b"not json");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_pull_decision_covers_each_branch() {
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let new = old + Duration::from_secs(60);
+        // no folder file, or its time is unreadable
+        assert!(!should_pull_folder(None, Some(old)));
+        assert!(!should_pull_folder(None, None));
+        // folder newer
+        assert!(should_pull_folder(Some(new), Some(old)));
+        // local newer
+        assert!(!should_pull_folder(Some(old), Some(new)));
+        // equal
+        assert!(!should_pull_folder(Some(old), Some(old)));
+        // local file missing or unreadable
+        assert!(should_pull_folder(Some(old), None));
     }
 }

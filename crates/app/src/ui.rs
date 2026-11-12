@@ -4894,7 +4894,7 @@ fn pull_folder(data: &mut UserData) {
     let local = store::user_path();
     let remote_time = std::fs::metadata(&remote).and_then(|m| m.modified()).ok();
     let local_time = std::fs::metadata(&local).and_then(|m| m.modified()).ok();
-    if remote_time > local_time {
+    if store::should_pull_folder(remote_time, local_time) {
         if let Ok(text) = std::fs::read_to_string(remote) {
             let imported = store::import_folder_json(&text, data);
             let scheme = data.preferences.color_scheme.clone();
