@@ -537,10 +537,7 @@ pub fn import_folder_json(text: &str, local: &UserData) -> UserData {
 /// Whether launch should pull the folder file: only when it has a modified time
 /// and the local file has none or an older one. A missing or unreadable file
 /// reports `None`, which never wins.
-pub fn should_pull_folder(
-    remote_time: Option<SystemTime>,
-    local_time: Option<SystemTime>,
-) -> bool {
+pub fn should_pull_folder(remote_time: Option<SystemTime>, local_time: Option<SystemTime>) -> bool {
     remote_time > local_time
 }
 
