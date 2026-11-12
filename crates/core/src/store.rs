@@ -521,6 +521,19 @@ pub fn import_json(text: &str) -> UserData {
     data
 }
 
+/// Imports the folder copy, which `export_json(_, false)` stripped of student info,
+/// and restores `student_name`/`student_id` from the local plan with the same id.
+pub fn import_folder_json(text: &str, local: &UserData) -> UserData {
+    let mut data = import_json(text);
+    for plan in &mut data.degree_plans {
+        if let Some(mine) = local.degree_plans.iter().find(|p| p.id == plan.id) {
+            plan.student_name = mine.student_name.clone().or(plan.student_name.take());
+            plan.student_id = mine.student_id.clone().or(plan.student_id.take());
+        }
+    }
+    data
+}
+
 /// The local user file keeps whole seconds (`JSONEncoder.iso8601` drops fractions).
 pub fn round_trip_user_file(data: &UserData) -> Result<UserData, String> {
     let mut value = serde_json::to_value(data).map_err(|e| e.to_string())?;
@@ -600,6 +613,65 @@ mod tests {
             name: name.to_string(),
             ..DegreePlan::default()
         }
+    }
+
+    fn student_plan(name: &str, student: Option<(&str, &str)>) -> DegreePlan {
+        let mut plan = degree(name);
+        plan.student_name = student.map(|(name, _)| name.to_string());
+        plan.student_id = student.map(|(_, id)| id.to_string());
+        plan
+    }
+
+    #[test]
+    fn folder_import_keeps_local_student_info() {
+        let ada = student_plan("Ada plan", Some(("Ada", "001")));
+        let bob = student_plan("Bob plan", Some(("Bob", "002")));
+        let folder_only = student_plan("Folder only", None);
+        let local = UserData {
+            degree_plans: vec![ada.clone(), bob.clone()],
+            ..UserData::default()
+        };
+        let mut shared = local.clone();
+        shared.degree_plans.push(folder_only.clone());
+        let folder = export_json(&shared, false);
+        let imported = import_folder_json(&folder, &local);
+        let find = |id: &uuid::Uuid| {
+            imported
+                .degree_plans
+                .iter()
+                .find(|plan| plan.id == *id)
+                .unwrap()
+        };
+        assert_eq!(find(&ada.id).student_name.as_deref(), Some("Ada"));
+        assert_eq!(find(&ada.id).student_id.as_deref(), Some("001"));
+        assert_eq!(find(&bob.id).student_name.as_deref(), Some("Bob"));
+        assert_eq!(find(&bob.id).student_id.as_deref(), Some("002"));
+        assert_eq!(find(&folder_only.id).student_name, None);
+        assert_eq!(find(&folder_only.id).student_id, None);
+    }
+
+    #[test]
+    fn folder_import_keeps_folder_student_info_when_local_has_none() {
+        let mut plan = student_plan("Plan", Some(("Folder", "F-1")));
+        let folder = export_json(
+            &UserData {
+                degree_plans: vec![plan.clone()],
+                ..UserData::default()
+            },
+            true,
+        );
+        plan.student_name = None;
+        plan.student_id = None;
+        let local = UserData {
+            degree_plans: vec![plan],
+            ..UserData::default()
+        };
+        let imported = import_folder_json(&folder, &local);
+        assert_eq!(
+            imported.degree_plans[0].student_name.as_deref(),
+            Some("Folder")
+        );
+        assert_eq!(imported.degree_plans[0].student_id.as_deref(), Some("F-1"));
     }
 
     fn set_mtime(path: &Path, time: SystemTime) {
