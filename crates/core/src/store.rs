@@ -521,6 +521,19 @@ pub fn import_json(text: &str) -> UserData {
     data
 }
 
+/// Imports the folder copy, which `export_json(_, false)` stripped of student info,
+/// and restores `student_name`/`student_id` from the local plan with the same id.
+pub fn import_folder_json(text: &str, local: &UserData) -> UserData {
+    let mut data = import_json(text);
+    for plan in &mut data.degree_plans {
+        if let Some(mine) = local.degree_plans.iter().find(|p| p.id == plan.id) {
+            plan.student_name = mine.student_name.clone();
+            plan.student_id = mine.student_id.clone();
+        }
+    }
+    data
+}
+
 /// The local user file keeps whole seconds (`JSONEncoder.iso8601` drops fractions).
 pub fn round_trip_user_file(data: &UserData) -> Result<UserData, String> {
     let mut value = serde_json::to_value(data).map_err(|e| e.to_string())?;
@@ -600,6 +613,24 @@ mod tests {
             name: name.to_string(),
             ..DegreePlan::default()
         }
+    }
+
+    #[test]
+    fn folder_import_keeps_local_student_info() {
+        let mut plan = degree("Plan");
+        plan.student_name = Some("Ada".into());
+        plan.student_id = Some("001".into());
+        let local = UserData {
+            degree_plans: vec![plan],
+            ..UserData::default()
+        };
+        let folder = export_json(&local, false);
+        let imported = import_folder_json(&folder, &local);
+        assert_eq!(
+            imported.degree_plans[0].student_name.as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(imported.degree_plans[0].student_id.as_deref(), Some("001"));
     }
 
     fn set_mtime(path: &Path, time: SystemTime) {

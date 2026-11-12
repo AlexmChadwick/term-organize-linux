@@ -4896,7 +4896,7 @@ fn pull_folder(data: &mut UserData) {
     let local_time = std::fs::metadata(&local).and_then(|m| m.modified()).ok();
     if remote_time > local_time {
         if let Ok(text) = std::fs::read_to_string(remote) {
-            let imported = store::import_json(&text);
+            let imported = store::import_folder_json(&text, data);
             let scheme = data.preferences.color_scheme.clone();
             let minutes = data.preferences.seat_check_minutes;
             *data = imported;
