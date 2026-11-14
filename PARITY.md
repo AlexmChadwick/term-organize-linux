@@ -50,7 +50,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | Preferences survey | Time-of-day bands, days off and strength, earliest and latest, day layout, gaps, breaks, minimum break, lunch, blocked times (add, enable, strength, remove), format and strength, campus and strength, seats, instructors, credit target, plus the natural-language line. The window uses `AdwClamp`, `AdwPreferencesGroup`, `ComboRow`, `SwitchRow`, and `EntryRow`, with day toggles that wrap | ported |
 | Ranking with reasons | List shows CRNs and reason text | ported |
 | No-results suggestions | `suggest_relaxations` titles when Generate finds nothing | ported |
-| Export .ics | `schedule::ics`, same VTIMEZONE and UID shape | ported |
+| Export .ics | `schedule::ics`, same VTIMEZONE and UID shape, final exams, weekly meetings aligned to first class day | ported |
 | Export an image | `schedule::week_png` | ported |
 | Copy CRNs | `schedule::copy_crns` and Ctrl+C | ported |
 | Autofill from the degree plan | `planlogic::schedule_suggestions` | ported |
@@ -91,7 +91,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | User data JSON, export and import | `store.rs`. Export omits the student unless the setting is on | ported |
 | iCloud / CloudKit merge | `sync.rs` last-write-wins folder sync. Device-only fields (color scheme, seat interval) stay local. No CloudKit | substituted |
 | Legal text and disclaimer | `legal.rs`, first-run dialog, About | ported |
-| Tests | All 373 Swift `@Test`s are ported under `crates/core/tests/` (`prerequisite_data.rs` 99, `schedule_suites.rs` 120, `degree_suites.rs` 66, `support_suites.rs` 88), plus `parity.rs`. CloudKit container, entitlement, and code-signature checks assert the Linux stand-in: merge does not read a container id or a signature. The live Banner call in `banner.rs` stays ignored | ported |
+| Tests | All 373 Swift `@Test`s are ported under `crates/core/tests/` (`prerequisite_data.rs` 99, `schedule_suites.rs` 120, `degree_suites.rs` 66, `support_suites.rs` 88), plus `parity.rs` and `ics_export.rs`. CloudKit container, entitlement, and code-signature checks assert the Linux stand-in: merge does not read a container id or a signature. The live Banner call in `banner.rs` stays ignored | ported |
 
 ## Not carried over
 
