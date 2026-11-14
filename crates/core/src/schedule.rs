@@ -2869,14 +2869,25 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
             let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
                 continue;
             };
-            let Some(first) = meeting
+            let start_date_str = meeting
                 .start_date
                 .clone()
-                .or_else(|| Some("2026-09-09".into()))
+                .unwrap_or_else(|| "2026-09-09".into());
+            let last = meeting
+                .end_date
+                .clone()
+                .unwrap_or_else(|| start_date_str.clone());
+            let Some(first) =
+                first_meeting_date(&start_date_str, &last, meeting.days).or_else(|| {
+                    if meeting.days.is_empty() {
+                        None
+                    } else {
+                        Some(start_date_str)
+                    }
+                })
             else {
                 continue;
             };
-            let last = meeting.end_date.clone().unwrap_or_else(|| first.clone());
             lines.push("BEGIN:VEVENT".into());
             lines.push(format!(
                 "UID:{}-{}-{n}@neuclasssearch",
@@ -2929,6 +2940,64 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
             lines.push("TRANSP:OPAQUE".into());
             lines.push("END:VEVENT".into());
         }
+
+        if let Some(exam) = section.final_exam() {
+            if let Some(start_date) = &exam.start_date {
+                if let Some((y, m, d)) = parse_date(start_date) {
+                    lines.push("BEGIN:VEVENT".into());
+                    lines.push(format!("UID:{}-final@termorganize.local", section.crn));
+                    lines.push(format!("DTSTAMP:{stamp}"));
+                    if let (Some(start), Some(end)) = (exam.start, exam.end) {
+                        lines.push(format!(
+                            "DTSTART;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
+                            hhmm(start)
+                        ));
+                        lines.push(format!(
+                            "DTEND;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
+                            hhmm(end)
+                        ));
+                    } else {
+                        let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
+                        lines.push(format!("DTSTART;VALUE=DATE:{y:04}{m:02}{d:02}"));
+                        lines.push(format!("DTEND;VALUE=DATE:{ny:04}{nm:02}{nd:02}"));
+                    }
+                    lines.push(format!(
+                        "SUMMARY:{}",
+                        escape_ics(&format!("{} Final Exam", section.course_key()))
+                    ));
+                    let location = if exam.is_online() || section.is_online() {
+                        Some("Online".into())
+                    } else {
+                        let label = exam.long_location_label();
+                        if label == "Location TBA" {
+                            None
+                        } else {
+                            Some(label)
+                        }
+                    };
+                    if let Some(location) = location {
+                        lines.push(format!("LOCATION:{}", escape_ics(&location)));
+                    }
+                    let mut desc = vec!["Final exam".to_string()];
+                    if !section.title.is_empty() {
+                        desc.push(section.title.clone());
+                    }
+                    let section_label = section_title(section);
+                    desc.push(format!("CRN {} · {}", section.crn, section_label));
+                    let instructors = section.instructor_label();
+                    if !instructors.is_empty()
+                        && instructors != "Instructor unavailable"
+                        && instructors != "TBA"
+                    {
+                        desc.push(format!("Instructor: {instructors}"));
+                    }
+                    desc.push("Added from Term Organize".into());
+                    lines.push(format!("DESCRIPTION:{}", escape_ics(&desc.join("\n"))));
+                    lines.push("TRANSP:OPAQUE".into());
+                    lines.push("END:VEVENT".into());
+                }
+            }
+        }
     }
     lines.push("END:VCALENDAR".into());
     lines
@@ -2948,9 +3017,10 @@ fn hhmm(minutes: i32) -> String {
 }
 fn escape_ics(text: &str) -> String {
     text.replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace(',', "\\,")
         .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace("\r\n", "\\n")
+        .replace('\n', "\\n")
 }
 fn fold_ics(line: String) -> String {
     let bytes = line.as_bytes();
@@ -2977,20 +3047,85 @@ fn fold_ics(line: String) -> String {
 fn utc_now() -> String {
     "20261013T000000Z".into()
 }
-fn until_stamp(date: &str) -> String {
-    let parts: Vec<i32> = date.split('-').filter_map(|p| p.parse().ok()).collect();
-    if parts.len() != 3 {
-        return format!("{}T235959Z", date.replace('-', ""));
+fn parse_date(s: &str) -> Option<(i32, i32, i32)> {
+    let s = s.trim();
+    if s.contains('-') {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() == 3 {
+            let y: i32 = parts[0].parse().ok()?;
+            let m: i32 = parts[1].parse().ok()?;
+            let d: i32 = parts[2].parse().ok()?;
+            if (1..=12).contains(&m) && (1..=31).contains(&d) {
+                return Some((y, m, d));
+            }
+        }
+    } else if s.len() == 8 && s.chars().all(|c| c.is_ascii_digit()) {
+        let y: i32 = s[0..4].parse().ok()?;
+        let m: i32 = s[4..6].parse().ok()?;
+        let d: i32 = s[6..8].parse().ok()?;
+        if (1..=12).contains(&m) && (1..=31).contains(&d) {
+            return Some((y, m, d));
+        }
     }
-    let (y, m, d) = (parts[0], parts[1], parts[2]);
-    let offset = if is_edt(y, m, d) { 4 } else { 5 };
-    let hour = 23 + offset;
-    let (day, hour) = if hour >= 24 {
-        (d + 1, hour - 24)
+    None
+}
+fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
+    let mut y = i64::from(year);
+    let m = i64::from(month);
+    let d = i64::from(day);
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u32;
+    era * 146_097 + i64::from(doe) - 719_468
+}
+fn civil_from_days(z: i64) -> (i32, i32, i32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (i64::from(yoe) + era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as i32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as i32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+fn first_meeting_date(start_date: &str, end_date: &str, days: DaySet) -> Option<String> {
+    let (mut y, mut m, mut d) = parse_date(start_date)?;
+    let end_limit = if let Some((ey, em, ed)) = parse_date(end_date) {
+        days_from_civil(ey, em, ed)
     } else {
-        (d, hour)
+        i64::MAX
     };
-    format!("{y:04}{m:02}{day:02}T{hour:02}5959Z")
+    for _ in 0..7 {
+        let cur = days_from_civil(y, m, d);
+        if cur > end_limit {
+            return None;
+        }
+        let w = civil_weekday(y, m, d);
+        if days.contains_day(w) {
+            return Some(format!("{y:04}-{m:02}-{d:02}"));
+        }
+        let (ny, nm, nd) = civil_from_days(cur + 1);
+        y = ny;
+        m = nm;
+        d = nd;
+    }
+    None
+}
+fn until_stamp(date: &str) -> String {
+    let Some((y, m, d)) = parse_date(date) else {
+        return format!("{}T235959Z", date.replace('-', ""));
+    };
+    let offset = if is_edt(y, m, d) { 4 } else { 5 };
+    let hour = offset - 1;
+    let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
+    format!("{ny:04}{nm:02}{nd:02}T{hour:02}5959Z")
 }
 fn is_edt(year: i32, month: i32, day: i32) -> bool {
     if (4..11).contains(&month) {
