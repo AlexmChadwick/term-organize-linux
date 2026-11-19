@@ -2,6 +2,7 @@
 //!
 //! Portions derived from SearchNEU (AGPL-3.0), packages/scraper.
 
+use crate::catalog::{self, BannerMeetingFaculty, BannerSection};
 use crate::html::{plain_text, table_rows};
 use crate::model::*;
 use regex::Regex;
@@ -159,6 +160,7 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
     let lowered = text.to_ascii_lowercase();
     if !lowered.contains("enrolled in one of the following")
         && !lowered.contains("not all restrictions")
+        && !lowered.contains("no restrictions")
     {
         return None;
     }
@@ -478,6 +480,52 @@ fn sections_of(value: &serde_json::Value) -> Result<Vec<crate::catalog::BannerSe
     Ok(sections)
 }
 
+fn course_sections(
+    page: &serde_json::Value,
+    key: &CourseKey,
+) -> Result<Vec<BannerSection>, String> {
+    if page.get("success").and_then(|value| value.as_bool()) == Some(false) {
+        return Err("Banner did not return a successful section search".into());
+    }
+    match page.get("data") {
+        Some(serde_json::Value::Array(_)) => {}
+        None | Some(serde_json::Value::Null)
+            if page.get("success").and_then(|value| value.as_bool()) == Some(true) =>
+        {
+            return Ok(Vec::new());
+        }
+        _ => return Err("Banner did not return a section list".into()),
+    }
+    Ok(sections_of(page)?
+        .into_iter()
+        .filter(|section| {
+            section.subject == key.subject
+                && section.course_number == key.number
+                && !section.course_reference_number.is_empty()
+        })
+        .collect())
+}
+
+fn faculty_instructors(body: &str) -> Result<Vec<Instructor>, String> {
+    #[derive(serde::Deserialize)]
+    struct FacultyMeetingTimes {
+        fmt: Option<Vec<BannerMeetingFaculty>>,
+    }
+    let response: FacultyMeetingTimes =
+        serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let mut seen = HashSet::new();
+    let mut instructors: Vec<_> = response
+        .fmt
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|meeting| meeting.faculty.unwrap_or_default())
+        .filter_map(|faculty| faculty.to_instructor())
+        .filter(|instructor| seen.insert(instructor.name.clone()))
+        .collect();
+    instructors.sort_by_key(|instructor| !instructor.primary);
+    Ok(instructors)
+}
+
 #[derive(Clone, Debug)]
 pub struct BannerClient {
     pub base: String,
@@ -520,6 +568,171 @@ impl BannerClient {
         })?
         .into_string()
         .map_err(|e| e.to_string())
+    }
+
+    pub fn refresh_course(
+        &self,
+        catalog: &mut TermCatalog,
+        key: &CourseKey,
+        now: f64,
+    ) -> Result<bool, String> {
+        let term = catalog.term.code.clone();
+        let fresh = self.fetch_course_sections(&term, key)?;
+        let cross_listed: HashSet<_> = fresh
+            .iter()
+            .filter(|section| {
+                section
+                    .cross_list
+                    .as_deref()
+                    .is_some_and(|group| !group.trim().is_empty())
+            })
+            .map(|section| section.course_reference_number.clone())
+            .collect();
+        let cached_cross_lists: HashMap<_, _> = catalog
+            .sections
+            .iter()
+            .filter(|section| cross_listed.contains(&section.crn))
+            .map(|section| (section.crn.clone(), section.cross_list_crns.clone()))
+            .collect();
+        if !catalog::apply_course_refresh(catalog, key, &fresh, now) {
+            return Ok(false);
+        }
+        if !cross_listed.is_empty() {
+            let subjects = SubjectLookup::new(&catalog.subjects);
+            for section in catalog
+                .sections
+                .iter_mut()
+                .filter(|section| cross_listed.contains(&section.crn))
+            {
+                if let Some(cached) = cached_cross_lists.get(&section.crn) {
+                    for crn in cached {
+                        if !section.cross_list_crns.contains(crn) {
+                            section.cross_list_crns.push(crn.clone());
+                        }
+                    }
+                }
+                if let Ok(html) = self.post_section_form("getXlstSections", &term, &section.crn) {
+                    let links: Vec<_> = catalog::cross_listed_sections(&html, &subjects)
+                        .into_iter()
+                        .map(|link| link.crn)
+                        .filter(|crn| crn != &section.crn)
+                        .collect();
+                    if !links.is_empty() {
+                        section.cross_list_crns = links;
+                    }
+                }
+            }
+        }
+        let refresh_restrictions = catalog
+            .courses
+            .iter()
+            .any(|course| &course.key() == key && course.details_loaded);
+        // Section availability remains useful if optional metadata is unavailable.
+        let _ = self.load_course_metadata(catalog, key);
+        self.fill_section_details(catalog, key, refresh_restrictions);
+        Ok(true)
+    }
+
+    /// Load missing course and section details on demand.
+    pub fn load_course_details(
+        &self,
+        catalog: &mut TermCatalog,
+        key: &CourseKey,
+    ) -> Result<(), String> {
+        self.load_course_metadata(catalog, key)?;
+        self.fill_section_details(catalog, key, false);
+        Ok(())
+    }
+
+    fn load_course_metadata(
+        &self,
+        catalog: &mut TermCatalog,
+        key: &CourseKey,
+    ) -> Result<(), String> {
+        let Some(course) = catalog
+            .courses
+            .iter_mut()
+            .find(|course| &course.key() == key)
+        else {
+            return Ok(());
+        };
+        let Some(first) = catalog
+            .sections
+            .iter()
+            .find(|section| &section.course_key() == key)
+        else {
+            return Ok(());
+        };
+        let term = &catalog.term.code;
+        if !course.details_loaded {
+            let crn = &first.crn;
+            let subjects = SubjectLookup::new(&catalog.subjects);
+            let description_html = self.post_section_form("getCourseDescription", term, crn)?;
+            let prereq_html = self.post_section_form("getSectionPrerequisites", term, crn)?;
+            let coreq_html = self.post_section_form("getCorequisites", term, crn)?;
+            let details_html = self.post_section_form("getSectionCatalogDetails", term, crn)?;
+            let details = catalog_details(&details_html);
+            course.description = description(&description_html);
+            course.prereqs = prerequisites(&prereq_html, &subjects);
+            course.coreqs = corequisites(&coreq_html, &subjects);
+            if let Some(title) = details.title.filter(|_| !course.special_topics) {
+                course.title = title;
+            }
+            course.college = details.college.or(course.college.take());
+            course.department = details.department.or(course.department.take());
+            course.details_loaded = true;
+        }
+        if course.special_topics {
+            for section in catalog
+                .sections
+                .iter_mut()
+                .filter(|section| &section.course_key() == key && section.description.is_none())
+            {
+                let html = self.post_section_form("getCourseDescription", term, &section.crn)?;
+                section.description = Some(description(&html));
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_section_details(
+        &self,
+        catalog: &mut TermCatalog,
+        key: &CourseKey,
+        refresh_restrictions: bool,
+    ) {
+        let term = &catalog.term.code;
+        let mut restriction_requested = false;
+        for section in catalog
+            .sections
+            .iter_mut()
+            .filter(|section| &section.course_key() == key)
+        {
+            if section.instructors.is_none() {
+                let url = format!(
+                    "{}searchResults/getFacultyMeetingTimes?term={term}&courseReferenceNumber={}",
+                    self.ssb(),
+                    section.crn
+                );
+                if let Ok(instructors) = self.get(&url).and_then(|body| faculty_instructors(&body))
+                {
+                    section.instructors = Some(instructors);
+                }
+            }
+            if refresh_restrictions || section.restrictions.is_none() {
+                if restriction_requested {
+                    std::thread::sleep(Self::RESTRICTION_GAP);
+                }
+                restriction_requested = true;
+                if let Some(restrictions) = self
+                    .post_section_form("getRestrictions", term, &section.crn)
+                    .ok()
+                    .and_then(|html| enrollment_restrictions(&html))
+                {
+                    section.restrictions = Some(restrictions);
+                }
+            }
+        }
     }
 
     /// Open a Banner search session and read current seats for one course.
@@ -728,6 +941,57 @@ impl BannerClient {
         Ok(all)
     }
 
+    /// Fetch every section returned for one exact course number.
+    pub fn fetch_course_sections(
+        &self,
+        term: &str,
+        key: &CourseKey,
+    ) -> Result<Vec<crate::catalog::BannerSection>, String> {
+        const PAGE_SIZE: i32 = 500;
+        let cookie = self.open_session(term)?;
+        let mut offset = 0;
+        let mut sections = Vec::new();
+        let mut seen = HashSet::new();
+        loop {
+            let page = self.search_page(
+                &cookie,
+                term,
+                Some(&key.subject),
+                Some(&key.number),
+                offset,
+                PAGE_SIZE,
+            )?;
+            let total = page
+                .get("totalCount")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            let success = page.get("success").and_then(|value| value.as_bool());
+            let rows = page.get("data").and_then(|value| value.as_array());
+            if success == Some(false)
+                || (rows.is_none() && success != Some(true))
+                || (total > i64::from(offset) && rows.is_none_or(Vec::is_empty))
+            {
+                return Err("Banner returned an incomplete section list".into());
+            }
+            if rows.into_iter().flatten().any(|row| {
+                row.get("term")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|row_term| !row_term.is_empty() && row_term != term)
+            }) {
+                return Err("Banner returned sections for a different term".into());
+            }
+            sections.extend(
+                course_sections(&page, key)?
+                    .into_iter()
+                    .filter(|section| seen.insert(section.course_reference_number.clone())),
+            );
+            offset += PAGE_SIZE;
+            if total <= i64::from(offset) {
+                return Ok(sections);
+            }
+        }
+    }
+
     pub fn fetch_offered(
         &self,
         term: &str,
@@ -878,37 +1142,9 @@ impl BannerClient {
     /// Pause between section restriction requests so a course open does not hammer Banner.
     pub const RESTRICTION_GAP: std::time::Duration = std::time::Duration::from_millis(300);
 
-    /// Restrictions for each CRN, in order. A CRN whose page is not restriction HTML is omitted
-    /// so it stays unknown. One session is opened for the batch.
-    pub fn fetch_section_restrictions(
-        &self,
-        term: &str,
-        crns: &[String],
-    ) -> Result<Vec<(String, Vec<EnrollmentRestriction>)>, String> {
-        if crns.is_empty() {
-            return Ok(Vec::new());
-        }
-        let cookie = self.open_session(term)?;
-        let mut found = Vec::new();
-        for (index, crn) in crns.iter().enumerate() {
-            if index > 0 {
-                std::thread::sleep(Self::RESTRICTION_GAP);
-            }
-            let html = match self.post_restrictions(&cookie, term, crn) {
-                Ok(html) => html,
-                Err(_) => continue,
-            };
-            if let Some(restrictions) = enrollment_restrictions(&html) {
-                found.push((crn.clone(), restrictions));
-            }
-        }
-        Ok(found)
-    }
-
-    fn post_restrictions(&self, cookie: &str, term: &str, crn: &str) -> Result<String, String> {
-        let url = format!("{}searchResults/getRestrictions", self.ssb());
+    fn post_section_form(&self, endpoint: &str, term: &str, crn: &str) -> Result<String, String> {
+        let url = format!("{}searchResults/{endpoint}", self.ssb());
         let body = format!("term={term}&courseReferenceNumber={crn}");
-        let cookie = cookie.to_string();
         perform(|| {
             classify(
                 ureq::post(&url)
@@ -916,7 +1152,6 @@ impl BannerClient {
                         "Content-Type",
                         "application/x-www-form-urlencoded; charset=UTF-8",
                     )
-                    .set("Cookie", &cookie)
                     .timeout(std::time::Duration::from_secs(25))
                     .send_string(&body),
             )
@@ -1174,8 +1409,202 @@ pub fn meeting_from_banner(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_live_seats, LiveSeat};
-    use crate::model::*;
+    use super::{course_sections, faculty_instructors, parse_live_seats, BannerClient, LiveSeat};
+    use crate::{catalog, model::*};
+    use std::collections::HashMap;
+
+    #[test]
+    fn course_refresh_reads_banner_endpoints_and_preserves_cached_optional_details() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = BannerClient {
+            base: format!("http://{}", listener.local_addr().unwrap()),
+        };
+        let server = std::thread::spawn(move || {
+            let responses = [
+                (
+                    "POST",
+                    "/term/search",
+                    "200 OK",
+                    "Set-Cookie: JSESSIONID=fixture\r\n",
+                    "{}",
+                ),
+                (
+                    "GET",
+                    "/searchResults/searchResults",
+                    "200 OK",
+                    "",
+                    r#"{"success":true,"data":[{"courseReferenceNumber":"12345","subject":"CS","courseNumber":"3000","enrollment":23,"seatsAvailable":7}]}"#,
+                ),
+                (
+                    "GET",
+                    "/searchResults/getFacultyMeetingTimes",
+                    "200 OK",
+                    "",
+                    r#"{"fmt":[{"faculty":[{"displayName":"Example, Alex","emailAddress":"alex@neu.edu"}]}]}"#,
+                ),
+                (
+                    "POST",
+                    "/searchResults/getRestrictions",
+                    "404 Not Found",
+                    "",
+                    "",
+                ),
+                (
+                    "POST",
+                    "/term/search",
+                    "200 OK",
+                    "Set-Cookie: JSESSIONID=fixture\r\n",
+                    "{}",
+                ),
+                (
+                    "GET",
+                    "/searchResults/searchResults",
+                    "200 OK",
+                    "",
+                    r#"{"success":true,"data":null}"#,
+                ),
+                (
+                    "POST",
+                    "/term/search",
+                    "200 OK",
+                    "Set-Cookie: JSESSIONID=fixture\r\n",
+                    "{}",
+                ),
+                (
+                    "GET",
+                    "/searchResults/searchResults",
+                    "200 OK",
+                    "",
+                    r#"{"success":true,"data":[{"term":"202710","courseReferenceNumber":"99999","subject":"CS","courseNumber":"3000"}]}"#,
+                ),
+            ];
+            for (method, path, status, headers, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                assert!(request.starts_with(&format!("{method} /StudentRegistrationSsb/ssb{path}")));
+                let mut request_headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    request_headers.push_str(&line);
+                }
+                let request_headers = request_headers.to_ascii_lowercase();
+                if let Some(size) = request_headers.lines().find_map(|line| {
+                    line.strip_prefix("content-length:")?
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                }) {
+                    reader.read_exact(&mut vec![0; size]).unwrap();
+                }
+                assert_eq!(
+                    request_headers.contains("cookie: jsessionid=fixture"),
+                    path.ends_with("/searchResults")
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ).unwrap();
+            }
+        });
+        let mut catalog: TermCatalog = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "term": {"code": "202730", "bannerDescription": "Spring"},
+            "courses": [{"subject": "CS", "number": "3000", "title": "Example"}],
+            "sections": [],
+            "subjects": [], "attributes": [], "campuses": []
+        }))
+        .unwrap();
+        let key = CourseKey::parse("CS 3000").unwrap();
+        let mut section = section_shell("12345", 4, 30);
+        section.description = Some("Cached description".into());
+        section.restrictions = Some(Vec::new());
+        catalog.sections.push(section);
+        assert!(client.refresh_course(&mut catalog, &key, 1.0).unwrap());
+        let section = &catalog.sections[0];
+        assert_eq!(section.enrollment, 23);
+        assert_eq!(section.seats_remaining, 7);
+        assert_eq!(section.description.as_deref(), Some("Cached description"));
+        assert_eq!(section.restrictions, Some(Vec::new()));
+        assert_eq!(
+            section.instructors.as_ref().unwrap()[0].email.as_deref(),
+            Some("alex@neu.edu")
+        );
+        assert!(!client.refresh_course(&mut catalog, &key, 2.0).unwrap());
+        assert!(client.refresh_course(&mut catalog, &key, 3.0).is_err());
+        assert_eq!(catalog.sections_updated_at, 1.0);
+        assert_eq!(catalog.sections[0].enrollment, 23);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn live_course_search_keeps_only_exact_matches_and_full_counts() {
+        let key = CourseKey::parse("CS 3000").unwrap();
+        let page = serde_json::json!({
+            "success": true,
+            "data": [
+                {"courseReferenceNumber":"12345","subject":"CS","courseNumber":"3000",
+                 "crossListCapacity":50.0,"crossListCount":43,"crossListAvailable":7,
+                 "maximumEnrollment":25,"enrollment":21,"seatsAvailable":4,
+                 "waitCapacity":12,"waitCount":2,"waitAvailable":10},
+                {"courseReferenceNumber":"23456","subject":"CS","courseNumber":"3000A"},
+                {"courseReferenceNumber":"34567","subject":"MATH","courseNumber":"3000"}
+            ]
+        });
+        let rows = course_sections(&page, &key).unwrap();
+        let sections = catalog::make_sections(&rows, &HashMap::new());
+        assert_eq!(sections.len(), 1);
+        let section = &sections[0];
+        assert_eq!(
+            (
+                section.seat_capacity,
+                section.enrollment,
+                section.seats_remaining
+            ),
+            (50, 43, 7)
+        );
+        assert_eq!(
+            (
+                section.waitlist_capacity,
+                section.waitlist_count,
+                section.waitlist_remaining
+            ),
+            (12, 2, 10)
+        );
+        assert!(course_sections(&serde_json::json!({"success": false, "data": []}), &key).is_err());
+        assert!(
+            course_sections(&serde_json::json!({"success": true, "data": null}), &key)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn faculty_details_deduplicate_sort_and_keep_only_institutional_email() {
+        let faculty = faculty_instructors(r#"{"fmt":[{"faculty":[
+            {"displayName":"Example, Assistant","emailAddress":"assistant@example.org"},
+            {"displayName":"Example, Primary","primaryIndicator":true,"emailAddress":"primary@NEU.EDU"},
+            {"displayName":"Example, Primary","emailAddress":"duplicate@northeastern.edu"},
+            {"displayName":"Example, Third","emailAddress":"third@northeastern.edu"},
+            {"displayName":"Example, Fourth","emailAddress":"fourth@northeastern.edu.example.org"}
+        ]}]}"#).unwrap();
+        assert_eq!(faculty.len(), 4);
+        assert!(faculty[0].primary);
+        assert_eq!(faculty[0].email.as_deref(), Some("primary@NEU.EDU"));
+        assert_eq!(faculty[1].email, None);
+        assert_eq!(faculty[2].email.as_deref(), Some("third@northeastern.edu"));
+        assert_eq!(faculty[3].email, None);
+        assert!(faculty_instructors("<html>Unavailable</html>").is_err());
+        assert!(faculty_instructors(r#"{"fmt":[]}"#).unwrap().is_empty());
+    }
 
     #[test]
     fn live_seat_json_keeps_exact_course() {

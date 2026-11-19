@@ -227,12 +227,15 @@ fn banner_date(raw: &str) -> Option<String> {
 }
 
 impl BannerFaculty {
-    fn to_instructor(&self) -> Option<Instructor> {
-        let name = blank(self.display_name.as_deref())?;
+    pub(crate) fn to_instructor(&self) -> Option<Instructor> {
+        let name = blank(self.display_name.as_deref()).map(|name| entities(&name))?;
         Some(Instructor {
             name,
             primary: self.primary_indicator.unwrap_or(false),
-            email: blank(self.email_address.as_deref()),
+            email: self
+                .email_address
+                .as_deref()
+                .and_then(crate::email::retain_northeastern_addresses),
         })
     }
 }
@@ -313,7 +316,15 @@ pub fn make_sections(
                     .map(entities),
                 meetings,
                 instructors: if instructors.is_empty() {
-                    prior.and_then(|p| p.instructors.clone())
+                    prior.and_then(|p| p.instructors.clone()).map(|mut cached| {
+                        for instructor in &mut cached {
+                            instructor.email = instructor
+                                .email
+                                .as_deref()
+                                .and_then(crate::email::retain_northeastern_addresses);
+                        }
+                        cached
+                    })
                 } else {
                     Some(instructors)
                 },
@@ -550,7 +561,10 @@ pub fn apply_course_refresh(
     course: &CourseKey,
     banner: &[BannerSection],
     now: f64,
-) {
+) -> bool {
+    if banner.is_empty() {
+        return false;
+    }
     let previous: HashMap<String, CourseSection> = catalog
         .sections
         .iter()
@@ -599,6 +613,7 @@ pub fn apply_course_refresh(
         catalog.courses.sort_by_key(|course| course.key());
     }
     catalog.sections_updated_at = now;
+    true
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -614,8 +629,19 @@ pub fn save_cached(catalog: &TermCatalog) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string(catalog).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SAVE: AtomicU64 = AtomicU64::new(0);
+    let bytes = archive::encode(catalog)?;
+    let tmp = path.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        NEXT_SAVE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|error| error.to_string())
 }
 
 pub fn load_cached(term_code: &str) -> Option<TermCatalog> {

@@ -253,6 +253,46 @@ impl CatalogIndex {
     pub fn course(&self, key: &CourseKey) -> Option<&Course> {
         self.courses_by_key.get(key)
     }
+    /// Merge one course's refreshed snapshot into the active term index.
+    pub fn with_course_refresh(&self, key: &CourseKey, update: TermCatalog) -> Option<Self> {
+        if self.catalog.term.code != update.term.code {
+            return None;
+        }
+        let sections: Vec<_> = update
+            .sections
+            .into_iter()
+            .filter(|section| &section.course_key() == key)
+            .collect();
+        if sections.is_empty() {
+            return None;
+        }
+        let mut catalog = self.catalog.clone();
+        catalog
+            .sections
+            .retain(|section| &section.course_key() != key);
+        catalog.sections.extend(sections);
+        catalog.sections.sort_by(|a, b| {
+            a.course_key()
+                .cmp(&b.course_key())
+                .then(a.section_number.cmp(&b.section_number))
+        });
+        if let Some(course) = update
+            .courses
+            .into_iter()
+            .find(|course| &course.key() == key)
+        {
+            if let Some(slot) = catalog.courses.iter_mut().find(|slot| &slot.key() == key) {
+                *slot = course;
+            } else {
+                catalog.courses.push(course);
+                catalog.courses.sort_by_key(|course| course.key());
+            }
+        }
+        catalog.sections_updated_at = catalog.sections_updated_at.max(update.sections_updated_at);
+        catalog.recompute_postreqs();
+        Some(Self::build(catalog))
+    }
+
     pub fn sections_for(&self, key: &CourseKey) -> Vec<CourseSection> {
         self.sections_by_course
             .get(key)

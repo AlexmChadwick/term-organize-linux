@@ -474,12 +474,91 @@ fn refreshing_a_normal_course_still_replaces_its_sections() {
         }],
         1.0,
     );
+    assert!(!catalog::apply_course_refresh(&mut catalog, &key, &[], 2.0));
+    assert_eq!(catalog.sections_updated_at, 1.0);
     let crns: HashSet<_> = catalog
         .sections
         .iter()
         .map(|section| section.crn.as_str())
         .collect();
     assert_eq!(crns, HashSet::from(["11111"]));
+}
+
+#[test]
+fn live_sections_update_open_seat_search_and_schedule_inputs() {
+    use termorganize_core::catalog::{BannerFaculty, BannerMeetingFaculty};
+    use termorganize_core::search::{self, SearchFilters, SearchQuery};
+
+    let catalog = index(
+        serde_json::json!([course("CS", "2500", "Fundamentals 1", 4.0, false)]),
+        serde_json::json!([
+            section("11111", "CS", "2500", 540, 600),
+            section("22222", "CS", "2510", 660, 720),
+        ]),
+    );
+    let key = CourseKey::parse("CS 2500").unwrap();
+    let query = SearchQuery {
+        filters: SearchFilters {
+            open_seats_only: true,
+            ..SearchFilters::default()
+        },
+        ..SearchQuery::default()
+    };
+    assert!(search::search(&query, &catalog).results.is_empty());
+
+    let fresh = [BannerSection {
+        course_reference_number: "33333".into(),
+        course_number: "2500".into(),
+        subject: "CS".into(),
+        seats_available: Some(3),
+        wait_available: Some(2),
+        meetings_faculty: Some(vec![BannerMeetingFaculty {
+            faculty: Some(vec![BannerFaculty {
+                display_name: Some("Sample Instructor".into()),
+                email_address: Some(
+                    "instructor@northeastern.edu instructor@neu.edu instructor@example.invalid"
+                        .into(),
+                ),
+                ..BannerFaculty::default()
+            }]),
+            ..BannerMeetingFaculty::default()
+        }]),
+        ..BannerSection::default()
+    }];
+    let mut update = catalog.catalog.clone();
+    assert!(catalog::apply_course_refresh(
+        &mut update,
+        &key,
+        &fresh,
+        1.0
+    ));
+    let updated = catalog.with_course_refresh(&key, update.clone()).unwrap();
+    let results = search::search(&query, &updated).results;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].course.key(), key);
+    assert!(!updated.sections_by_crn.contains_key("11111"));
+    assert!(updated.sections_by_crn.contains_key("22222"));
+
+    let plan = plan_with(&["CS 2500"], &[]);
+    let inputs = schedule::inputs_for(&plan, &updated);
+    let sections = &inputs[0].sections;
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].crn, "33333");
+    assert_eq!(sections[0].seats_remaining, 3);
+    assert_eq!(sections[0].waitlist_remaining, 2);
+    assert_eq!(
+        sections[0].instructors.as_ref().unwrap()[0]
+            .email
+            .as_deref(),
+        Some("instructor@northeastern.edu instructor@neu.edu")
+    );
+
+    let mut empty = update.clone();
+    empty.sections.retain(|section| section.course_key() != key);
+    assert!(catalog.with_course_refresh(&key, empty).is_none());
+    update.term.code = "202730".into();
+    assert!(catalog.with_course_refresh(&key, update).is_none());
+    assert!(catalog.sections_by_crn.contains_key("11111"));
 }
 
 #[test]
