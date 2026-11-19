@@ -375,7 +375,7 @@ fn every_vevent_has_utc_dtstamp_and_unique_uid_per_plan() {
         vec![class_meeting(Some("2026-12-09")), exam],
         None,
     );
-    let a = schedule::ics("plan-a", "S", &[section.clone()]);
+    let a = schedule::ics("plan-a", "S", std::slice::from_ref(&section));
     let b = schedule::ics("plan-b", "S", &[section]);
     let uids = |cal: &str| -> Vec<String> {
         events(cal)
