@@ -6,6 +6,16 @@ Unofficial Northeastern course search, schedule builder, and degree-plan checker
 
 Course information is © Northeastern University. This program is free software under the GNU Affero General Public License v3.0 only. It is an independent Linux adaptation of [Term Organize](https://github.com/AlexmChadwick/Northeastern-Term-Organize), which is itself based on [SearchNEU](https://github.com/sandboxnu/searchneu) (AGPL-3.0). See `LICENSE` and `NOTICE.md`.
 
+## Platforms and status
+
+Term Organize is an unofficial project and is not affiliated with Northeastern University.
+
+- **macOS / iOS (Swift reference):** [AlexmChadwick/Northeastern-Term-Organize](https://github.com/AlexmChadwick/Northeastern-Term-Organize) - Mac app released, latest v1.1.3 at [github.com/AlexmChadwick/Northeastern-Term-Organize/releases](https://github.com/AlexmChadwick/Northeastern-Term-Organize/releases). iPhone and iPad builds are sideload only (test builds only, not on the App Store or TestFlight).
+- **Web:** [AlexmChadwick/term-organize-web](https://github.com/AlexmChadwick/term-organize-web) - port in development, test builds only, not in any store.
+- **Android:** [AlexmChadwick/term-organize-android](https://github.com/AlexmChadwick/term-organize-android) - port in development, test builds only, not in any store.
+- **Linux:** [AlexmChadwick/term-organize-linux](https://github.com/AlexmChadwick/term-organize-linux) (this repository) - port in development, test builds only, not in any store.
+- **Windows:** [AlexmChadwick/term-organize-windows](https://github.com/AlexmChadwick/term-organize-windows) - port in development, test builds only, not in any store.
+
 ## Install
 
 Term Organize is an early beta. It is unofficial and not affiliated with Northeastern University.
