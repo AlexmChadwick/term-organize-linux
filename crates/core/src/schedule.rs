@@ -2873,10 +2873,15 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
                 .start_date
                 .clone()
                 .unwrap_or_else(|| "2026-09-09".into());
-            let last = meeting
+            // A weekly rule needs a known end date; without one the event is skipped
+            // rather than emitted unbounded.
+            let Some(last) = meeting
                 .end_date
                 .clone()
-                .unwrap_or_else(|| start_date_str.clone());
+                .filter(|date| parse_date(date).is_some())
+            else {
+                continue;
+            };
             let Some(first) =
                 first_meeting_date(&start_date_str, &last, meeting.days).or_else(|| {
                     if meeting.days.is_empty() {
@@ -2945,7 +2950,11 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
             if let Some(start_date) = &exam.start_date {
                 if let Some((y, m, d)) = parse_date(start_date) {
                     lines.push("BEGIN:VEVENT".into());
-                    lines.push(format!("UID:{}-final@termorganize.local", section.crn));
+                    lines.push(format!(
+                        "UID:{}-{}-final@neuclasssearch",
+                        plan_id.to_ascii_lowercase(),
+                        section.crn
+                    ));
                     lines.push(format!("DTSTAMP:{stamp}"));
                     if let (Some(start), Some(end)) = (exam.start, exam.end) {
                         lines.push(format!(
@@ -3045,7 +3054,17 @@ fn fold_ics(line: String) -> String {
     out
 }
 fn utc_now() -> String {
-    "20261013T000000Z".into()
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let rem = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 fn parse_date(s: &str) -> Option<(i32, i32, i32)> {
     let s = s.trim();

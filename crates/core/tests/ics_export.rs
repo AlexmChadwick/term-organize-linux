@@ -155,7 +155,7 @@ fn exports_timed_final_exam_as_distinct_vevent() {
     );
     let cal = schedule::ics("plan-1", "Schedule", &[section]);
 
-    assert!(cal.contains("UID:12345-final@termorganize.local"));
+    assert!(cal.contains("UID:plan-1-12345-final@neuclasssearch"));
     assert!(cal.contains("SUMMARY:CS 3000 Final Exam"));
     assert!(cal.contains("DTSTART;TZID=America/New_York:20261214T080000"));
     assert!(cal.contains("DTEND;TZID=America/New_York:20261214T100000"));
@@ -163,7 +163,7 @@ fn exports_timed_final_exam_as_distinct_vevent() {
 
     // Verify final exam event does not contain recurrence rule
     let exam_part = cal
-        .split("UID:12345-final@termorganize.local")
+        .split("UID:plan-1-12345-final@neuclasssearch")
         .nth(1)
         .expect("final exam VEVENT present");
     let exam_event = exam_part
@@ -210,13 +210,13 @@ fn exports_untimed_all_day_final_exam_with_next_day_dtend() {
     );
     let cal = schedule::ics("plan-1", "Schedule", &[section]);
 
-    assert!(cal.contains("UID:12345-final@termorganize.local"));
+    assert!(cal.contains("UID:plan-1-12345-final@neuclasssearch"));
     assert!(cal.contains("SUMMARY:CS 3000 Final Exam"));
     assert!(cal.contains("DTSTART;VALUE=DATE:20261215"));
     assert!(cal.contains("DTEND;VALUE=DATE:20261216"));
 
     let exam_part = cal
-        .split("UID:12345-final@termorganize.local")
+        .split("UID:plan-1-12345-final@neuclasssearch")
         .nth(1)
         .expect("final exam VEVENT present");
     let exam_event = exam_part
@@ -256,9 +256,9 @@ fn exports_multiple_sections_each_with_final_exam() {
     let s2 = make_section("22222", "MATH", "1341", "Calculus 1", vec![exam2], None);
     let cal = schedule::ics("plan-1", "Multi Schedule", &[s1, s2]);
 
-    assert!(cal.contains("UID:11111-final@termorganize.local"));
+    assert!(cal.contains("UID:plan-1-11111-final@neuclasssearch"));
     assert!(cal.contains("SUMMARY:CS 2500 Final Exam"));
-    assert!(cal.contains("UID:22222-final@termorganize.local"));
+    assert!(cal.contains("UID:plan-1-22222-final@neuclasssearch"));
     assert!(cal.contains("SUMMARY:MATH 1341 Final Exam"));
 }
 
@@ -286,7 +286,7 @@ fn handles_online_final_exams() {
     );
     let cal = schedule::ics("plan-1", "Online Schedule", &[section]);
 
-    assert!(cal.contains("UID:33333-final@termorganize.local"));
+    assert!(cal.contains("UID:plan-1-33333-final@neuclasssearch"));
     assert!(cal.contains("LOCATION:Online"));
 }
 
@@ -335,4 +335,111 @@ fn handles_empty_sections_gracefully() {
     assert!(cal.contains("BEGIN:VCALENDAR"));
     assert!(cal.contains("END:VCALENDAR\r\n"));
     assert!(!cal.contains("BEGIN:VEVENT"));
+}
+
+fn class_meeting(end_date: Option<&str>) -> Meeting {
+    Meeting {
+        days: DaySet::from_indices([1, 3]),
+        start: Some(500),
+        end: Some(565),
+        building_code: None,
+        building: None,
+        room: None,
+        campus_code: None,
+        kind: "Class".into(),
+        start_date: Some("2026-09-09".into()),
+        end_date: end_date.map(Into::into),
+    }
+}
+
+fn events(cal: &str) -> Vec<&str> {
+    cal.split("BEGIN:VEVENT").skip(1).collect()
+}
+
+#[test]
+fn every_vevent_has_utc_dtstamp_and_unique_uid_per_plan() {
+    let exam = Meeting {
+        days: DaySet(0),
+        start: Some(480),
+        end: Some(600),
+        kind: "Final Exam".into(),
+        start_date: Some("2026-12-14".into()),
+        end_date: Some("2026-12-14".into()),
+        ..class_meeting(None)
+    };
+    let section = make_section(
+        "12345",
+        "CS",
+        "3000",
+        "Algo",
+        vec![class_meeting(Some("2026-12-09")), exam],
+        None,
+    );
+    let a = schedule::ics("plan-a", "S", &[section.clone()]);
+    let b = schedule::ics("plan-b", "S", &[section]);
+    let uids = |cal: &str| -> Vec<String> {
+        events(cal)
+            .iter()
+            .map(|e| {
+                e.lines()
+                    .find(|l| l.starts_with("UID:"))
+                    .expect("UID")
+                    .to_string()
+            })
+            .collect()
+    };
+    for cal in [&a, &b] {
+        let evs = events(cal);
+        assert_eq!(evs.len(), 2);
+        for e in evs {
+            let stamp = e
+                .lines()
+                .find_map(|l| l.strip_prefix("DTSTAMP:"))
+                .expect("DTSTAMP");
+            assert_eq!(stamp.len(), 16);
+            assert!(stamp.ends_with('Z') && stamp.as_bytes()[8] == b'T');
+            assert!(stamp.starts_with("20") && !stamp.starts_with("20261013T000000"));
+        }
+    }
+    let (ua, ub) = (uids(&a), uids(&b));
+    assert_eq!(ua.len(), 2);
+    assert_ne!(ua[0], ua[1]);
+    assert!(ua
+        .iter()
+        .all(|u| u.contains("plan-a") && u.contains("12345")));
+    assert!(ua.iter().all(|u| !ub.contains(u)));
+}
+
+#[test]
+fn weekly_meeting_without_end_date_is_skipped() {
+    let section = make_section(
+        "777",
+        "CS",
+        "1000",
+        "NoEnd",
+        vec![class_meeting(None)],
+        None,
+    );
+    let cal = schedule::ics("plan-1", "S", &[section]);
+    assert!(events(&cal).is_empty());
+    assert!(!cal.contains("UID:plan-1-777"));
+}
+
+#[test]
+fn weekly_rrule_always_has_utc_until() {
+    let section = make_section(
+        "888",
+        "CS",
+        "1000",
+        "Bounded",
+        vec![class_meeting(Some("2026-12-09"))],
+        None,
+    );
+    let cal = schedule::ics("plan-1", "S", &[section]);
+    for e in events(&cal) {
+        let rule = e.lines().find(|l| l.starts_with("RRULE:")).expect("RRULE");
+        let until = rule.split("UNTIL=").nth(1).expect("UNTIL");
+        assert!(until.ends_with('Z'), "{until}");
+        assert!(e.contains("DTSTART;TZID=America/New_York:"));
+    }
 }
