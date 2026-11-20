@@ -13,19 +13,19 @@ pub struct AddressRedaction {
     pub removed_by_domain: BTreeMap<String, usize>,
 }
 
+/// True only for a complete `local@domain` string whose domain is exactly
+/// northeastern.edu or neu.edu, compared after ASCII case folding. Nothing is
+/// trimmed, so a trailing dot, a trailing letter, or non-ASCII text in the
+/// domain makes the address disallowed.
 pub fn is_northeastern_address(address: &str) -> bool {
-    let address = address.trim().trim_end_matches('.');
-    let Some((local, domain)) = address.rsplit_once('@') else {
+    let Some((local, domain)) = address.split_once('@') else {
         return false;
     };
-    if local.is_empty() || local.contains('@') || local.contains(' ') {
-        return false;
-    }
-    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || domain.contains('@') || domain.contains(' ') || !domain.contains('.') {
-        return false;
-    }
-    domain == "northeastern.edu" || domain == "neu.edu"
+    !local.is_empty()
+        && local.bytes().all(is_local_byte)
+        && domain.is_ascii()
+        && (domain.eq_ignore_ascii_case("northeastern.edu")
+            || domain.eq_ignore_ascii_case("neu.edu"))
 }
 
 /// Keep Northeastern addresses from a Banner field. Fields often list more than
@@ -139,12 +139,11 @@ fn note(scan: &mut AddressRedaction, address: &str) {
 }
 
 fn domain_of(address: &str) -> Option<String> {
-    let (_, domain) = address.trim().trim_end_matches('.').rsplit_once('@')?;
-    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, domain) = address.split_once('@')?;
     if domain.is_empty() {
         None
     } else {
-        Some(domain)
+        Some(domain.to_ascii_lowercase())
     }
 }
 
@@ -168,6 +167,9 @@ fn tidy_gap(text: &str) -> String {
     out
 }
 
+/// Candidates are the full run of local bytes before an `@` and the full run of
+/// non-delimiter bytes after it. The domain is never trimmed, so validation
+/// sees exactly what follows the `@`.
 fn email_spans(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut spans = Vec::new();
@@ -179,20 +181,10 @@ fn email_spans(text: &str) -> Vec<(usize, usize)> {
                 start -= 1;
             }
             let mut end = index + 1;
-            while end < bytes.len() && is_domain_byte(bytes[end]) {
+            while end < bytes.len() && !is_domain_delimiter(bytes[end]) {
                 end += 1;
             }
-            while end > index + 1 && matches!(bytes[end - 1], b'.' | b'-') {
-                end -= 1;
-            }
-            let valid_prev = start == 0 || bytes[start - 1] != b'@';
-            let valid_next = end >= bytes.len() || bytes[end] != b'@';
-            if valid_prev
-                && valid_next
-                && start < index
-                && end > index + 1
-                && text[index + 1..end].contains('.')
-            {
+            if start < index && end > index + 1 && text[index + 1..end].contains('.') {
                 spans.push((start, end));
                 index = end;
                 continue;
@@ -203,12 +195,42 @@ fn email_spans(text: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// RFC 5322 atext plus dot, and any non-ASCII byte so a local part is never cut
+/// short at a UTF-8 sequence.
 fn is_local_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-' | b'\'')
+    byte.is_ascii_alphanumeric()
+        || byte >= 0x80
+        || matches!(
+            byte,
+            b'.' | b'!'
+                | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'/'
+                | b'='
+                | b'?'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+        )
 }
 
-fn is_domain_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+fn is_domain_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(
+            byte,
+            b',' | b';' | b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'"'
+        )
 }
 
 #[cfg(test)]
@@ -236,29 +258,7 @@ mod tests {
         assert!(!is_northeastern_address("x@harvard.edu"));
         assert!(!is_northeastern_address("x@va.gov"));
         assert!(!is_northeastern_address("x@notnortheastern.edu"));
-        assert!(!is_northeastern_address("x@fake-northeastern.edu"));
-        assert!(!is_northeastern_address("x@northeastern.edu.cn"));
-        assert!(!is_northeastern_address("x@northeastern.edu.attacker.org"));
-        assert!(!is_northeastern_address("x@neu.edu.fake.com"));
-        assert!(!is_northeastern_address("x@khoury.northeastern.edu"));
-        assert!(!is_northeastern_address(
-            "attacker@northeastern.edu@evil.com"
-        ));
-        assert!(!is_northeastern_address("@northeastern.edu"));
-        assert!(!is_northeastern_address(""));
-        assert!(!is_northeastern_address("   "));
         assert!(!is_northeastern_address("not an email"));
-        assert_eq!(
-            retain_northeastern_addresses(
-                "prof@northeastern.edu student@husky.neu.edu evil@northeastern.edu.com dean@neu.edu"
-            )
-            .as_deref(),
-            Some("prof@northeastern.edu dean@neu.edu")
-        );
-        assert_eq!(
-            retain_northeastern_addresses("attacker@northeastern.edu@evil.com").as_deref(),
-            None
-        );
     }
 
     #[test]
@@ -276,8 +276,198 @@ mod tests {
     }
 
     #[test]
+    fn domain_is_validated_whole_with_no_trimming() {
+        assert!(is_northeastern_address("x@northeastern.edu"));
+        assert!(is_northeastern_address("x@NorthEastern.EDU"));
+        assert!(is_northeastern_address("x@NEU.edu"));
+        assert!(!is_northeastern_address("x@northeastern.edu."));
+        assert!(!is_northeastern_address("x@neu.edu-"));
+        assert!(!is_northeastern_address("x@northeastern.eduX"));
+        assert!(!is_northeastern_address("x@northeastern.edu\u{e9}"));
+        assert!(!is_northeastern_address("x@northea\u{17f}tern.edu"));
+        assert!(!is_northeastern_address("x@neu.edu\u{2024}"));
+        assert!(!is_northeastern_address("x@husky.neu.edu"));
+        assert!(!is_northeastern_address(" x@neu.edu"));
+        assert!(!is_northeastern_address("x@neu.edu "));
+        assert!(!is_northeastern_address("@neu.edu"));
+        assert!(!is_northeastern_address("a@b@neu.edu"));
+    }
+
+    #[test]
+    fn extractor_keeps_whole_candidates() {
+        for bad in [
+            "x@northeastern.edu.",
+            "x@northeastern.edu-",
+            "x@northeastern.eduX",
+            "x@northeastern.edu\u{e9}",
+            "x@neu.edu\u{4e2d}",
+            "x@northeastern.edu.evil.com",
+        ] {
+            assert!(retain_northeastern_addresses(bad).is_none(), "{bad}");
+            let mut value = serde_json::json!({ "email": bad, "note": format!("see {bad} now") });
+            redact_json_emails(&mut value);
+            assert!(value["email"].is_null(), "{bad}");
+            assert_eq!(value["note"], "see now", "{bad}");
+        }
+        assert_eq!(
+            addresses_in("x@northeastern.edu. y"),
+            ["x@northeastern.edu."]
+        );
+        assert_eq!(
+            addresses_in("a@neu.edu,b@neu.edu;c@neu.edu <d@neu.edu>"),
+            ["a@neu.edu", "b@neu.edu", "c@neu.edu", "d@neu.edu"]
+        );
+    }
+
+    #[test]
+    fn punctuation_local_parts_are_kept_whole() {
+        for local in [
+            "o'brien",
+            "a+b",
+            "a!b",
+            "a#b$c",
+            "a%b",
+            "a&b",
+            "a*b",
+            "a/b",
+            "a=b",
+            "a?b",
+            "a^b",
+            "a`b",
+            "a{b}",
+            "a|b",
+            "a~b",
+            "a_b",
+            "a-b",
+            "a.b",
+            "J\u{f6}rg",
+        ] {
+            let address = format!("{local}@Northeastern.edu");
+            assert!(is_northeastern_address(&address), "{address}");
+            assert_eq!(addresses_in(&address), [address.as_str()]);
+            assert_eq!(
+                retain_northeastern_addresses(&format!("{address} z@gmail.com")).as_deref(),
+                Some(address.as_str())
+            );
+            let mut value = serde_json::json!({ "bio": format!("Write {address} today.") });
+            redact_json_emails(&mut value);
+            assert_eq!(value["bio"], format!("Write {address} today."));
+        }
+        assert!(retain_northeastern_addresses("a!b@gmail.com").is_none());
+    }
+
+    #[test]
+    fn archive_scrub_drops_disallowed_lookalike_domains() {
+        let mut value = serde_json::json!({
+            "faculty": [{"email": "a@northeastern.edu. b@neu.eduX c@neu.edu"}],
+            "text": "x@neu.edu. y@northeastern.edu\u{e9} ok@neu.edu"
+        });
+        redact_json_emails(&mut value);
+        assert_eq!(value["faculty"][0]["email"], "c@neu.edu");
+        assert_eq!(value["text"], " ok@neu.edu");
+    }
+
+    /// Problems found in an unsanitized catalog value. Email fields must hold
+    /// only complete allowed tokens. Every string is scanned for literal and
+    /// `[at]`/`[dot]` style addresses.
+    fn raw_violations(value: &Value, path: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let here = format!("{path}.{key}");
+                    if is_email_key(key) {
+                        if let Value::String(text) = child {
+                            for token in
+                                text.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                            {
+                                if !token.is_empty() && !is_northeastern_address(token) {
+                                    out.push(format!("{here}: email token {token:?}"));
+                                }
+                            }
+                        }
+                    }
+                    raw_violations(child, &here, out);
+                }
+            }
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    raw_violations(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            Value::String(text) => {
+                for address in addresses_in(text) {
+                    if !is_northeastern_address(address) {
+                        out.push(format!("{path}: address {address:?}"));
+                    }
+                }
+                let plain = deobfuscate(text);
+                for address in addresses_in(&plain) {
+                    if !is_northeastern_address(address) {
+                        out.push(format!("{path}: obfuscated address {address:?}"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn deobfuscate(text: &str) -> String {
+        let mut out = text.to_ascii_lowercase();
+        for (tag, plain) in [("at", "@"), ("dot", ".")] {
+            for (open, close) in [("[", "]"), ("(", ")"), ("{", "}")] {
+                let tag = format!("{open}{tag}{close}");
+                out = out.replace(&format!(" {tag} "), plain).replace(&tag, plain);
+            }
+        }
+        out
+    }
+
+    fn violations(value: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        raw_violations(value, "$", &mut out);
+        out
+    }
+
+    #[test]
+    fn raw_check_flags_mutations() {
+        assert!(
+            violations(&serde_json::json!({"email": "a@neu.edu b@northeastern.edu"})).is_empty()
+        );
+        for bad in [
+            "a@husky.neu.edu",
+            "a@gmail.com",
+            "a@northeastern.edu.",
+            "a@neu.eduX",
+            "a@neu.edu\u{e9}",
+            "a [at] gmail [dot] com",
+            "a(at)gmail(dot)com",
+            "a{AT}yahoo{DOT}com",
+            "a[at]husky[dot]neu[dot]edu",
+        ] {
+            let in_email = serde_json::json!({"sections": [{"email": bad}]});
+            assert!(!violations(&in_email).is_empty(), "email field: {bad}");
+            let in_prose = serde_json::json!({"description": format!("Contact {bad} soon")});
+            assert!(!violations(&in_prose).is_empty(), "prose: {bad}");
+        }
+        assert!(!violations(&serde_json::json!({"email": "plain text"})).is_empty());
+    }
+
+    #[test]
     fn bundled_catalog_addresses_are_northeastern() {
-        let paths = archive::bundled_catalog_paths();
+        // Enumerate the checkout copy directly. The production lookup honors
+        // TERMORGANIZE_DATA and installed catalogs, which could hide a regression.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/catalog");
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(archive::term_code_from_file_name)
+                    .is_some()
+            })
+            .collect();
+        paths.sort();
         let codes: Vec<String> = paths
             .iter()
             .filter_map(|path| {
@@ -291,39 +481,26 @@ mod tests {
         for path in paths {
             let raw = std::fs::read(&path).expect("bundled catalog");
             let json = archive::json_bytes(&raw).expect("catalog json");
-            let mut value: Value = serde_json::from_slice(&json).expect("catalog json");
+            let value: Value = serde_json::from_slice(&json).expect("catalog json");
             let code = value["term"]["code"]
                 .as_str()
                 .unwrap_or("unknown")
                 .to_string();
-            let courses = value["courses"]
-                .as_array()
-                .map(|rows| rows.len())
-                .unwrap_or(0);
-            let sections = value["sections"]
-                .as_array()
-                .map(|rows| rows.len())
-                .unwrap_or(0);
+            let courses = value["courses"].as_array().map_or(0, |rows| rows.len());
+            let sections = value["sections"].as_array().map_or(0, |rows| rows.len());
             assert!(courses > 2_500, "{code} courses {courses}");
             assert!(sections > 7_000, "{code} sections {sections}");
-            let text = std::str::from_utf8(&json).expect("catalog text");
-            let addresses = addresses_in(text);
+            let literal: usize = {
+                let text = std::str::from_utf8(&json).expect("catalog text");
+                addresses_in(text).len()
+            };
+            assert!(literal > 500, "{code}: expected institutional addresses");
+            let found = violations(&value);
             assert!(
-                addresses.len() > 500,
-                "{code}: expected institutional addresses"
-            );
-            for address in addresses {
-                assert!(
-                    is_northeastern_address(address),
-                    "{code}: disallowed email domain {:?}",
-                    domain_of(address)
-                );
-            }
-            let scan = redact_json_emails(&mut value);
-            assert!(
-                scan.removed_by_domain.is_empty(),
-                "{code}: disallowed domains {:?}",
-                scan.removed_by_domain
+                found.is_empty(),
+                "{code}: {} violations, first {:?}",
+                found.len(),
+                &found[..found.len().min(5)]
             );
         }
     }
