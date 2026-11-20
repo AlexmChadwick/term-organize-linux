@@ -8,20 +8,15 @@ Course information is © Northeastern University. This program is free software 
 
 ## Platforms and status
 
-Term Organize is an unofficial project and is not affiliated with Northeastern University.
-
 - **macOS / iOS (Swift reference):** [AlexmChadwick/Northeastern-Term-Organize](https://github.com/AlexmChadwick/Northeastern-Term-Organize) - Mac app released, latest v1.1.3 at [github.com/AlexmChadwick/Northeastern-Term-Organize/releases](https://github.com/AlexmChadwick/Northeastern-Term-Organize/releases). iPhone and iPad builds are sideload only (test builds only, not on the App Store or TestFlight).
-- **Web:** [AlexmChadwick/term-organize-web](https://github.com/AlexmChadwick/term-organize-web) - port in development, test builds only, not in any store.
-- **Android:** [AlexmChadwick/term-organize-android](https://github.com/AlexmChadwick/term-organize-android) - port in development, test builds only, not in any store.
-- **Linux:** [AlexmChadwick/term-organize-linux](https://github.com/AlexmChadwick/term-organize-linux) (this repository) - port in development, test builds only, not in any store.
-- **Windows:** [AlexmChadwick/term-organize-windows](https://github.com/AlexmChadwick/term-organize-windows) - port in development, test builds only, not in any store.
+- **Web:** [AlexmChadwick/term-organize-web](https://github.com/AlexmChadwick/term-organize-web) - port in development, with no published release or store listing.
+- **Android:** [AlexmChadwick/term-organize-android](https://github.com/AlexmChadwick/term-organize-android) - port in development, with no published release or store listing.
+- **Linux:** [AlexmChadwick/term-organize-linux](https://github.com/AlexmChadwick/term-organize-linux) (this repository) - port in development, with no published release or store listing.
+- **Windows:** [AlexmChadwick/term-organize-windows](https://github.com/AlexmChadwick/term-organize-windows) - port in development, with no published release or store listing.
 
 ## Install
 
-Term Organize is an early beta. It is unofficial and not affiliated with Northeastern University.
-
-- **Download:** when available, the [Releases page](https://github.com/AlexmChadwick/term-organize-linux/releases) has a signed Flatpak and AppImage. See "Downloads" below to verify and install them.
-- **Build from source:** install Rust (cargo) and the GTK 4 and libadwaita development packages, then follow "Build" below.
+Follow [Build](#build) to run the Linux port from source.
 
 ## What it does
 
@@ -72,41 +67,7 @@ update-desktop-database ~/.local/share/applications || true
 
 The `.desktop` file registers `termorganize://`, `neuclasssearch://`, and PDF “Open with”. While the app is open it also asks the portal Background API for permission to autostart `termorganize --seat-watch`. The systemd timer is the reliable 15-minute check when the portal request is denied.
 
-A Flatpak manifest is `packaging/org.termorganize.TermOrganize.yml`. `packaging/build-release.sh` vendors crates and builds the release Flatpak and AppImage.
-
-## Downloads
-
-Pushing a tag that matches `v*` (for example `v1.1.0`) runs `.github/workflows/release.yml`. The workflow does not run on pull requests or branch pushes. It uploads a **draft** GitHub release, which is not published. A tag that contains `-rc` is also marked as a prerelease. The draft contains `TermOrganize-<tag>-x86_64.flatpak`, `TermOrganize-<tag>-x86_64.AppImage`, `SHA256SUMS`, `SHA256SUMS.asc`, and the public key `term-organize-release-key.asc`.
-
-Releases are signed by **Term Organize Releases (unofficial)**, fingerprint `5276 3E58 9A37 573E 2C75 5AE2 A120 52B3 ED28 4C89`.
-
-### Verify
-
-```bash
-gpg --import term-organize-release-key.asc
-gpg --fingerprint 52763E589A37573E2C755AE2A12052B3ED284C89
-gpg --verify SHA256SUMS.asc SHA256SUMS
-sha256sum -c SHA256SUMS
-```
-
-Trust the key only when that fingerprint matches.
-
-### Install
-
-Flatpak, using the GNOME 47 runtime:
-
-```bash
-flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user ./TermOrganize-v1.1.0-x86_64.flatpak
-flatpak run org.termorganize.TermOrganize
-```
-
-AppImage. GTK 4 and libadwaita are bundled. Degree-plan PDF import still needs `pdftotext` on the host.
-
-```bash
-chmod +x TermOrganize-v1.1.0-x86_64.AppImage
-./TermOrganize-v1.1.0-x86_64.AppImage
-```
+A Flatpak manifest is `packaging/org.termorganize.TermOrganize.yml`. `packaging/build-release.sh` vendors crates and builds local Flatpak and AppImage packages.
 
 ## Local MCP server
 
