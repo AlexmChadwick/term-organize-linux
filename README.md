@@ -28,7 +28,7 @@ Rust stable, GTK 4.14, and libadwaita 1.5.
 
 ```bash
 sudo apt install libgtk-4-dev libadwaita-1-dev poppler-utils pkg-config
-cargo run --release
+cargo run --release -p termorganize
 ```
 
 `pdftotext` (from poppler-utils) imports a degree-audit “View Plan” PDF. Desktop notifications use `notify-send`.
