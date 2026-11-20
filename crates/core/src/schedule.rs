@@ -2845,9 +2845,13 @@ pub struct IcsExport {
     pub skipped_finals: usize,
 }
 
-/// The calendar and file label for a plan: `<plan> - <term>`.
+/// The calendar and file label for a plan: `<plan> - <term>`, or the term alone when the plan name is blank.
 pub fn calendar_name(plan_name: &str, term_name: &str) -> String {
-    format!("{plan_name} - {term_name}")
+    if plan_name.trim().is_empty() {
+        term_name.to_string()
+    } else {
+        format!("{plan_name} - {term_name}")
+    }
 }
 
 /// A file name for `name` with path-hostile characters replaced, as the Swift exporter does.
