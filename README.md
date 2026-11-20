@@ -20,7 +20,7 @@ Follow [Build](#build) to run the Linux port from source.
 
 ## What it does
 
-One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 and Spring 2027 snapshots (`data/catalog/term-202710.catalog` and `data/catalog/term-202730.catalog`) are enough to search, build schedules, and read sections offline. A fresh launch opens the newest bundled term; the header lists every bundled term. It keeps instructor addresses on `northeastern.edu` and `neu.edu` (and their subdomains) and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
+One window, with a sidebar of Search, Subjects, Saved, Professors, Free Rooms, Schedules, Degree Plans, and Watchlist, and the term in the header. The bundled Fall 2026 and Spring 2027 snapshots (`data/catalog/term-202710.catalog` and `data/catalog/term-202730.catalog`) are enough to search, build schedules, and read sections offline. A fresh launch opens the newest bundled term; the header lists every bundled term. It keeps instructor addresses on `northeastern.edu` and `neu.edu` and omits any other address from the Banner field. Refresh seats asks Banner for current counts. Load requirements reads a catalog.northeastern.edu program page.
 
 ## Build
 

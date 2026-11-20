@@ -6,7 +6,7 @@ use termorganize_core::archive;
 use termorganize_core::catalog;
 use termorganize_core::course_info::{self, CourseInfoRepository};
 use termorganize_core::editing;
-use termorganize_core::offering::{self, OfferingHistory, OfferingRepository, OfferingSource};
+use termorganize_core::offering::{OfferingHistory, OfferingRepository, OfferingSource};
 use termorganize_core::outline::{
     GroupKind, ItemKind, PathContent, RequisiteItem, RequisiteLayout, RequisitePart,
 };
@@ -289,6 +289,8 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         state.course = None;
         state.offering = OfferingHistory::empty();
         state.course_notes.clear();
+        // Lookups in flight were for the old term. Their answers must not land here.
+        shell_ref.lookups.borrow_mut().reset();
         persist(&mut state);
     }
     let terms = known_terms(&shell.borrow().state.borrow().index);
@@ -418,6 +420,12 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             shell_ref.details_attempted.borrow_mut().remove(&token);
         }
     }
+    {
+        let shell_ref = shell.borrow();
+        let term = shell_ref.state.borrow().index.catalog.term.code.clone();
+        // Opening the course again retries a lookup that failed.
+        shell_ref.lookups.borrow_mut().forget_failed(&term, key);
+    }
     let page = course_page(shell, key, false);
     page.set_vexpand(true);
     let clamp = adw::Clamp::new();
@@ -447,6 +455,24 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         .content(&clamp)
         .build();
     window.set_widget_name(&super::course_window_name(key));
+    window.connect_close_request({
+        let shell = shell.clone();
+        let key = key.clone();
+        move |closing| {
+            let name = super::course_window_name(&key);
+            let shell_ref = shell.borrow();
+            let other_open = shell_ref
+                .windows
+                .borrow()
+                .iter()
+                .any(|w| w != closing && w.widget_name().as_str() == name && w.is_visible());
+            if !other_open {
+                let term = shell_ref.state.borrow().index.catalog.term.code.clone();
+                shell_ref.lookups.borrow_mut().leave(&term, &key);
+            }
+            glib::Propagation::Proceed
+        }
+    });
     if let Some(app) = shell.borrow().window.application() {
         window.set_application(Some(&app));
     }
@@ -454,13 +480,137 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     shell.borrow().windows.borrow_mut().push(window);
 }
 
+/// A lookup waiting for the worker. `reply` carries the answer back to the main loop.
+pub(crate) struct LookupJob {
+    ticket: course_page::Ticket,
+    subjects: Vec<Subject>,
+    reply: std::sync::mpsc::Sender<Result<Option<course_page::MissingCoursePage>, String>>,
+}
+
+/// One worker, one course at a time, a short gap between courses and between requests.
+pub(crate) fn spawn_lookup_queue() -> course_page::LookupQueue<LookupJob> {
+    let client = BannerClient::default();
+    course_page::LookupQueue::spawn(
+        1,
+        |job: &LookupJob| job.ticket.wanted(),
+        move |job| {
+            let wanted = || job.ticket.wanted();
+            let control = banner::LookupControl::paced(true, &wanted);
+            let result = client.fetch_course_page(
+                job.ticket.key(),
+                job.ticket.term(),
+                &banner::SubjectLookup::new(&job.subjects),
+                now_secs(),
+                &control,
+            );
+            let _ = job.reply.send(result);
+            std::thread::sleep(BannerClient::RESTRICTION_GAP);
+        },
+    )
+}
+
+fn page_root() -> gtk::Box {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.set_margin_top(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+    root.set_margin_bottom(8);
+    root
+}
+
+fn page_title(text: &str) -> gtk::Label {
+    let heading = gtk::Label::new(Some(text));
+    heading.add_css_class("title-1");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    heading
+}
+
+fn page_frame(root: &gtk::Box, preview: bool) -> gtk::Widget {
+    let header = gtk::ScrolledWindow::builder()
+        .child(root)
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .height_request(if preview { 200 } else { 160 })
+        .propagate_natural_height(false)
+        .build();
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_vexpand(true);
+    page.append(&header);
+    page.upcast()
+}
+
+fn catalog_link_button(key: &CourseKey, term_code: &str) -> gtk::Button {
+    let url = BannerClient::catalog_page_url(term_code, key);
+    let button = gtk::Button::with_label("View on Northeastern website");
+    button.connect_clicked(move |_| {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    });
+    button
+}
+
 pub fn missing_course_page(
     shell: &Rc<RefCell<Shell>>,
     key: &CourseKey,
     preview: bool,
 ) -> gtk::Widget {
+    let (term_code, term_name) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        (
+            state.index.catalog.term.code.clone(),
+            state.index.catalog.term.name(),
+        )
+    };
+    let known = shell
+        .borrow()
+        .lookups
+        .borrow()
+        .state(&term_code, key)
+        .cloned();
+    match known {
+        Some(course_page::PageState::Found(page)) => {
+            return render_missing_course(shell, key, &page.info, Some(&page), preview);
+        }
+        Some(course_page::PageState::Failed(message)) => {
+            let (heading, body) = course_page::failed_copy(key, &term_name, &message);
+            let root = page_root();
+            root.append(&page_title(&heading));
+            root.append(&dim_label(&body));
+            let retry = gtk::Button::with_label("Try again");
+            retry.set_halign(gtk::Align::Start);
+            retry.connect_clicked({
+                let shell = shell.clone();
+                let key = key.clone();
+                let term_code = term_code.clone();
+                move |_| {
+                    shell
+                        .borrow()
+                        .lookups
+                        .borrow_mut()
+                        .forget_failed(&term_code, &key);
+                    replace_course_window(&shell, &key);
+                }
+            });
+            root.append(&retry);
+            return page_frame(&root, preview);
+        }
+        Some(course_page::PageState::NotListed) => {
+            let (heading, body) = course_page::not_listed_copy(key, &term_name);
+            let root = page_root();
+            root.append(&page_title(&heading));
+            root.append(&dim_label(&body));
+            let link = catalog_link_button(key, &term_code);
+            link.set_halign(gtk::Align::Start);
+            root.append(&link);
+            return page_frame(&root, preview);
+        }
+        Some(course_page::PageState::Loading) => return loading_page(key, preview),
+        None => {}
+    }
     if let Some(info) = shell.borrow().state.borrow().course_notes.get(key).cloned() {
-        return render_missing_course(shell, key, &info, preview);
+        return render_missing_course(shell, key, &info, None, preview);
     }
     if let Some(info) = find_local_course(shell, key) {
         shell
@@ -469,29 +619,22 @@ pub fn missing_course_page(
             .borrow_mut()
             .course_notes
             .insert(key.clone(), info.clone());
-        return render_missing_course(shell, key, &info, preview);
+        return render_missing_course(shell, key, &info, None, preview);
     }
-    load_missing_banner_course(shell, key);
+    start_banner_lookup(shell, key);
+    loading_page(key, preview)
+}
 
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(18);
-    root.set_margin_start(18);
-    root.set_margin_end(18);
-    root.set_margin_bottom(8);
-
-    let heading = gtk::Label::new(Some(&key.to_string()));
-    heading.add_css_class("title-1");
-    heading.set_xalign(0.0);
-    root.append(&heading);
-
+fn loading_page(key: &CourseKey, preview: bool) -> gtk::Widget {
+    let root = page_root();
+    root.append(&page_title(&key.to_string()));
     let spinner = gtk::Spinner::new();
     spinner.set_spinning(true);
     let status_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     status_box.append(&spinner);
     status_box.append(&dim_label("Checking Banner's catalog…"));
     root.append(&status_box);
-
-    root.upcast()
+    page_frame(&root, preview)
 }
 
 fn find_local_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> Option<CourseInfo> {
@@ -520,7 +663,8 @@ fn find_local_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> Option<Cour
                     corequisites: course.coreqs.clone(),
                     equivalents: vec![],
                     source_term: code.to_string(),
-                    is_retired: Some(true),
+                    // Whether the course was retired is not known from an older term's list.
+                    is_retired: None,
                     fetched_at: index.catalog.generated_at,
                 });
             }
@@ -529,84 +673,109 @@ fn find_local_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> Option<Cour
     None
 }
 
-fn load_missing_banner_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
-    let (term, token, subjects) = {
+fn start_banner_lookup(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let (term, subjects) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let term = state.index.catalog.term.code.clone();
-        let token = format!("missing|{term}|{key}");
-        if shell_ref.course_loading.borrow().contains(&token) {
-            return;
-        }
-        if shell_ref.details_attempted.borrow().contains(&token) {
-            return;
-        }
-        shell_ref.course_loading.borrow_mut().insert(token.clone());
-        shell_ref
-            .details_attempted
-            .borrow_mut()
-            .insert(token.clone());
-        (term, token, state.index.catalog.subjects.clone())
+        (
+            state.index.catalog.term.code.clone(),
+            state.index.catalog.subjects.clone(),
+        )
     };
-
+    let Some(ticket) = shell.borrow().lookups.borrow_mut().begin(&term, key) else {
+        return;
+    };
     let (tx, rx) = std::sync::mpsc::channel();
-    let worker_key = key.clone();
-    let worker_term = term.clone();
-    std::thread::spawn(move || {
-        let client = BannerClient::default();
-        let now = now_secs();
-        let subjects_lookup = termorganize_core::banner::SubjectLookup::new(&subjects);
-        let result = client.fetch_course_info(&worker_key, &worker_term, &subjects_lookup, now);
-        let _ = tx.send(result);
+    shell.borrow().lookup_queue.push(LookupJob {
+        ticket: ticket.clone(),
+        subjects,
+        reply: tx,
     });
 
     let shell = shell.clone();
-    let key = key.clone();
     glib::timeout_add_local(Duration::from_millis(200), move || {
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+            // The queue dropped the job because nobody wanted it, or the worker died.
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 Err("Banner request disconnected".into())
             }
         };
-        shell.borrow().course_loading.borrow_mut().remove(&token);
-        match result {
-            Ok(Some(info)) => {
-                shell
-                    .borrow()
-                    .state
+        let key = ticket.key().clone();
+        let mut was_found = false;
+        let applied = {
+            let shell_ref = shell.borrow();
+            let current_term = shell_ref.state.borrow().index.catalog.term.code.clone();
+            let name = course_window_name(&key);
+            let window_open = shell_ref
+                .windows
+                .borrow()
+                .iter()
+                .any(|w| w.widget_name().as_str() == name && w.is_visible());
+            let found = match &result {
+                Ok(Some(page)) => Some(page.info.clone()),
+                _ => None,
+            };
+            was_found = found.is_some();
+            let applied =
+                shell_ref
+                    .lookups
                     .borrow_mut()
-                    .course_notes
-                    .insert(key.clone(), info);
-                replace_course_window(&shell, &key);
+                    .finish(&ticket, &current_term, window_open, result);
+            if applied == course_page::Applied::Stored {
+                if let Some(info) = found {
+                    shell_ref
+                        .state
+                        .borrow_mut()
+                        .course_notes
+                        .insert(key.clone(), info);
+                }
+            }
+            applied
+        };
+        if applied == course_page::Applied::Stored {
+            replace_course_window(&shell, &key);
+            if was_found {
                 refresh(&shell);
-            }
-            Ok(None) => {
-                toast(
-                    &shell,
-                    &format!("{key} isn't listed in Banner's catalog for {term}."),
-                );
-            }
-            Err(error) => {
-                toast(&shell, &format!("Could not load course details ({error})."));
             }
         }
         glib::ControlFlow::Break
     });
 }
 
+fn extra_section<T>(
+    root: &gtk::Box,
+    title: &str,
+    section: &course_page::Section<T>,
+    lines: impl FnOnce(&T) -> Vec<String>,
+) {
+    match section {
+        course_page::Section::Loaded(value) => {
+            let lines = lines(value);
+            if lines.is_empty() {
+                return;
+            }
+            root.append(&heading_label(title));
+            root.append(&selectable(&lines.join("\n")));
+        }
+        course_page::Section::Failed(message) => {
+            root.append(&heading_label(title));
+            root.append(&dim_label(&format!(
+                "Couldn't load this section ({message})"
+            )));
+        }
+    }
+}
+
 fn render_missing_course(
     shell: &Rc<RefCell<Shell>>,
     key: &CourseKey,
     info: &CourseInfo,
+    extras: Option<&course_page::MissingCoursePage>,
     preview: bool,
 ) -> gtk::Widget {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    root.set_margin_top(18);
-    root.set_margin_start(18);
-    root.set_margin_end(18);
-    root.set_margin_bottom(8);
+    let root = page_root();
 
     let bar = wrapping_box();
     let save = gtk::Button::with_label("Save");
@@ -626,29 +795,12 @@ fn render_missing_course(
         )
     };
 
-    let url = BannerClient::catalog_page_url(&term_code, key);
-    let view_web = gtk::Button::with_label("View on Northeastern website");
-    view_web.connect_clicked(move |_| {
-        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-    });
-    bar.append(&view_web);
+    bar.append(&catalog_link_button(key, &term_code));
     root.append(&bar);
 
-    let heading = gtk::Label::new(Some(&format!("{}  {}", key, info.title)));
-    heading.add_css_class("title-1");
-    heading.set_xalign(0.0);
-    heading.set_wrap(true);
-    root.append(&heading);
+    root.append(&page_title(&format!("{}  {}", key, info.title)));
 
-    let is_retired = info.is_retired.unwrap_or(false);
-    let availability = if is_retired {
-        format!(
-            "No longer offered; last listed {}",
-            offering::label_of_term(&info.source_term)
-        )
-    } else {
-        format!("Not offered in {term_name}")
-    };
+    let availability = info.availability_label(&term_code, &term_name);
     let subtitle = if let Some(credits) = info.credits_label() {
         format!("{credits} · {availability}")
     } else {
@@ -665,6 +817,9 @@ fn render_missing_course(
             root.append(&body);
         }
     }
+    if let Some(message) = extras.and_then(|page| page.description.error()) {
+        root.append(&dim_label(&format!("Description unavailable ({message})")));
+    }
 
     if let Some(prereq) = &info.prerequisites {
         root.append(&heading_label("Prerequisites"));
@@ -673,6 +828,25 @@ fn render_missing_course(
     if let Some(coreq) = &info.corequisites {
         root.append(&heading_label("Corequisites"));
         root.append(&requisite_block(shell, coreq, "Corequisites"));
+    }
+
+    if let Some(page) = extras {
+        extra_section(&root, "Mutually exclusive with", &page.exclusions, |keys| {
+            keys.iter().map(|k| k.to_string()).collect()
+        });
+        if let Some(attributes) = &page.attributes {
+            extra_section(&root, "Attributes", attributes, |items| items.clone());
+        }
+        if let Some(restrictions) = &page.restrictions {
+            extra_section(&root, "Restrictions", restrictions, |items| {
+                items.iter().map(course_page::restriction_line).collect()
+            });
+        }
+        if let Some(fees) = &page.fees {
+            extra_section(&root, "Fees", fees, |items| {
+                items.iter().map(course_page::fee_line).collect()
+            });
+        }
     }
 
     let dependents: Vec<CourseKey> = {
@@ -704,19 +878,7 @@ fn render_missing_course(
     root.append(&heading_label("0 sections"));
     root.append(&dim_label("No sections in this term."));
 
-    let header = gtk::ScrolledWindow::builder()
-        .child(&root)
-        .vexpand(true)
-        .hexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .height_request(if preview { 200 } else { 160 })
-        .propagate_natural_height(false)
-        .build();
-
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    page.set_vexpand(true);
-    page.append(&header);
-    page.upcast()
+    page_frame(&root, preview)
 }
 
 pub fn open_professor_window(shell: &Rc<RefCell<Shell>>, name: &str) {

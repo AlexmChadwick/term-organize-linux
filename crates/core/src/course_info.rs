@@ -91,6 +91,19 @@ impl CourseInfo {
         Some(credit_label(low, high))
     }
 
+    /// Line under the title. Retirement is only claimed when it is known; otherwise the
+    /// course is just not offered in the term being viewed.
+    pub fn availability_label(&self, term_code: &str, term_name: &str) -> String {
+        let last = crate::offering::label_of_term(&self.source_term);
+        if self.is_retired == Some(true) {
+            format!("No longer offered; last listed {last}")
+        } else if !self.source_term.is_empty() && self.source_term != term_code {
+            format!("Not offered in {term_name}; last listed {last}")
+        } else {
+            format!("Not offered in {term_name}")
+        }
+    }
+
     pub fn from_loaded(key: &CourseKey, indexes: &[CatalogIndex]) -> Option<Self> {
         for (position, index) in indexes.iter().enumerate() {
             let Some(course) = index.course(key) else {
