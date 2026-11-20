@@ -161,6 +161,7 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
     if !lowered.contains("enrolled in one of the following")
         && !lowered.contains("not all restrictions")
         && !lowered.contains("no restrictions")
+        && !lowered.contains("no restriction")
     {
         return None;
     }
@@ -204,14 +205,138 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
 }
 
 pub fn description(html: &str) -> String {
-    let text = plain_text(html);
+    let text = plain_text(html).trim().to_string();
     let lowered = text.to_ascii_lowercase();
-    if lowered.starts_with("no course description") || lowered.contains("no information available")
+    if lowered.starts_with("no course description")
+        || lowered.starts_with("no description")
+        || lowered.contains("no course description available")
+        || lowered.contains("no description available")
+        || lowered.contains("no information available")
     {
         String::new()
     } else {
         text
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CourseFee {
+    pub description: String,
+    pub amount: Option<String>,
+}
+
+pub fn course_fees(html: &str) -> Vec<CourseFee> {
+    let text = plain_text(html);
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("no fee information")
+        || lowered.contains("no fees")
+        || lowered.contains("no information available")
+    {
+        return Vec::new();
+    }
+    let mut fees = Vec::new();
+    let row_re = Regex::new(r"(?is)<tr[^>]*>([\s\S]*?)</tr>").unwrap();
+    let cell_re = Regex::new(r"(?is)<t[dh][^>]*>([\s\S]*?)</t[dh]>").unwrap();
+    for row in row_re.captures_iter(html) {
+        let cells: Vec<String> = cell_re
+            .captures_iter(&row[1])
+            .map(|c| plain_text(&c[1]).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let first = &cells[0];
+        if first.eq_ignore_ascii_case("fee")
+            || first.eq_ignore_ascii_case("fee type")
+            || first.eq_ignore_ascii_case("description")
+        {
+            continue;
+        }
+        let description = first.clone();
+        let amount = cells.get(1).cloned();
+        fees.push(CourseFee {
+            description,
+            amount,
+        });
+    }
+    if fees.is_empty() {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.to_ascii_lowercase().starts_with("fee")
+                || trimmed.to_ascii_lowercase().contains("no fee")
+            {
+                continue;
+            }
+            if trimmed.contains('$') {
+                fees.push(CourseFee {
+                    description: trimmed.to_string(),
+                    amount: None,
+                });
+            }
+        }
+    }
+    fees
+}
+
+fn is_attribute_code(s: &str) -> bool {
+    (1..=6).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn course_attributes(html: &str) -> Vec<String> {
+    let text = plain_text(html);
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("no attribute information")
+        || lowered.contains("no attributes")
+        || lowered.contains("no information available")
+    {
+        return Vec::new();
+    }
+    let mut attrs = Vec::new();
+    let row_re = Regex::new(r"(?is)<tr[^>]*>([\s\S]*?)</tr>").unwrap();
+    let cell_re = Regex::new(r"(?is)<t[dh][^>]*>([\s\S]*?)</t[dh]>").unwrap();
+    for row in row_re.captures_iter(html) {
+        let cells: Vec<String> = cell_re
+            .captures_iter(&row[1])
+            .map(|c| plain_text(&c[1]).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        if cells[0].eq_ignore_ascii_case("attribute")
+            || cells[0].eq_ignore_ascii_case("code")
+            || cells[0].eq_ignore_ascii_case("description")
+        {
+            continue;
+        }
+        let item = if cells.len() >= 2 && is_attribute_code(&cells[0]) {
+            cells[1].clone()
+        } else {
+            cells[0].clone()
+        };
+        if !attrs.contains(&item) {
+            attrs.push(item);
+        }
+    }
+    if attrs.is_empty() {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.to_ascii_lowercase().starts_with("attribute")
+                || trimmed.to_ascii_lowercase().contains("no attribute")
+            {
+                continue;
+            }
+            if !attrs.contains(&trimmed.to_string()) {
+                attrs.push(trimmed.to_string());
+            }
+        }
+    }
+    attrs
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1113,6 +1238,150 @@ impl BannerClient {
             .collect())
     }
 
+    pub fn catalog_page_url(term: &str, course: &CourseKey) -> String {
+        format!(
+            "https://bnrordsp.neu.edu/ssb-prod/bwckctlg.p_disp_course_detail?cat_term_in={}&subj_code_in={}&crse_numb_in={}",
+            term.trim(),
+            course.subject.trim(),
+            course.number.trim()
+        )
+    }
+
+    pub fn fetch_course_description_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getCourseDescription", term, course)
+    }
+
+    pub fn fetch_course_catalog_details_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getCourseCatalogDetails", term, course)
+    }
+
+    pub fn fetch_course_prerequisites_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getPrerequisites", term, course)
+    }
+
+    pub fn fetch_course_corequisites_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getCorequisites", term, course)
+    }
+
+    pub fn fetch_course_mutual_exclusions_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form(
+            "courseSearchResults/getCourseMutuallyExclusions",
+            term,
+            course,
+        )
+    }
+
+    pub fn fetch_course_attributes_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getCourseAttributes", term, course)
+    }
+
+    pub fn fetch_course_attributes(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<Vec<String>, String> {
+        let html = self.fetch_course_attributes_html(term, course)?;
+        Ok(course_attributes(&html))
+    }
+
+    pub fn fetch_course_restrictions_html(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getRestrictions", term, course)
+    }
+
+    pub fn fetch_course_restrictions(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<Option<Vec<EnrollmentRestriction>>, String> {
+        let html = self.fetch_course_restrictions_html(term, course)?;
+        Ok(enrollment_restrictions(&html))
+    }
+
+    pub fn fetch_course_fees_html(&self, term: &str, course: &CourseKey) -> Result<String, String> {
+        self.post_course_form("courseSearchResults/getFees", term, course)
+    }
+
+    pub fn fetch_course_fees(
+        &self,
+        term: &str,
+        course: &CourseKey,
+    ) -> Result<Vec<CourseFee>, String> {
+        let html = self.fetch_course_fees_html(term, course)?;
+        Ok(course_fees(&html))
+    }
+
+    pub fn fetch_description_html(&self, term: &str, crn: &str) -> Result<String, String> {
+        self.post_section_form("getCourseDescription", term, crn)
+    }
+
+    pub fn fetch_section_catalog_details_html(
+        &self,
+        term: &str,
+        crn: &str,
+    ) -> Result<String, String> {
+        self.post_section_form("getSectionCatalogDetails", term, crn)
+    }
+
+    pub fn fetch_section_prerequisites_html(
+        &self,
+        term: &str,
+        crn: &str,
+    ) -> Result<String, String> {
+        self.post_section_form("getSectionPrerequisites", term, crn)
+    }
+
+    pub fn fetch_corequisites_html(&self, term: &str, crn: &str) -> Result<String, String> {
+        self.post_section_form("getCorequisites", term, crn)
+    }
+
+    pub fn fetch_restrictions_html(&self, term: &str, crn: &str) -> Result<String, String> {
+        self.post_section_form("getRestrictions", term, crn)
+    }
+
+    pub fn fetch_cross_listed_sections_html(
+        &self,
+        term: &str,
+        crn: &str,
+    ) -> Result<String, String> {
+        self.post_section_form("getXlstSections", term, crn)
+    }
+
+    pub fn fetch_instructors(&self, term: &str, crn: &str) -> Result<Vec<Instructor>, String> {
+        let url = format!(
+            "{}searchResults/getFacultyMeetingTimes?term={term}&courseReferenceNumber={crn}",
+            self.ssb()
+        );
+        self.get(&url).and_then(|body| faculty_instructors(&body))
+    }
+
     fn post_course_form(
         &self,
         path: &str,
@@ -1182,10 +1451,16 @@ impl BannerClient {
             term,
             course,
         )?;
+        let description_html = self.fetch_course_description_html(term, course).ok();
         let details = catalog_details(&details_html);
+        let desc = description_html
+            .as_deref()
+            .map(description)
+            .filter(|d| !d.is_empty());
         Ok(Some(crate::course_info::CourseInfo {
             key: course.clone(),
             title: details.title.unwrap_or_default(),
+            description: desc,
             min_credits: details.min_credits,
             max_credits: details.max_credits,
             prerequisites: prerequisites(&prereq_html, subjects),
@@ -1783,5 +2058,75 @@ mod tests {
             credit_hour_high: None,
             restrictions: None,
         }
+    }
+
+    #[test]
+    fn parses_course_attributes_and_fees() {
+        let attr_html = "<table><tr><td>Attribute</td><td>Description</td></tr><tr><td>NDDI</td><td>Differences and Diversity</td></tr><tr><td>WI</td><td>Writing Intensive</td></tr></table>";
+        let attrs = super::course_attributes(attr_html);
+        assert_eq!(
+            attrs,
+            vec!["Differences and Diversity", "Writing Intensive"]
+        );
+
+        let no_attr_html = "<p>No Attribute information available.</p>";
+        assert!(super::course_attributes(no_attr_html).is_empty());
+
+        let fee_html = "<table><tr><td>Fee Type</td><td>Amount</td></tr><tr><td>Lab Fee</td><td>$75.00</td></tr></table>";
+        let fees = super::course_fees(fee_html);
+        assert_eq!(fees.len(), 1);
+        assert_eq!(fees[0].description, "Lab Fee");
+        assert_eq!(fees[0].amount.as_deref(), Some("$75.00"));
+
+        let no_fee_html = "<div>No fee information available for this course.</div>";
+        assert!(super::course_fees(no_fee_html).is_empty());
+    }
+
+    #[test]
+    fn description_strips_html_and_empty_notices() {
+        assert_eq!(
+            super::description("<p>Covers <b>recursion</b> and data structures.</p>"),
+            "Covers recursion and data structures."
+        );
+        assert_eq!(
+            super::description("<p>No course description available.</p>"),
+            ""
+        );
+        assert_eq!(super::description("   No description available   "), "");
+    }
+
+    #[test]
+    fn restrictions_parses_headings_and_empty_notices() {
+        let html = "<p>Must be enrolled in one of the following Levels:</p><p>Graduate</p><p>Cannot be enrolled in one of the following Colleges:</p><p>College of Professional Studies</p>";
+        let r = super::enrollment_restrictions(html).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].kind, RestrictionKind::Must);
+        assert_eq!(r[0].category, "Levels");
+        assert_eq!(r[0].values, vec!["Graduate"]);
+        assert_eq!(r[1].kind, RestrictionKind::Cannot);
+        assert_eq!(r[1].category, "Colleges");
+        assert_eq!(r[1].values, vec!["College of Professional Studies"]);
+
+        let no_restrictions = "<div>No restriction information available.</div>";
+        assert_eq!(
+            super::enrollment_restrictions(no_restrictions),
+            Some(vec![])
+        );
+
+        let not_restrictions = "<div>Welcome to Northeastern</div>";
+        assert_eq!(super::enrollment_restrictions(not_restrictions), None);
+    }
+
+    #[test]
+    fn catalog_page_url_builds_expected_endpoint() {
+        let key = CourseKey {
+            subject: "CS".into(),
+            number: "2500".into(),
+        };
+        let url = BannerClient::catalog_page_url("202710", &key);
+        assert_eq!(
+            url,
+            "https://bnrordsp.neu.edu/ssb-prod/bwckctlg.p_disp_course_detail?cat_term_in=202710&subj_code_in=CS&crse_numb_in=2500"
+        );
     }
 }

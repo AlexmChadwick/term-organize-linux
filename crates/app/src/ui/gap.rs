@@ -432,6 +432,12 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             .index
             .course(key)
             .map(|course| format!("{} · {}", course.code(), course.title))
+            .or_else(|| {
+                state
+                    .course_notes
+                    .get(key)
+                    .map(|info| format!("{} · {}", info.key, info.title))
+            })
             .unwrap_or_else(|| key.to_string())
     };
     let window = adw::Window::builder()
@@ -446,6 +452,271 @@ pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     }
     window.present();
     shell.borrow().windows.borrow_mut().push(window);
+}
+
+pub fn missing_course_page(
+    shell: &Rc<RefCell<Shell>>,
+    key: &CourseKey,
+    preview: bool,
+) -> gtk::Widget {
+    if let Some(info) = shell.borrow().state.borrow().course_notes.get(key).cloned() {
+        return render_missing_course(shell, key, &info, preview);
+    }
+    if let Some(info) = find_local_course(shell, key) {
+        shell
+            .borrow()
+            .state
+            .borrow_mut()
+            .course_notes
+            .insert(key.clone(), info.clone());
+        return render_missing_course(shell, key, &info, preview);
+    }
+    load_missing_banner_course(shell, key);
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.set_margin_top(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+    root.set_margin_bottom(8);
+
+    let heading = gtk::Label::new(Some(&key.to_string()));
+    heading.add_css_class("title-1");
+    heading.set_xalign(0.0);
+    root.append(&heading);
+
+    let spinner = gtk::Spinner::new();
+    spinner.set_spinning(true);
+    let status_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status_box.append(&spinner);
+    status_box.append(&dim_label("Checking Banner's catalog…"));
+    root.append(&status_box);
+
+    root.upcast()
+}
+
+fn find_local_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> Option<CourseInfo> {
+    let current_code = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state.index.catalog.term.code.clone()
+    };
+    for code in archive::bundled_term_codes() {
+        if code == current_code {
+            continue;
+        }
+        if let Some(index) = index_for_code(code) {
+            if let Some(course) = index.course(key) {
+                return Some(CourseInfo {
+                    key: course.key(),
+                    title: course.title.clone(),
+                    description: if course.description.trim().is_empty() {
+                        None
+                    } else {
+                        Some(course.description.clone())
+                    },
+                    min_credits: Some(course.min_credits),
+                    max_credits: Some(course.max_credits),
+                    prerequisites: course.prereqs.clone(),
+                    corequisites: course.coreqs.clone(),
+                    equivalents: vec![],
+                    source_term: code.to_string(),
+                    is_retired: Some(true),
+                    fetched_at: index.catalog.generated_at,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn load_missing_banner_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+    let (term, token, subjects) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let term = state.index.catalog.term.code.clone();
+        let token = format!("missing|{term}|{key}");
+        if shell_ref.course_loading.borrow().contains(&token) {
+            return;
+        }
+        if shell_ref.details_attempted.borrow().contains(&token) {
+            return;
+        }
+        shell_ref.course_loading.borrow_mut().insert(token.clone());
+        shell_ref
+            .details_attempted
+            .borrow_mut()
+            .insert(token.clone());
+        (term, token, state.index.catalog.subjects.clone())
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_key = key.clone();
+    let worker_term = term.clone();
+    std::thread::spawn(move || {
+        let client = BannerClient::default();
+        let now = now_secs();
+        let subjects_lookup = termorganize_core::banner::SubjectLookup::new(&subjects);
+        let result = client.fetch_course_info(&worker_key, &worker_term, &subjects_lookup, now);
+        let _ = tx.send(result);
+    });
+
+    let shell = shell.clone();
+    let key = key.clone();
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Banner request disconnected".into())
+            }
+        };
+        shell.borrow().course_loading.borrow_mut().remove(&token);
+        match result {
+            Ok(Some(info)) => {
+                shell
+                    .borrow()
+                    .state
+                    .borrow_mut()
+                    .course_notes
+                    .insert(key.clone(), info);
+                replace_course_window(&shell, &key);
+                refresh(&shell);
+            }
+            Ok(None) => {
+                toast(
+                    &shell,
+                    &format!("{key} isn't listed in Banner's catalog for {term}."),
+                );
+            }
+            Err(error) => {
+                toast(&shell, &format!("Could not load course details ({error})."));
+            }
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+fn render_missing_course(
+    shell: &Rc<RefCell<Shell>>,
+    key: &CourseKey,
+    info: &CourseInfo,
+    preview: bool,
+) -> gtk::Widget {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.set_margin_top(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+    root.set_margin_bottom(8);
+
+    let bar = wrapping_box();
+    let save = gtk::Button::with_label("Save");
+    save.connect_clicked({
+        let shell = shell.clone();
+        let key = key.clone();
+        move |_| save_course(&shell, &key)
+    });
+    bar.append(&save);
+
+    let (term_code, term_name) = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        (
+            state.index.catalog.term.code.clone(),
+            state.index.catalog.term.name(),
+        )
+    };
+
+    let url = BannerClient::catalog_page_url(&term_code, key);
+    let view_web = gtk::Button::with_label("View on Northeastern website");
+    view_web.connect_clicked(move |_| {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    });
+    bar.append(&view_web);
+    root.append(&bar);
+
+    let heading = gtk::Label::new(Some(&format!("{}  {}", key, info.title)));
+    heading.add_css_class("title-1");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    root.append(&heading);
+
+    let is_retired = info.is_retired.unwrap_or(false);
+    let availability = if is_retired {
+        format!(
+            "No longer offered; last listed {}",
+            offering::label_of_term(&info.source_term)
+        )
+    } else {
+        format!("Not offered in {term_name}")
+    };
+    let subtitle = if let Some(credits) = info.credits_label() {
+        format!("{credits} · {availability}")
+    } else {
+        availability
+    };
+    root.append(&dim_label(&subtitle));
+
+    if let Some(desc) = &info.description {
+        if !desc.is_empty() {
+            let body = gtk::Label::new(Some(desc));
+            body.set_wrap(true);
+            body.set_xalign(0.0);
+            body.set_selectable(true);
+            root.append(&body);
+        }
+    }
+
+    if let Some(prereq) = &info.prerequisites {
+        root.append(&heading_label("Prerequisites"));
+        root.append(&requisite_block(shell, prereq, "Prerequisites"));
+    }
+    if let Some(coreq) = &info.corequisites {
+        root.append(&heading_label("Corequisites"));
+        root.append(&requisite_block(shell, coreq, "Corequisites"));
+    }
+
+    let dependents: Vec<CourseKey> = {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        state
+            .index
+            .courses
+            .iter()
+            .filter(|c| {
+                c.prereqs
+                    .as_ref()
+                    .is_some_and(|r| r.referenced_courses().contains(key))
+            })
+            .map(|c| c.key())
+            .collect()
+    };
+    if !dependents.is_empty() {
+        root.append(&heading_label("Leads to"));
+        root.append(&selectable(
+            &dependents
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+
+    root.append(&heading_label("0 sections"));
+    root.append(&dim_label("No sections in this term."));
+
+    let header = gtk::ScrolledWindow::builder()
+        .child(&root)
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .height_request(if preview { 200 } else { 160 })
+        .propagate_natural_height(false)
+        .build();
+
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_vexpand(true);
+    page.append(&header);
+    page.upcast()
 }
 
 pub fn open_professor_window(shell: &Rc<RefCell<Shell>>, name: &str) {

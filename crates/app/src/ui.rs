@@ -1270,7 +1270,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
         )
     };
     let Some(course) = course else {
-        return gtk::Label::new(Some("That course isn’t in this term.")).upcast();
+        return gap::missing_course_page(shell, key, preview);
     };
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.set_margin_top(18);
@@ -4195,7 +4195,7 @@ fn import_pdf(path: &std::path::Path) -> Result<DegreePlan, String> {
         .map_err(|e| e.to_string())
 }
 
-fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+pub(super) fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();

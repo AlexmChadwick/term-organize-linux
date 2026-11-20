@@ -17,6 +17,8 @@ pub struct CourseInfo {
     pub key: CourseKey,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_credits: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_credits: Option<f64>,
@@ -42,6 +44,7 @@ impl CourseInfo {
         Self {
             key,
             title: title.into(),
+            description: None,
             min_credits: None,
             max_credits: None,
             prerequisites: None,
@@ -51,6 +54,11 @@ impl CourseInfo {
             is_retired: None,
             fetched_at,
         }
+    }
+
+    pub fn with_description(mut self, description: Option<String>) -> Self {
+        self.description = description.filter(|d| !d.trim().is_empty());
+        self
     }
 
     pub fn with_equivalents(mut self, equivalents: Vec<CourseKey>) -> Self {
@@ -94,6 +102,11 @@ impl CourseInfo {
             return Some(Self {
                 key: course.key(),
                 title: course.title.clone(),
+                description: if course.description.trim().is_empty() {
+                    None
+                } else {
+                    Some(course.description.clone())
+                },
                 min_credits: Some(course.min_credits),
                 max_credits: Some(course.max_credits),
                 prerequisites: course.prereqs.clone(),
