@@ -703,8 +703,7 @@ fn start_banner_lookup(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             }
         };
         let key = ticket.key().clone();
-        let mut was_found = false;
-        let applied = {
+        let (applied, was_found) = {
             let shell_ref = shell.borrow();
             let current_term = shell_ref.state.borrow().index.catalog.term.code.clone();
             let name = course_window_name(&key);
@@ -717,7 +716,7 @@ fn start_banner_lookup(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                 Ok(Some(page)) => Some(page.info.clone()),
                 _ => None,
             };
-            was_found = found.is_some();
+            let was_found = found.is_some();
             let applied =
                 shell_ref
                     .lookups
@@ -732,7 +731,7 @@ fn start_banner_lookup(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
                         .insert(key.clone(), info);
                 }
             }
-            applied
+            (applied, was_found)
         };
         if applied == course_page::Applied::Stored {
             replace_course_window(&shell, &key);
