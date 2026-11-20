@@ -4195,7 +4195,7 @@ fn import_pdf(path: &std::path::Path) -> Result<DegreePlan, String> {
         .map_err(|e| e.to_string())
 }
 
-pub(super) fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
+fn save_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     {
         let shell = shell.borrow();
         let mut state = shell.state.borrow_mut();
