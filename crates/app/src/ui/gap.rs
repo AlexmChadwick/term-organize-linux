@@ -6,7 +6,7 @@ use termorganize_core::archive;
 use termorganize_core::catalog;
 use termorganize_core::course_info::{self, CourseInfoRepository};
 use termorganize_core::editing;
-use termorganize_core::offering::{OfferingHistory, OfferingRepository, OfferingSource};
+use termorganize_core::offering::{self, OfferingHistory, OfferingRepository, OfferingSource};
 use termorganize_core::outline::{
     GroupKind, ItemKind, PathContent, RequisiteItem, RequisiteLayout, RequisitePart,
 };
@@ -504,7 +504,7 @@ fn find_local_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey) -> Option<Cour
         if code == current_code {
             continue;
         }
-        if let Some(index) = index_for_code(code) {
+        if let Some(index) = index_for_code(&code) {
             if let Some(course) = index.course(key) {
                 return Some(CourseInfo {
                     key: course.key(),
