@@ -14,6 +14,7 @@ pub mod banner;
 pub mod calendar;
 pub mod catalog;
 pub mod course_info;
+pub mod course_page;
 pub mod degree_audit;
 pub mod degree_format;
 pub mod editing;

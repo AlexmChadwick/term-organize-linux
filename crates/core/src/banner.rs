@@ -3,6 +3,7 @@
 //! Portions derived from SearchNEU (AGPL-3.0), packages/scraper.
 
 use crate::catalog::{self, BannerMeetingFaculty, BannerSection};
+use crate::course_page::{MissingCoursePage, Section};
 use crate::html::{plain_text, table_rows};
 use crate::model::*;
 use regex::Regex;
@@ -161,6 +162,7 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
     if !lowered.contains("enrolled in one of the following")
         && !lowered.contains("not all restrictions")
         && !lowered.contains("no restrictions")
+        && !lowered.contains("no restriction")
     {
         return None;
     }
@@ -204,14 +206,138 @@ pub fn enrollment_restrictions(html: &str) -> Option<Vec<EnrollmentRestriction>>
 }
 
 pub fn description(html: &str) -> String {
-    let text = plain_text(html);
+    let text = plain_text(html).trim().to_string();
     let lowered = text.to_ascii_lowercase();
-    if lowered.starts_with("no course description") || lowered.contains("no information available")
+    if lowered.starts_with("no course description")
+        || lowered.starts_with("no description")
+        || lowered.contains("no course description available")
+        || lowered.contains("no description available")
+        || lowered.contains("no information available")
     {
         String::new()
     } else {
         text
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CourseFee {
+    pub description: String,
+    pub amount: Option<String>,
+}
+
+pub fn course_fees(html: &str) -> Vec<CourseFee> {
+    let text = plain_text(html);
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("no fee information")
+        || lowered.contains("no fees")
+        || lowered.contains("no information available")
+    {
+        return Vec::new();
+    }
+    let mut fees = Vec::new();
+    let row_re = Regex::new(r"(?is)<tr[^>]*>([\s\S]*?)</tr>").unwrap();
+    let cell_re = Regex::new(r"(?is)<t[dh][^>]*>([\s\S]*?)</t[dh]>").unwrap();
+    for row in row_re.captures_iter(html) {
+        let cells: Vec<String> = cell_re
+            .captures_iter(&row[1])
+            .map(|c| plain_text(&c[1]).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let first = &cells[0];
+        if first.eq_ignore_ascii_case("fee")
+            || first.eq_ignore_ascii_case("fee type")
+            || first.eq_ignore_ascii_case("description")
+        {
+            continue;
+        }
+        let description = first.clone();
+        let amount = cells.get(1).cloned();
+        fees.push(CourseFee {
+            description,
+            amount,
+        });
+    }
+    if fees.is_empty() && !is_full_document(html) {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.to_ascii_lowercase().starts_with("fee")
+                || trimmed.to_ascii_lowercase().contains("no fee")
+            {
+                continue;
+            }
+            if trimmed.contains('$') && trimmed.chars().count() <= 120 {
+                fees.push(CourseFee {
+                    description: trimmed.to_string(),
+                    amount: None,
+                });
+            }
+        }
+    }
+    fees
+}
+
+fn is_attribute_code(s: &str) -> bool {
+    (1..=6).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn course_attributes(html: &str) -> Vec<String> {
+    let text = plain_text(html);
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("no attribute information")
+        || lowered.contains("no attributes")
+        || lowered.contains("no information available")
+    {
+        return Vec::new();
+    }
+    let mut attrs = Vec::new();
+    let row_re = Regex::new(r"(?is)<tr[^>]*>([\s\S]*?)</tr>").unwrap();
+    let cell_re = Regex::new(r"(?is)<t[dh][^>]*>([\s\S]*?)</t[dh]>").unwrap();
+    for row in row_re.captures_iter(html) {
+        let cells: Vec<String> = cell_re
+            .captures_iter(&row[1])
+            .map(|c| plain_text(&c[1]).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        if cells[0].eq_ignore_ascii_case("attribute")
+            || cells[0].eq_ignore_ascii_case("code")
+            || cells[0].eq_ignore_ascii_case("description")
+        {
+            continue;
+        }
+        let item = if cells.len() >= 2 && is_attribute_code(&cells[0]) {
+            cells[1].clone()
+        } else {
+            cells[0].clone()
+        };
+        if !attrs.contains(&item) {
+            attrs.push(item);
+        }
+    }
+    if attrs.is_empty() && !is_full_document(html) {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.to_ascii_lowercase().starts_with("attribute")
+                || trimmed.to_ascii_lowercase().contains("no attribute")
+            {
+                continue;
+            }
+            if trimmed.chars().count() <= 80 && !attrs.contains(&trimmed.to_string()) {
+                attrs.push(trimmed.to_string());
+            }
+        }
+    }
+    attrs
 }
 
 #[derive(Clone, Debug, Default)]
@@ -422,6 +548,19 @@ pub fn session_pages(page_count: usize, parallelism: usize) -> Vec<Vec<usize>> {
         pages[page % sessions].push(page);
     }
     pages
+}
+
+/// Percent-encodes everything except RFC 3986 unreserved characters.
+pub fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn jitter_seconds() -> f64 {
@@ -1033,10 +1172,11 @@ impl BannerClient {
 
     pub fn catalog_lists_course(&self, course: &CourseKey, term: &str) -> Result<bool, String> {
         let url = format!(
-            "{}courseSearch/get_subjectcoursecombo?searchTerm={}%20{}&term={term}&offset=1&max=10",
+            "{}courseSearch/get_subjectcoursecombo?searchTerm={}%20{}&term={}&offset=1&max=10",
             self.ssb(),
-            course.subject,
-            course.number
+            percent_encode(&course.subject),
+            percent_encode(&course.number),
+            percent_encode(term)
         );
         let body = self.get(&url)?;
         let rows: Vec<serde_json::Value> =
@@ -1113,6 +1253,15 @@ impl BannerClient {
             .collect())
     }
 
+    pub fn catalog_page_url(term: &str, course: &CourseKey) -> String {
+        format!(
+            "https://bnrordsp.neu.edu/ssb-prod/bwckctlg.p_disp_course_detail?cat_term_in={}&subj_code_in={}&crse_numb_in={}",
+            percent_encode(term.trim()),
+            percent_encode(course.subject.trim()),
+            percent_encode(course.number.trim())
+        )
+    }
+
     fn post_course_form(
         &self,
         path: &str,
@@ -1121,8 +1270,10 @@ impl BannerClient {
     ) -> Result<String, String> {
         let url = format!("{}{path}", self.ssb());
         let body = format!(
-            "term={term}&subjectCode={}&courseNumber={}",
-            course.subject, course.number
+            "term={}&subjectCode={}&courseNumber={}",
+            percent_encode(term),
+            percent_encode(&course.subject),
+            percent_encode(&course.number)
         );
         perform(|| {
             classify(
@@ -1161,6 +1312,8 @@ impl BannerClient {
     }
 
     /// Catalog entry for one course in one term. `None` when that catalog does not list it.
+    /// Requisites and credits are required. The description may fail on its own. Mutual
+    /// exclusions are required here because the entry is cached.
     pub fn fetch_course_info(
         &self,
         course: &CourseKey,
@@ -1168,34 +1321,183 @@ impl BannerClient {
         subjects: &SubjectLookup,
         now: f64,
     ) -> Result<Option<crate::course_info::CourseInfo>, String> {
+        let control = LookupControl::paced(false, &|| true);
+        let Some(page) = self.fetch_course_page(course, term, subjects, now, &control)? else {
+            return Ok(None);
+        };
+        if let Some(error) = page.exclusions.error() {
+            return Err(error.to_string());
+        }
+        Ok(Some(page.info))
+    }
+
+    /// The catalog page for one course in one term, fetched one request at a time with
+    /// `control.pause` between requests. `None` when the term's catalog does not list it.
+    ///
+    /// Required: the listing check, catalog details, prerequisites, corequisites (an error
+    /// returns at once). Independent sections: description, mutual exclusions and, with
+    /// `control.extras`, attributes, restrictions and fees. Each can fail alone. After the
+    /// first failed request no further request is made and the sections not yet asked are
+    /// marked failed, so a struggling Banner is not asked again and again.
+    pub fn fetch_course_page(
+        &self,
+        course: &CourseKey,
+        term: &str,
+        subjects: &SubjectLookup,
+        now: f64,
+        control: &LookupControl,
+    ) -> Result<Option<MissingCoursePage>, String> {
+        let mut issued = 0usize;
+        let mut gate = || -> Result<(), String> {
+            if !(control.wanted)() {
+                return Err(LOOKUP_CANCELLED.to_string());
+            }
+            if issued > 0 {
+                (control.pause)();
+            }
+            issued += 1;
+            Ok(())
+        };
+        gate()?;
         if !self.catalog_lists_course(course, term)? {
             return Ok(None);
         }
+        gate()?;
         let details_html =
             self.post_course_form("courseSearchResults/getCourseCatalogDetails", term, course)?;
+        gate()?;
         let prereq_html =
             self.post_course_form("courseSearchResults/getPrerequisites", term, course)?;
+        gate()?;
         let coreq_html =
             self.post_course_form("courseSearchResults/getCorequisites", term, course)?;
-        let exclusion_html = self.post_course_form(
-            "courseSearchResults/getCourseMutuallyExclusions",
-            term,
-            course,
-        )?;
+
+        let mut stopped: Option<String> = None;
+        let mut section = |endpoint: &str| -> Result<Result<String, String>, String> {
+            if let Some(reason) = &stopped {
+                return Ok(Err(format!("Not checked: {reason}")));
+            }
+            gate()?;
+            let result = self.post_course_form(endpoint, term, course);
+            if let Err(error) = &result {
+                stopped = Some(error.clone());
+            }
+            Ok(result)
+        };
+        let description_html = section("courseSearchResults/getCourseDescription")?;
+        let exclusion_html = section("courseSearchResults/getCourseMutuallyExclusions")?;
+        let extras = if control.extras {
+            Some((
+                section("courseSearchResults/getCourseAttributes")?,
+                section("courseSearchResults/getRestrictions")?,
+                section("courseSearchResults/getFees")?,
+            ))
+        } else {
+            None
+        };
+
         let details = catalog_details(&details_html);
-        Ok(Some(crate::course_info::CourseInfo {
+        let description_text = description_html
+            .as_ref()
+            .ok()
+            .map(|html| description(html))
+            .filter(|text| !text.is_empty());
+        let exclusions = match exclusion_html {
+            Ok(html) => Section::Loaded(mutual_exclusions(&html, subjects)),
+            Err(error) => Section::Failed(error),
+        };
+        let mut info = crate::course_info::CourseInfo {
             key: course.clone(),
             title: details.title.unwrap_or_default(),
+            description: description_text,
             min_credits: details.min_credits,
             max_credits: details.max_credits,
             prerequisites: prerequisites(&prereq_html, subjects),
             corequisites: corequisites(&coreq_html, subjects),
-            equivalents: mutual_exclusions(&exclusion_html, subjects),
+            equivalents: Vec::new(),
             source_term: term.to_string(),
             is_retired: None,
             fetched_at: now,
+        };
+        if let Section::Loaded(keys) = &exclusions {
+            info = info.with_equivalents(keys.clone());
+        }
+        let (attributes, restrictions, fees) = match extras {
+            Some((attributes, restrictions, fees)) => (
+                Some(into_section(attributes, |html| {
+                    if is_full_document(html) {
+                        return Err(UNEXPECTED_PAGE.to_string());
+                    }
+                    Ok(course_attributes(html))
+                })),
+                Some(into_section(restrictions, |html| {
+                    enrollment_restrictions(html).ok_or_else(|| UNEXPECTED_PAGE.to_string())
+                })),
+                Some(into_section(fees, |html| {
+                    if is_full_document(html) {
+                        return Err(UNEXPECTED_PAGE.to_string());
+                    }
+                    Ok(course_fees(html))
+                })),
+            ),
+            None => (None, None, None),
+        };
+        Ok(Some(MissingCoursePage {
+            info,
+            description: match description_html {
+                Ok(_) => Section::Loaded(()),
+                Err(error) => Section::Failed(error),
+            },
+            exclusions,
+            attributes,
+            restrictions,
+            fees,
         }))
     }
+}
+
+/// Error text of a lookup stopped because nobody wants the answer any more.
+pub const LOOKUP_CANCELLED: &str = "Lookup cancelled";
+const UNEXPECTED_PAGE: &str = "Banner returned an unexpected page";
+
+/// Knobs for `BannerClient::fetch_course_page`.
+pub struct LookupControl<'a> {
+    /// Also ask for attributes, restrictions and fees.
+    pub extras: bool,
+    /// Checked before every request. False stops the lookup with `LOOKUP_CANCELLED`.
+    pub wanted: &'a dyn Fn() -> bool,
+    /// Called between two requests.
+    pub pause: &'a dyn Fn(),
+}
+
+impl<'a> LookupControl<'a> {
+    /// Sleeps `BannerClient::RESTRICTION_GAP` between requests.
+    pub fn paced(extras: bool, wanted: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            extras,
+            wanted,
+            pause: &|| std::thread::sleep(BannerClient::RESTRICTION_GAP),
+        }
+    }
+}
+
+fn into_section<T>(
+    fetched: Result<String, String>,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Section<T> {
+    match fetched.and_then(|html| parse(&html)) {
+        Ok(value) => Section::Loaded(value),
+        Err(error) => Section::Failed(error),
+    }
+}
+
+/// A whole HTML document (page chrome) rather than the fragment an endpoint returns.
+fn is_full_document(html: &str) -> bool {
+    let lowered = html.to_ascii_lowercase();
+    ["<html", "<body", "<head", "<script", "<nav"]
+        .iter()
+        .any(|tag| lowered.contains(tag))
+        && !lowered.contains("<tr")
 }
 
 impl crate::offering::OfferingSource for BannerClient {
@@ -1783,5 +2085,75 @@ mod tests {
             credit_hour_high: None,
             restrictions: None,
         }
+    }
+
+    #[test]
+    fn parses_course_attributes_and_fees() {
+        let attr_html = "<table><tr><td>Attribute</td><td>Description</td></tr><tr><td>NDDI</td><td>Differences and Diversity</td></tr><tr><td>WI</td><td>Writing Intensive</td></tr></table>";
+        let attrs = super::course_attributes(attr_html);
+        assert_eq!(
+            attrs,
+            vec!["Differences and Diversity", "Writing Intensive"]
+        );
+
+        let no_attr_html = "<p>No Attribute information available.</p>";
+        assert!(super::course_attributes(no_attr_html).is_empty());
+
+        let fee_html = "<table><tr><td>Fee Type</td><td>Amount</td></tr><tr><td>Lab Fee</td><td>$75.00</td></tr></table>";
+        let fees = super::course_fees(fee_html);
+        assert_eq!(fees.len(), 1);
+        assert_eq!(fees[0].description, "Lab Fee");
+        assert_eq!(fees[0].amount.as_deref(), Some("$75.00"));
+
+        let no_fee_html = "<div>No fee information available for this course.</div>";
+        assert!(super::course_fees(no_fee_html).is_empty());
+    }
+
+    #[test]
+    fn description_strips_html_and_empty_notices() {
+        assert_eq!(
+            super::description("<p>Covers <b>recursion</b> and data structures.</p>"),
+            "Covers recursion and data structures."
+        );
+        assert_eq!(
+            super::description("<p>No course description available.</p>"),
+            ""
+        );
+        assert_eq!(super::description("   No description available   "), "");
+    }
+
+    #[test]
+    fn restrictions_parses_headings_and_empty_notices() {
+        let html = "<p>Must be enrolled in one of the following Levels:</p><p>Graduate</p><p>Cannot be enrolled in one of the following Colleges:</p><p>College of Professional Studies</p>";
+        let r = super::enrollment_restrictions(html).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].kind, RestrictionKind::Must);
+        assert_eq!(r[0].category, "Levels");
+        assert_eq!(r[0].values, vec!["Graduate"]);
+        assert_eq!(r[1].kind, RestrictionKind::Cannot);
+        assert_eq!(r[1].category, "Colleges");
+        assert_eq!(r[1].values, vec!["College of Professional Studies"]);
+
+        let no_restrictions = "<div>No restriction information available.</div>";
+        assert_eq!(
+            super::enrollment_restrictions(no_restrictions),
+            Some(vec![])
+        );
+
+        let not_restrictions = "<div>Welcome to Northeastern</div>";
+        assert_eq!(super::enrollment_restrictions(not_restrictions), None);
+    }
+
+    #[test]
+    fn catalog_page_url_builds_expected_endpoint() {
+        let key = CourseKey {
+            subject: "CS".into(),
+            number: "2500".into(),
+        };
+        let url = BannerClient::catalog_page_url("202710", &key);
+        assert_eq!(
+            url,
+            "https://bnrordsp.neu.edu/ssb-prod/bwckctlg.p_disp_course_detail?cat_term_in=202710&subj_code_in=CS&crse_numb_in=2500"
+        );
     }
 }

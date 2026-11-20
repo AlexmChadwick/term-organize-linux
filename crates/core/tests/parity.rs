@@ -1342,3 +1342,83 @@ fn substitutions_petitions_and_rebalance() {
         HashSet::from(["CS 4400".into(), "Electives".into()])
     );
 }
+
+#[test]
+fn parity_gap_3_course_details_and_email_filtering() {
+    use termorganize_core::banner::{
+        course_attributes, course_fees, description, enrollment_restrictions, BannerClient,
+    };
+    use termorganize_core::course_info::CourseInfo;
+    use termorganize_core::email::{is_northeastern_address, retain_northeastern_addresses};
+
+    // 1. Instructor email domain filtering: northeastern.edu and neu.edu kept, husky/lookalikes dropped
+    assert!(is_northeastern_address("instructor@northeastern.edu"));
+    assert!(is_northeastern_address("dean@neu.edu"));
+    assert!(!is_northeastern_address("student@husky.neu.edu"));
+    assert!(!is_northeastern_address(
+        "phish@northeastern.edu.phishing.com"
+    ));
+    assert!(!is_northeastern_address(
+        "attacker@northeastern.edu@evil.com"
+    ));
+    assert!(!is_northeastern_address("lookalike@fake-northeastern.edu"));
+    assert!(!is_northeastern_address("lookalike@neu.edu.fake.com"));
+    assert!(!is_northeastern_address("external@gmail.com"));
+
+    let mixed =
+        "prof@northeastern.edu student@husky.neu.edu dean@neu.edu spoof@northeastern.edu.co";
+    assert_eq!(
+        retain_northeastern_addresses(mixed).as_deref(),
+        Some("prof@northeastern.edu dean@neu.edu")
+    );
+
+    // 2. Course description and CourseInfo
+    let html_desc = "<p>Introduces the principles of <b>software engineering</b>.</p>";
+    let plain = description(html_desc);
+    assert_eq!(plain, "Introduces the principles of software engineering.");
+    assert_eq!(description("<p>No course description available.</p>"), "");
+    assert_eq!(description("No description available for this course"), "");
+
+    let key = CourseKey::parse("CS 3500").unwrap();
+    let info = CourseInfo::new(key.clone(), "Software Development", "202710", 1000.0)
+        .with_description(Some(plain.clone()));
+    assert_eq!(info.description.as_deref(), Some(plain.as_str()));
+
+    let json = serde_json::to_string(&info).expect("serialize course info");
+    let roundtrip: CourseInfo = serde_json::from_str(&json).expect("deserialize course info");
+    assert_eq!(info, roundtrip);
+
+    // 3. Catalog page URL
+    let url = BannerClient::catalog_page_url("202710", &key);
+    assert_eq!(
+        url,
+        "https://bnrordsp.neu.edu/ssb-prod/bwckctlg.p_disp_course_detail?cat_term_in=202710&subj_code_in=CS&crse_numb_in=3500"
+    );
+
+    // 4. Course attributes and fees parsing
+    let attr_html = "<table><tr><td>NDDI</td><td>Differences and Diversity</td></tr></table>";
+    assert_eq!(
+        course_attributes(attr_html),
+        vec!["Differences and Diversity"]
+    );
+    assert!(course_attributes("<div>No Attribute information available.</div>").is_empty());
+
+    let fee_html = "<table><tr><td>Lab Fee</td><td>$100.00</td></tr></table>";
+    let fees = course_fees(fee_html);
+    assert_eq!(fees.len(), 1);
+    assert_eq!(fees[0].description, "Lab Fee");
+    assert_eq!(fees[0].amount.as_deref(), Some("$100.00"));
+    assert!(course_fees("<p>No fee information available.</p>").is_empty());
+
+    // 5. Enrollment restrictions
+    let rest_html =
+        "<p>Must be enrolled in one of the following Colleges:</p><p>Khoury College</p>";
+    let restrictions = enrollment_restrictions(rest_html).expect("parsed restrictions");
+    assert_eq!(restrictions.len(), 1);
+    assert_eq!(restrictions[0].category, "Colleges");
+    assert_eq!(restrictions[0].values, vec!["Khoury College"]);
+    assert_eq!(
+        enrollment_restrictions("<p>No restriction information available.</p>"),
+        Some(vec![])
+    );
+}

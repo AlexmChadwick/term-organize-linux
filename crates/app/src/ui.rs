@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use termorganize_core::banner::{self, BannerClient};
 use termorganize_core::course_info::CourseInfo;
+use termorganize_core::course_page;
 use termorganize_core::degree_audit::{AuditStatus, DegreeAudit, DegreeCourseAttributes};
 use termorganize_core::degree_format;
 use termorganize_core::index::CatalogIndex;
@@ -119,6 +120,10 @@ struct Shell {
     course_loading: RefCell<HashSet<String>>,
     /// Term and course pairs already checked on the current window load.
     details_attempted: RefCell<HashSet<String>>,
+    /// Banner catalog answers for courses the term does not list, keyed by term and course.
+    lookups: RefCell<course_page::LookupBook>,
+    /// One worker that runs those lookups one course at a time.
+    lookup_queue: course_page::LookupQueue<gap::LookupJob>,
 }
 
 pub(crate) fn course_window_name(key: &CourseKey) -> String {
@@ -358,6 +363,8 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         user_monitor: None,
         course_loading: RefCell::new(HashSet::new()),
         details_attempted: RefCell::new(HashSet::new()),
+        lookups: RefCell::new(course_page::LookupBook::new()),
+        lookup_queue: gap::spawn_lookup_queue(),
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -1270,7 +1277,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
         )
     };
     let Some(course) = course else {
-        return gtk::Label::new(Some("That course isn’t in this term.")).upcast();
+        return gap::missing_course_page(shell, key, preview);
     };
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.set_margin_top(18);

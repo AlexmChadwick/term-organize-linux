@@ -15,10 +15,10 @@ pub struct AddressRedaction {
 
 pub fn is_northeastern_address(address: &str) -> bool {
     let address = address.trim().trim_end_matches('.');
-    let Some((_, domain)) = address.rsplit_once('@') else {
+    let Some((local, domain)) = address.rsplit_once('@') else {
         return false;
     };
-    if address[..address.len() - domain.len() - 1].is_empty() {
+    if local.is_empty() || local.contains('@') || local.contains(' ') {
         return false;
     }
     let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -185,7 +185,14 @@ fn email_spans(text: &str) -> Vec<(usize, usize)> {
             while end > index + 1 && matches!(bytes[end - 1], b'.' | b'-') {
                 end -= 1;
             }
-            if start < index && end > index + 1 && text[index + 1..end].contains('.') {
+            let valid_prev = start == 0 || bytes[start - 1] != b'@';
+            let valid_next = end >= bytes.len() || bytes[end] != b'@';
+            if valid_prev
+                && valid_next
+                && start < index
+                && end > index + 1
+                && text[index + 1..end].contains('.')
+            {
                 spans.push((start, end));
                 index = end;
                 continue;
@@ -231,7 +238,29 @@ mod tests {
         assert!(!is_northeastern_address("x@harvard.edu"));
         assert!(!is_northeastern_address("x@va.gov"));
         assert!(!is_northeastern_address("x@notnortheastern.edu"));
+        assert!(!is_northeastern_address("x@fake-northeastern.edu"));
+        assert!(!is_northeastern_address("x@northeastern.edu.cn"));
+        assert!(!is_northeastern_address("x@northeastern.edu.attacker.org"));
+        assert!(!is_northeastern_address("x@neu.edu.fake.com"));
+        assert!(!is_northeastern_address("x@khoury.northeastern.edu"));
+        assert!(!is_northeastern_address(
+            "attacker@northeastern.edu@evil.com"
+        ));
+        assert!(!is_northeastern_address("@northeastern.edu"));
+        assert!(!is_northeastern_address(""));
+        assert!(!is_northeastern_address("   "));
         assert!(!is_northeastern_address("not an email"));
+        assert_eq!(
+            retain_northeastern_addresses(
+                "prof@northeastern.edu student@husky.neu.edu evil@northeastern.edu.com dean@neu.edu"
+            )
+            .as_deref(),
+            Some("prof@northeastern.edu dean@neu.edu")
+        );
+        assert_eq!(
+            retain_northeastern_addresses("attacker@northeastern.edu@evil.com").as_deref(),
+            None
+        );
     }
 
     #[test]
