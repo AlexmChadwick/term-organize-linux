@@ -861,6 +861,15 @@ fn calendar_and_file_names_are_plan_hyphen_term() {
     assert_eq!(schedule::export_file_name("  ", "ics"), "Schedule.ics");
 }
 
+#[test]
+fn blank_plan_name_falls_back_to_the_term_name_alone() {
+    for plan in ["", "   ", " \t "] {
+        let name = schedule::calendar_name(plan, "Fall 2026");
+        assert_eq!(name, "Fall 2026");
+        assert_eq!(schedule::export_file_name(&name, "ics"), "Fall 2026.ics");
+    }
+}
+
 // ---- Line endings and folding ----
 
 /// No bare CR or LF anywhere: every CR is followed by LF and every LF follows a CR.
