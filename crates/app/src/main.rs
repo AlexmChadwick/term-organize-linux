@@ -52,10 +52,7 @@ pub fn load_index() -> Option<CatalogIndex> {
     }
     let available = archive::bundled_term_codes();
     let code = archive::launch_term_code(None, &available)?;
-    let path = archive::bundled_catalog_path_for(code)?;
-    let mut catalog = archive::read(&path).ok()?;
-    catalog.recompute_postreqs();
-    Some(CatalogIndex::build(catalog))
+    crate::ui::index_for_code(code)
 }
 
 fn print_search(text: &str) {

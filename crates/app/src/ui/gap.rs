@@ -285,9 +285,6 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
         state.data.preferences.selected_term_code = Some(code.clone());
         planlogic::clamp_saved_credits(&mut state.data, &index.catalog.courses);
         state.index = index;
-        shell_ref.restrictions_loading.borrow_mut().clear();
-        shell_ref.restrictions_attempted.borrow_mut().clear();
-        state.live_seats.clear();
         state.generated.clear();
         state.course = None;
         state.offering = OfferingHistory::empty();
@@ -299,88 +296,128 @@ fn install_index(shell: &Rc<RefCell<Shell>>, index: CatalogIndex) {
     refresh(shell);
 }
 
-pub(super) fn load_restrictions(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
-    let token = {
+pub(super) fn load_live_course(shell: &Rc<RefCell<Shell>>, key: &CourseKey, live: bool) {
+    let (term, token, mut catalog) = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        format!("{}|{}", state.index.catalog.term.code, key)
-    };
-    let (term, crns) = {
-        let shell_ref = shell.borrow();
-        if shell_ref.restrictions_loading.borrow().contains(&token)
-            || shell_ref.restrictions_attempted.borrow().contains(&token)
-        {
+        let term = state.index.catalog.term.code.clone();
+        let token = format!("{term}|{key}");
+        if shell_ref.course_loading.borrow().contains(&token) {
+            if live {
+                toast(
+                    shell,
+                    "A Banner request for this course is already in progress.",
+                );
+            }
             return;
         }
-        let state = shell_ref.state.borrow();
-        let crns: Vec<String> = state
-            .index
-            .sections_for(key)
-            .into_iter()
-            .filter(|section| section.restrictions.is_none())
-            .map(|section| section.crn)
-            .collect();
-        if crns.is_empty() {
-            return;
+        if !live {
+            if shell_ref.details_attempted.borrow().contains(&token) {
+                return;
+            }
+            let Some(course) = state.index.course(key) else {
+                return;
+            };
+            let needs_details = state.index.sections_for(key).iter().any(|section| {
+                !course.details_loaded
+                    || section.instructors.is_none()
+                    || section.restrictions.is_none()
+                    || (course.special_topics && section.description.is_none())
+            });
+            if !needs_details {
+                return;
+            }
+            shell_ref
+                .details_attempted
+                .borrow_mut()
+                .insert(token.clone());
         }
-        (state.index.catalog.term.code.clone(), crns)
+        shell_ref.course_loading.borrow_mut().insert(token.clone());
+        (term, token, state.index.catalog.clone())
     };
-    shell
-        .borrow()
-        .restrictions_loading
-        .borrow_mut()
-        .insert(token.clone());
+    if live {
+        toast(shell, "Asking Banner for current sections…");
+    }
     let (tx, rx) = std::sync::mpsc::channel();
+    let key = key.clone();
+    let worker_key = key.clone();
     std::thread::spawn(move || {
-        let result = BannerClient::default().fetch_section_restrictions(&term, &crns);
-        let _ = tx.send(result);
+        let client = BannerClient::default();
+        let result = if live {
+            client.refresh_course(&mut catalog, &worker_key, now_secs())
+        } else {
+            client
+                .load_course_details(&mut catalog, &worker_key)
+                .map(|()| true)
+        };
+        let _ = tx.send(result.map(|changed| changed.then_some(catalog)));
     });
     let shell = shell.clone();
-    let key = key.clone();
-    glib::timeout_add_local(Duration::from_millis(400), move || match rx.try_recv() {
-        Ok(result) => {
-            {
-                let shell_ref = shell.borrow();
-                shell_ref.restrictions_loading.borrow_mut().remove(&token);
-                shell_ref
-                    .restrictions_attempted
-                    .borrow_mut()
-                    .insert(token.clone());
-                if let Ok(updates) = result {
-                    if !updates.is_empty() {
-                        let mut state = shell_ref.state.borrow_mut();
-                        let mut catalog = state.index.catalog.clone();
-                        for section in &mut catalog.sections {
-                            if let Some((_, restrictions)) =
-                                updates.iter().find(|(crn, _)| crn == &section.crn)
-                            {
-                                section.restrictions = Some(restrictions.clone());
-                            }
-                        }
-                        let _ = catalog::save_cached(&catalog);
-                        state.index = CatalogIndex::build(catalog);
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Section request stopped".into())
+            }
+        };
+        shell.borrow().course_loading.borrow_mut().remove(&token);
+        if shell.borrow().state.borrow().index.catalog.term.code != term {
+            return glib::ControlFlow::Break;
+        }
+        match result {
+            Ok(Some(update)) => {
+                let saved = {
+                    let shell_ref = shell.borrow();
+                    let mut state = shell_ref.state.borrow_mut();
+                    state.index.with_course_refresh(&key, update).map(|index| {
+                        let saved = catalog::save_cached(&index.catalog);
+                        state.index = index;
+                        state.generated.clear();
+                        state.picked = 0;
+                        saved
+                    })
+                };
+                if let Some(saved) = saved {
+                    if live {
+                        shell
+                            .borrow()
+                            .details_attempted
+                            .borrow_mut()
+                            .insert(token.clone());
+                    }
+                    replace_course_window(&shell, &key);
+                    refresh(&shell);
+                    match saved {
+                        Err(error) => toast(
+                            &shell,
+                            &format!("Updated Banner data for this session. Could not save the catalog ({error})."),
+                        ),
+                        Ok(()) if live => toast(&shell, "Updated sections from Banner"),
+                        Ok(()) => {}
                     }
                 }
             }
-            refresh(&shell);
-            replace_course_window(&shell, &key);
-            glib::ControlFlow::Break
+            Ok(None) => toast(&shell, "Banner returned no sections. Showing cached data."),
+            Err(error) => toast(
+                &shell,
+                &format!("Could not load Banner data ({error}). Showing cached data."),
+            ),
         }
-        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-            let shell_ref = shell.borrow();
-            shell_ref.restrictions_loading.borrow_mut().remove(&token);
-            shell_ref
-                .restrictions_attempted
-                .borrow_mut()
-                .insert(token.clone());
-            glib::ControlFlow::Break
-        }
+        glib::ControlFlow::Break
     });
 }
 
 pub fn open_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
     remember_recent(shell, key);
+    {
+        let shell_ref = shell.borrow();
+        let state = shell_ref.state.borrow();
+        let token = format!("{}|{key}", state.index.catalog.term.code);
+        if !shell_ref.course_loading.borrow().contains(&token) {
+            shell_ref.details_attempted.borrow_mut().remove(&token);
+        }
+    }
     let page = course_page(shell, key, false);
     page.set_vexpand(true);
     let clamp = adw::Clamp::new();

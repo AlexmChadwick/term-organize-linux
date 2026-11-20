@@ -64,7 +64,6 @@ struct State {
     room_date: String,
     requirements: HashMap<Uuid, ProgramRequirements>,
     catalog_path: String,
-    live_seats: HashMap<String, (i32, i32, i32)>,
     offering: OfferingHistory,
     course_notes: HashMap<CourseKey, CourseInfo>,
     term_codes: Vec<String>,
@@ -116,10 +115,10 @@ struct Shell {
     /// Owns the `user.json` monitor. Dropping it would stop reload events.
     #[allow(dead_code)]
     user_monitor: Option<gio::FileMonitor>,
-    /// Course keys whose section restrictions are being fetched.
-    restrictions_loading: RefCell<HashSet<String>>,
-    /// Course keys already asked this session, so a miss does not retry immediately.
-    restrictions_attempted: RefCell<HashSet<String>>,
+    /// Term and course pairs with an in-flight Banner request.
+    course_loading: RefCell<HashSet<String>>,
+    /// Term and course pairs already checked on the current window load.
+    details_attempted: RefCell<HashSet<String>>,
 }
 
 pub(crate) fn course_window_name(key: &CourseKey) -> String {
@@ -263,7 +262,6 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         room_date: "2026-09-16".into(),
         requirements: HashMap::new(),
         catalog_path: termorganize_core::banner::DEFAULT_CATALOG_PATH.into(),
-        live_seats: HashMap::new(),
         offering: OfferingHistory::empty(),
         course_notes: HashMap::new(),
         term_codes: vec![],
@@ -358,8 +356,8 @@ fn present(app: &adw::Application, open: Option<String>, smoke: bool) {
         keep_focus: Cell::new(None),
         reload_pane_share: Cell::new(None),
         user_monitor: None,
-        restrictions_loading: RefCell::new(HashSet::new()),
-        restrictions_attempted: RefCell::new(HashSet::new()),
+        course_loading: RefCell::new(HashSet::new()),
+        details_attempted: RefCell::new(HashSet::new()),
     }));
     gap::install_css();
     gap::install_term_menu(&shell, smoke);
@@ -1286,11 +1284,11 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
         let key = key.clone();
         move |_| save_course(&shell, &key)
     });
-    let refresh_seats = gtk::Button::with_label("Refresh seats");
-    refresh_seats.connect_clicked({
+    let refresh_sections = gtk::Button::with_label("Refresh sections");
+    refresh_sections.connect_clicked({
         let shell = shell.clone();
         let key = key.clone();
-        move |_| refresh_live_seats(&shell, &key)
+        move |_| gap::load_live_course(&shell, &key, true)
     });
     let add = gtk::Button::with_label("Add to schedule");
     add.connect_clicked({
@@ -1300,7 +1298,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
     });
     bar.append(&save);
     bar.append(&add);
-    bar.append(&refresh_seats);
+    bar.append(&refresh_sections);
     root.append(&bar);
     let heading = gtk::Label::new(Some(&format!("{}  {}", course.code(), course.title)));
     heading.add_css_class("title-1");
@@ -1360,7 +1358,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
     page.append(&header);
     page.append(&section_list(shell, &course.title, &sections));
     if !preview {
-        gap::load_restrictions(shell, key);
+        gap::load_live_course(shell, key, false);
     }
     page.upcast()
 }
@@ -1386,26 +1384,15 @@ fn section_list(
     }
     let lines: Vec<SectionLine> = sections
         .iter()
-        .map(|section| {
-            let (seats_n, wait_n) = shell
-                .borrow()
-                .state
-                .borrow()
-                .live_seats
-                .get(&section.crn)
-                .copied()
-                .map(|(seats, wait, _)| (seats, wait))
-                .unwrap_or((section.seats_remaining, section.waitlist_remaining));
-            SectionLine {
-                seats: seat_wait_label(seats_n, wait_n),
-                summary: format!(
-                    "{} · {} · {}",
-                    section.schedule_summary(),
-                    section.instructor_label(),
-                    section.campus
-                ),
-                section: section.clone(),
-            }
+        .map(|section| SectionLine {
+            seats: seat_wait_label(section.seats_remaining, section.waitlist_remaining),
+            summary: format!(
+                "{} · {} · {}",
+                section.schedule_summary(),
+                section.instructor_label(),
+                section.campus
+            ),
+            section: section.clone(),
         })
         .collect();
     let by_crn: Rc<HashMap<String, SectionLine>> = Rc::new(
@@ -1586,6 +1573,40 @@ fn fill_section_details(
     summary.set_margin_end(12);
     summary.set_wrap(true);
     host.append(&summary);
+    let section = &line.section;
+    let enrollment = dim_label(&format!(
+        "Enrollment {} / {} · Waitlist {} / {}",
+        section.enrollment,
+        section.seat_capacity,
+        section.waitlist_count,
+        section.waitlist_capacity
+    ));
+    enrollment.set_margin_start(12);
+    host.append(&enrollment);
+    if let Some(description) = section
+        .description
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        let label = dim_label(description);
+        label.set_wrap(true);
+        label.set_margin_start(12);
+        host.append(&label);
+    }
+    for restriction in section.restrictions.iter().flatten() {
+        let action = match restriction.kind {
+            RestrictionKind::Must => "Must",
+            RestrictionKind::Cannot => "Cannot",
+        };
+        let label = dim_label(&format!(
+            "{action} be enrolled · {} · {}",
+            restriction.category,
+            restriction.values.join(", ")
+        ));
+        label.set_wrap(true);
+        label.set_margin_start(12);
+        host.append(&label);
+    }
     if line.section.cps_only() == Some(true) {
         let note = dim_label(CPS_ONLY_NOTE);
         note.set_margin_start(12);
@@ -5376,55 +5397,6 @@ fn replace_course_window(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
         clamp.set_child(Some(&page));
         window.set_content(Some(&clamp));
     }
-}
-
-fn refresh_live_seats(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
-    let term = {
-        let shell_ref = shell.borrow();
-        let state = shell_ref.state.borrow();
-        state.index.catalog.term.code.clone()
-    };
-    toast(shell, "Asking Banner for current seats…");
-    let key = key.clone();
-    let subject = key.subject.clone();
-    let number = key.number.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(BannerClient::default().live_seats(&term, &subject, &number));
-    });
-    let shell = shell.clone();
-    glib::timeout_add_local(Duration::from_millis(200), move || match rx.try_recv() {
-        Ok(Ok(seats)) => {
-            let n = seats.len();
-            {
-                let shell = shell.borrow();
-                let mut state = shell.state.borrow_mut();
-                for seat in seats {
-                    state.live_seats.insert(
-                        seat.crn,
-                        (
-                            seat.seats_remaining,
-                            seat.waitlist_remaining,
-                            seat.seat_capacity,
-                        ),
-                    );
-                }
-            }
-            toast(&shell, &format!("Updated {n} sections from Banner"));
-            replace_course_window(&shell, &key);
-            refresh(&shell);
-            glib::ControlFlow::Break
-        }
-        Ok(Err(error)) => {
-            toast(
-                &shell,
-                &format!("Banner unreachable ({error}). Showing the snapshot."),
-            );
-            glib::ControlFlow::Break
-        }
-        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-    });
 }
 
 fn up_next_summary(state: &State) -> String {

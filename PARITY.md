@@ -35,7 +35,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 | --- | --- | --- |
 | Course page, credits, NUpath, description | Course page | ported |
 | Prerequisite and corequisite trees | `outline.rs` `RequisiteLayout`, drawn as chips (done, grey if the term does not list the course, click opens that course). Spoken description underneath | ported |
-| Live sections, seats, waitlists | Snapshot sections always. “Refresh seats” calls `BannerClient::live_seats` (`term/search` then `searchResults/searchResults`) and overlays CRN counts. Banner’s other detail endpoints (description HTML, faculty meetings, cross-lists) are parsed when HTML is in hand (`banner.rs`) but the window does not fetch each one | partial |
+| Live sections, seats, waitlists | “Refresh sections” searches Banner by term and exact course, merges sections into the shared search and schedule index, and saves the term catalog. Cross-list CRNs are fetched and cross-list seat totals take precedence. Empty results, wrong-term results, and errors preserve cached sections. Course windows fetch missing faculty and restrictions, and load description, requisites and catalog details for stubs. Failed detail requests preserve cached values. | ported |
 | `BannerClient.swift` full session pool and term scrape | `fetch_all_sections` probes `totalCount`, then uses up to four search sessions. Each session fetches the pages `page % sessions`, one request at a time. `perform` retries HTTP 429, 5xx, and transport errors four times: delay starts at 1s, doubles, and stops at 20s, plus 0–0.5s of jitter. Sections merge through `catalog::merge`. The app ships `data/catalog/term-202710.catalog` and `data/catalog/term-202730.catalog`. A fresh launch opens the newest bundled term | ported |
 | Save, recents, watch a section, copy CRN | Those actions | ported |
 
@@ -75,7 +75,7 @@ Status words: **ported** (same behavior, covered by tests or the window), **subs
 
 | Swift | Linux | Status |
 | --- | --- | --- |
-| Seat alerts every 15 minutes while open | In-app timer (`seat_check_minutes`, default 15) and `notify-send`. Compares against the snapshot, plus any seats refreshed earlier in the session | ported |
+| Seat alerts every 15 minutes while open | In-app timer (`seat_check_minutes`, default 15) and `notify-send`. Queries Banner for watched sections, then compares against the previous seat check | ported |
 | Background refresh | Portal `org.freedesktop.portal.Background.RequestBackground` on startup, and `packaging/termorganize-seat-watch.timer` running `termorganize --seat-watch`. Not a direct BackgroundTasks clone | substituted |
 | Free rooms timeline | Cairo bars from 7:00 AM to 10:00 PM (`rooms::Moment::FIRST_CLASS` through `LAST_CLASS`). Green is free, dimmer before the current time when the date is today. Gray blocks are classes, labeled with the course. Day, date, and building search stay | ported |
 | Professors | `professors.rs` and a professor page | ported |
