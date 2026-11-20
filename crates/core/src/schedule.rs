@@ -2833,8 +2833,63 @@ pub fn no_results_headline(diagnostics: &ScheduleDiagnostics, has_suggestions: b
     "These courses can’t all be taken together with the current rules.".into()
 }
 
-/// `.ics` text for the chosen sections. Dates come from each meeting; times are America/New_York.
+/// The calendar text plus what the export left out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IcsExport {
+    pub text: String,
+    pub weekly_meetings: usize,
+    pub final_exams: usize,
+    /// Timed meetings without a usable date window or a weekday inside it.
+    pub skipped_meetings: usize,
+    /// Final exams whose date is not a real calendar date.
+    pub skipped_finals: usize,
+}
+
+/// The calendar and file label for a plan: `<plan> - <term>`.
+pub fn calendar_name(plan_name: &str, term_name: &str) -> String {
+    format!("{plan_name} - {term_name}")
+}
+
+/// A file name for `name` with path-hostile characters replaced, as the Swift exporter does.
+pub fn export_file_name(name: &str, extension: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim();
+    format!(
+        "{}.{extension}",
+        if cleaned.is_empty() {
+            "Schedule"
+        } else {
+            cleaned
+        }
+    )
+}
+
+/// `.ics` text for the chosen sections, with section titles where no catalog is at hand.
 pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
+    ics_export(plan_id, name, sections, None).text
+}
+
+/// `.ics` text for the chosen sections. Dates come from each meeting; times are America/New_York.
+/// Course titles come from `index` when it lists the course, else from the section.
+pub fn ics_export(
+    plan_id: &str,
+    name: &str,
+    sections: &[CourseSection],
+    index: Option<&crate::index::CatalogIndex>,
+) -> IcsExport {
+    let mut weekly_meetings = 0;
+    let mut final_exams = 0;
+    let mut skipped_meetings = 0;
+    let mut skipped_finals = 0;
     let mut lines = vec![
         "BEGIN:VCALENDAR".into(),
         "VERSION:2.0".into(),
@@ -2865,34 +2920,43 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
     let stamp = utc_now();
     let codes = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
     for section in sections {
+        let course_title = index
+            .and_then(|index| index.course(&section.course_key()))
+            .map(|course| course.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| section.title.clone());
+        let mut notes = vec![
+            course_title,
+            format!("CRN {} \u{b7} {}", section.crn, section_title(section)),
+        ];
+        let instructors = section.instructor_label();
+        if !instructors.is_empty()
+            && instructors != "Instructor unavailable"
+            && instructors != "TBA"
+        {
+            notes.push(format!("Instructor: {instructors}"));
+        }
+        notes.push("Added from Term Organize".into());
+
         for (n, meeting) in section.weekly_meetings().into_iter().enumerate() {
             let (Some(start), Some(end)) = (meeting.start, meeting.end) else {
                 continue;
             };
-            let start_date_str = meeting
+            // Both dates must be real calendar dates and some listed weekday must fall
+            // inside the window; otherwise the meeting is skipped, never guessed.
+            let window = meeting
                 .start_date
-                .clone()
-                .unwrap_or_else(|| "2026-09-09".into());
-            // A weekly rule needs a known end date; without one the event is skipped
-            // rather than emitted unbounded.
-            let Some(last) = meeting
-                .end_date
-                .clone()
-                .filter(|date| parse_date(date).is_some())
-            else {
+                .as_deref()
+                .and_then(parse_date)
+                .zip(meeting.end_date.as_deref().and_then(parse_date));
+            let Some((first, last)) = window.and_then(|(from, to)| {
+                first_meeting_date(from, to, meeting.days).map(|first| (first, to))
+            }) else {
+                skipped_meetings += 1;
                 continue;
             };
-            let Some(first) =
-                first_meeting_date(&start_date_str, &last, meeting.days).or_else(|| {
-                    if meeting.days.is_empty() {
-                        None
-                    } else {
-                        Some(start_date_str)
-                    }
-                })
-            else {
-                continue;
-            };
+            weekly_meetings += 1;
+            let first_stamp = format!("{:04}{:02}{:02}", first.0, first.1, first.2);
             lines.push("BEGIN:VEVENT".into());
             lines.push(format!(
                 "UID:{}-{}-{n}@neuclasssearch",
@@ -2901,13 +2965,11 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
             ));
             lines.push(format!("DTSTAMP:{stamp}"));
             lines.push(format!(
-                "DTSTART;TZID=America/New_York:{}T{}",
-                first.replace('-', ""),
+                "DTSTART;TZID=America/New_York:{first_stamp}T{}",
                 hhmm(start)
             ));
             lines.push(format!(
-                "DTEND;TZID=America/New_York:{}T{}",
-                first.replace('-', ""),
+                "DTEND;TZID=America/New_York:{first_stamp}T{}",
                 hhmm(end)
             ));
             let days = meeting
@@ -2919,102 +2981,86 @@ pub fn ics(plan_id: &str, name: &str, sections: &[CourseSection]) -> String {
                 .join(",");
             lines.push(format!(
                 "RRULE:FREQ=WEEKLY;BYDAY={days};UNTIL={}",
-                until_stamp(&last)
+                until_stamp(last)
             ));
             lines.push(format!(
                 "SUMMARY:{}",
-                escape_ics(&format!("{} {}", section.course_key(), section.title))
+                escape_ics(&format!("{} {}", section.course_key(), section.class_type))
             ));
-            let location = if meeting.is_online() || section.is_online() {
-                Some("Online".into())
-            } else {
-                let label = meeting.long_location_label();
-                if label == "Location TBA" {
-                    None
-                } else {
-                    Some(label)
-                }
-            };
-            if let Some(location) = location {
+            if let Some(location) = event_location(meeting, section) {
                 lines.push(format!("LOCATION:{}", escape_ics(&location)));
             }
-            lines.push(format!(
-                "DESCRIPTION:{}",
-                escape_ics(&format!("CRN {}", section.crn))
-            ));
+            lines.push(format!("DESCRIPTION:{}", escape_ics(&notes.join("\n"))));
             lines.push("TRANSP:OPAQUE".into());
             lines.push("END:VEVENT".into());
         }
 
         if let Some(exam) = section.final_exam() {
-            if let Some(start_date) = &exam.start_date {
-                if let Some((y, m, d)) = parse_date(start_date) {
-                    lines.push("BEGIN:VEVENT".into());
-                    lines.push(format!(
-                        "UID:{}-{}-final@neuclasssearch",
-                        plan_id.to_ascii_lowercase(),
-                        section.crn
-                    ));
-                    lines.push(format!("DTSTAMP:{stamp}"));
-                    if let (Some(start), Some(end)) = (exam.start, exam.end) {
-                        lines.push(format!(
-                            "DTSTART;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
-                            hhmm(start)
-                        ));
-                        lines.push(format!(
-                            "DTEND;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
-                            hhmm(end)
-                        ));
-                    } else {
-                        let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
-                        lines.push(format!("DTSTART;VALUE=DATE:{y:04}{m:02}{d:02}"));
-                        lines.push(format!("DTEND;VALUE=DATE:{ny:04}{nm:02}{nd:02}"));
-                    }
-                    lines.push(format!(
-                        "SUMMARY:{}",
-                        escape_ics(&format!("{} Final Exam", section.course_key()))
-                    ));
-                    let location = if exam.is_online() || section.is_online() {
-                        Some("Online".into())
-                    } else {
-                        let label = exam.long_location_label();
-                        if label == "Location TBA" {
-                            None
-                        } else {
-                            Some(label)
-                        }
-                    };
-                    if let Some(location) = location {
-                        lines.push(format!("LOCATION:{}", escape_ics(&location)));
-                    }
-                    let mut desc = vec!["Final exam".to_string()];
-                    if !section.title.is_empty() {
-                        desc.push(section.title.clone());
-                    }
-                    let section_label = section_title(section);
-                    desc.push(format!("CRN {} · {}", section.crn, section_label));
-                    let instructors = section.instructor_label();
-                    if !instructors.is_empty()
-                        && instructors != "Instructor unavailable"
-                        && instructors != "TBA"
-                    {
-                        desc.push(format!("Instructor: {instructors}"));
-                    }
-                    desc.push("Added from Term Organize".into());
-                    lines.push(format!("DESCRIPTION:{}", escape_ics(&desc.join("\n"))));
-                    lines.push("TRANSP:OPAQUE".into());
-                    lines.push("END:VEVENT".into());
-                }
+            let Some((y, m, d)) = exam.start_date.as_deref().and_then(parse_date) else {
+                skipped_finals += 1;
+                continue;
+            };
+            final_exams += 1;
+            lines.push("BEGIN:VEVENT".into());
+            lines.push(format!(
+                "UID:{}-{}-final@neuclasssearch",
+                plan_id.to_ascii_lowercase(),
+                section.crn
+            ));
+            lines.push(format!("DTSTAMP:{stamp}"));
+            if let (Some(start), Some(end)) = (exam.start, exam.end) {
+                lines.push(format!(
+                    "DTSTART;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
+                    hhmm(start)
+                ));
+                lines.push(format!(
+                    "DTEND;TZID=America/New_York:{y:04}{m:02}{d:02}T{}",
+                    hhmm(end)
+                ));
+            } else {
+                let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
+                lines.push(format!("DTSTART;VALUE=DATE:{y:04}{m:02}{d:02}"));
+                lines.push(format!("DTEND;VALUE=DATE:{ny:04}{nm:02}{nd:02}"));
             }
+            lines.push(format!(
+                "SUMMARY:{}",
+                escape_ics(&format!("{} Final Exam", section.course_key()))
+            ));
+            if let Some(location) = event_location(exam, section) {
+                lines.push(format!("LOCATION:{}", escape_ics(&location)));
+            }
+            let mut exam_notes = vec!["Final exam".to_string()];
+            exam_notes.extend(notes.iter().cloned());
+            lines.push(format!(
+                "DESCRIPTION:{}",
+                escape_ics(&exam_notes.join("\n"))
+            ));
+            lines.push("TRANSP:OPAQUE".into());
+            lines.push("END:VEVENT".into());
         }
     }
     lines.push("END:VCALENDAR".into());
-    lines
+    let text = lines
         .into_iter()
         .map(fold_ics)
         .collect::<Vec<_>>()
         .join("\r\n")
-        + "\r\n"
+        + "\r\n";
+    IcsExport {
+        text,
+        weekly_meetings,
+        final_exams,
+        skipped_meetings,
+        skipped_finals,
+    }
+}
+
+fn event_location(meeting: &Meeting, section: &CourseSection) -> Option<String> {
+    if meeting.is_online() || section.is_online() {
+        return Some("Online".into());
+    }
+    let label = meeting.long_location_label();
+    (label != "Location TBA").then_some(label)
 }
 
 fn hhmm(minutes: i32) -> String {
@@ -3025,10 +3071,12 @@ fn hhmm(minutes: i32) -> String {
     )
 }
 fn escape_ics(text: &str) -> String {
-    text.replace('\\', "\\\\")
+    // CRLF and a lone CR both become LF first, so no bare CR reaches the file.
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\\', "\\\\")
         .replace(';', "\\;")
         .replace(',', "\\,")
-        .replace("\r\n", "\\n")
         .replace('\n', "\\n")
 }
 fn fold_ics(line: String) -> String {
@@ -3066,27 +3114,33 @@ fn utc_now() -> String {
         rem % 60
     )
 }
+/// A real Gregorian date from `YYYY-MM-DD` or `YYYYMMDD`; anything else is `None`.
 fn parse_date(s: &str) -> Option<(i32, i32, i32)> {
     let s = s.trim();
-    if s.contains('-') {
+    let (y, m, d) = if s.contains('-') {
         let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() == 3 {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: i32 = parts[1].parse().ok()?;
-            let d: i32 = parts[2].parse().ok()?;
-            if (1..=12).contains(&m) && (1..=31).contains(&d) {
-                return Some((y, m, d));
-            }
+        if parts.len() != 3 || parts.iter().any(|p| !p.chars().all(|c| c.is_ascii_digit())) {
+            return None;
         }
+        (parts[0], parts[1], parts[2])
     } else if s.len() == 8 && s.chars().all(|c| c.is_ascii_digit()) {
-        let y: i32 = s[0..4].parse().ok()?;
-        let m: i32 = s[4..6].parse().ok()?;
-        let d: i32 = s[6..8].parse().ok()?;
-        if (1..=12).contains(&m) && (1..=31).contains(&d) {
-            return Some((y, m, d));
-        }
+        (&s[0..4], &s[4..6], &s[6..8])
+    } else {
+        return None;
+    };
+    let (y, m, d): (i32, i32, i32) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
+        return None;
     }
-    None
+    Some((y, m, d))
+}
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        _ => 28,
+    }
 }
 fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
     let mut y = i64::from(year);
@@ -3114,35 +3168,25 @@ fn civil_from_days(z: i64) -> (i32, i32, i32) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
-fn first_meeting_date(start_date: &str, end_date: &str, days: DaySet) -> Option<String> {
-    let (mut y, mut m, mut d) = parse_date(start_date)?;
-    let end_limit = if let Some((ey, em, ed)) = parse_date(end_date) {
-        days_from_civil(ey, em, ed)
-    } else {
-        i64::MAX
-    };
-    for _ in 0..7 {
-        let cur = days_from_civil(y, m, d);
-        if cur > end_limit {
-            return None;
-        }
-        let w = civil_weekday(y, m, d);
-        if days.contains_day(w) {
-            return Some(format!("{y:04}-{m:02}-{d:02}"));
-        }
-        let (ny, nm, nd) = civil_from_days(cur + 1);
-        y = ny;
-        m = nm;
-        d = nd;
+/// The first day on or after `from` that is one of `days`, if it is not after `to`.
+fn first_meeting_date(
+    from: (i32, i32, i32),
+    to: (i32, i32, i32),
+    days: DaySet,
+) -> Option<(i32, i32, i32)> {
+    if days.is_empty() {
+        return None;
     }
-    None
+    let end_limit = days_from_civil(to.0, to.1, to.2);
+    let first = days_from_civil(from.0, from.1, from.2);
+    (first..first + 7)
+        .take_while(|day| *day <= end_limit)
+        .map(civil_from_days)
+        .find(|(y, m, d)| days.contains_day(civil_weekday(*y, *m, *d)))
 }
-fn until_stamp(date: &str) -> String {
-    let Some((y, m, d)) = parse_date(date) else {
-        return format!("{}T235959Z", date.replace('-', ""));
-    };
-    let offset = if is_edt(y, m, d) { 4 } else { 5 };
-    let hour = offset - 1;
+/// The end of `last` (23:59:59 New York) in UTC, as RFC 5545 needs for a zoned start.
+fn until_stamp((y, m, d): (i32, i32, i32)) -> String {
+    let hour = if is_edt(y, m, d) { 3 } else { 4 };
     let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
     format!("{ny:04}{nm:02}{nd:02}T{hour:02}5959Z")
 }

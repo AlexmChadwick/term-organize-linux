@@ -3814,31 +3814,40 @@ fn copy_crns(shell: &Rc<RefCell<Shell>>) {
 }
 
 fn export_ics(shell: &Rc<RefCell<Shell>>) {
-    let (body, name) = {
+    let exported = {
         let shell_ref = shell.borrow();
         let state = shell_ref.state.borrow();
-        let Some(schedule) = state.generated.get(state.picked) else {
-            drop(state);
-            drop(shell_ref);
-            toast(shell, "Generate a schedule first");
-            return;
-        };
-        let id = current_plan_id(&state)
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "plan".into());
-        let name = current_plan_id(&state)
-            .and_then(|id| {
-                state
-                    .data
-                    .plans
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.name.clone())
-            })
-            .unwrap_or_else(|| "Schedule".into());
-        (schedule::ics(&id, &name, &schedule.sections), name)
+        let schedule = state.generated.get(state.picked);
+        let plan = current_plan_id(&state)
+            .and_then(|id| state.data.plans.iter().find(|p| p.id == id).cloned());
+        match (schedule, plan) {
+            (Some(schedule), Some(plan)) => {
+                let name = schedule::calendar_name(&plan.name, &state.index.catalog.term.name());
+                let export = schedule::ics_export(
+                    &plan.id.to_string(),
+                    &name,
+                    &schedule.sections,
+                    Some(&state.index),
+                );
+                Some((export, name))
+            }
+            _ => None,
+        }
     };
-    save_text(shell, &format!("{name}.ics"), &body, "Calendar saved");
+    let Some((export, name)) = exported else {
+        toast(shell, "Generate a schedule from a saved plan first");
+        return;
+    };
+    let message = match export.skipped_meetings + export.skipped_finals {
+        0 => "Calendar saved".to_string(),
+        n => format!("Calendar saved. {n} without usable dates left out"),
+    };
+    save_text(
+        shell,
+        &schedule::export_file_name(&name, "ics"),
+        &export.text,
+        &message,
+    );
 }
 
 fn export_png(shell: &Rc<RefCell<Shell>>) {
