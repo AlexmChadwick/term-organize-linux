@@ -201,11 +201,7 @@ pub fn compare(
             next.push(kept);
             continue;
         };
-        let seats = if section.is_open() {
-            section.seats_remaining
-        } else {
-            0
-        };
+        let seats = section.open_seats();
         let wait = section.waitlist_remaining;
         let seat_alert = item.last_seats_remaining <= 0 && seats > 0;
         let wait_alert = item.notify_on_waitlist

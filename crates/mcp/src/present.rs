@@ -103,7 +103,7 @@ pub fn section_json(section: &CourseSection) -> Value {
         "times": times_label(section),
         "location": location_label(section),
         "instructors": instructors,
-        "seats_remaining": section.seats_remaining,
+        "seats_remaining": section.open_seats(),
         "seat_capacity": section.seat_capacity,
         "cps_only": json_flag(section.cps_only()),
     })
