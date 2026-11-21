@@ -252,6 +252,7 @@ fn is_domain_delimiter(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::archive;
+    use regex::Regex;
 
     #[test]
     fn mixed_banner_field_keeps_northeastern_addresses() {
@@ -414,91 +415,257 @@ mod tests {
         assert_eq!(value["text"], ". ok@neu.edu");
     }
 
-    /// Problems found in an unsanitized catalog value. Email fields must hold
-    /// only complete allowed tokens. Every string is scanned for literal and
-    /// `[at]`/`[dot]` style addresses.
-    fn raw_violations(value: &Value, path: &str, out: &mut Vec<String>) {
+    // Raw-file oracle. It shares no code with the runtime validator or
+    // extractor: its own domain check, tokenizer, and normalization.
+
+    fn oracle_allowed(candidate: &str) -> bool {
+        let Some((local, domain)) = candidate.rsplit_once('@') else {
+            return false;
+        };
+        if local.is_empty() || local.contains(char::is_whitespace) || local.contains('@') {
+            return false;
+        }
+        if !domain.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+            return false;
+        }
+        let domain = domain.to_ascii_lowercase();
+        domain == "northeastern.edu" || domain == "neu.edu"
+    }
+
+    fn unescape_html(text: &str) -> String {
+        static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r"(?i)&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));").unwrap()
+        });
+        PATTERN
+            .replace_all(text, |caps: &regex::Captures| {
+                let whole = caps[0].to_string();
+                if let Some(code) = caps
+                    .get(1)
+                    .and_then(|m| m.as_str().parse::<u32>().ok())
+                    .or_else(|| {
+                        caps.get(2)
+                            .and_then(|m| u32::from_str_radix(m.as_str(), 16).ok())
+                    })
+                {
+                    return char::from_u32(code).map_or(whole, String::from);
+                }
+                match caps.get(3).map(|m| m.as_str().to_ascii_lowercase()) {
+                    Some(name) => match name.as_str() {
+                        "amp" => "&".into(),
+                        "lt" => "<".into(),
+                        "gt" => ">".into(),
+                        "quot" => "\"".into(),
+                        "apos" => "'".into(),
+                        "commat" => "@".into(),
+                        "period" => ".".into(),
+                        "nbsp" => " ".into(),
+                        _ => whole,
+                    },
+                    None => whole,
+                }
+            })
+            .into_owned()
+    }
+
+    fn percent_decode(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut raw = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|pair| std::str::from_utf8(pair).ok())
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+            match (bytes[i], hex) {
+                (b'%', Some(byte)) => {
+                    raw.push(byte);
+                    i += 3;
+                }
+                (byte, _) => {
+                    raw.push(byte);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(raw).unwrap_or_else(|_| text.to_string())
+    }
+
+    /// Decode layers until stable (bounded), then NFKC, so entity, percent and
+    /// fullwidth forms are scanned as plain text.
+    fn canonical_text(text: &str) -> String {
+        let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+        let mut current = text.to_string();
+        for _ in 0..4 {
+            let decoded = percent_decode(&unescape_html(&current));
+            let next = nfkc.normalize(&decoded).into_owned();
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
+    fn oracle_candidates(text: &str) -> Vec<String> {
+        static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r#"[^\s@<>,;"'()\[\]]+@[^\s@<>,;"'()\[\]]+"#).unwrap()
+        });
+        PATTERN
+            .find_iter(text)
+            .map(|m| m.as_str().to_string())
+            .collect()
+    }
+
+    fn looks_obfuscated(text: &str) -> bool {
+        static BRACKETED: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"(?i)[\[({]\s*(?:at|dot)\s*[\])}]").unwrap());
+        static SPACED: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r"(?i)\bat\s+[\w-]+\s+dot\s+[a-z]{2,}").unwrap()
+        });
+        static AT_HOST: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"(?i)\w\s+at\s+(\S*)").unwrap());
+        static HOST: std::sync::LazyLock<Regex> =
+            std::sync::LazyLock::new(|| Regex::new(r"(?i)^[\w-]+\.[a-z]{2,}\b").unwrap());
+        static DOT_TLD: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r"(?i)\w\s+dot\s+(?:edu|com|org|net|gov|io)\b").unwrap()
+        });
+        BRACKETED.is_match(text)
+            || SPACED.is_match(text)
+            || DOT_TLD.is_match(text)
+            || AT_HOST
+                .captures_iter(text)
+                .any(|c| !c[1].contains('@') && HOST.is_match(&c[1]))
+    }
+
+    /// Problems found in an unsanitized catalog value.
+    fn raw_violations(value: &Value, key: &str, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
-                for (key, child) in map {
-                    let here = format!("{path}.{key}");
-                    if is_email_key(key) {
-                        if let Value::String(text) = child {
-                            for token in
-                                text.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-                            {
-                                if !token.is_empty() && !is_northeastern_address(token) {
-                                    out.push(format!("{here}: email token {token:?}"));
-                                }
-                            }
-                        }
-                    }
-                    raw_violations(child, &here, out);
+                for (name, child) in map {
+                    raw_violations(child, name, out);
                 }
             }
             Value::Array(items) => {
-                for (i, item) in items.iter().enumerate() {
-                    raw_violations(item, &format!("{path}[{i}]"), out);
+                for item in items {
+                    raw_violations(item, key, out);
+                }
+            }
+            Value::String(text) if key == "email" => {
+                // Strict: no leading or trailing whitespace, exactly one space
+                // between addresses.
+                for part in text.split(' ') {
+                    if !oracle_allowed(part) {
+                        out.push(format!("email field: {part:?} in {text:?}"));
+                    }
                 }
             }
             Value::String(text) => {
-                for address in prose_addresses_in(text) {
-                    if !is_northeastern_address(address) {
-                        out.push(format!("{path}: address {address:?}"));
+                let text = canonical_text(text);
+                // One sentence-ending period is punctuation; the rest must pass.
+                for part in oracle_candidates(&text) {
+                    let bare = part.strip_prefix("mailto:").unwrap_or(&part);
+                    let bare = bare.strip_suffix('.').unwrap_or(bare);
+                    if !oracle_allowed(bare) {
+                        out.push(format!("{key}: {part}"));
                     }
                 }
-                let plain = deobfuscate(text);
-                for address in prose_addresses_in(&plain) {
-                    if !is_northeastern_address(address) {
-                        out.push(format!("{path}: obfuscated address {address:?}"));
-                    }
+                if looks_obfuscated(&text) {
+                    out.push(format!("{key}: obfuscated {text:?}"));
                 }
             }
             _ => {}
         }
     }
 
-    fn deobfuscate(text: &str) -> String {
-        let mut out = text.to_ascii_lowercase();
-        for (tag, plain) in [("at", "@"), ("dot", ".")] {
-            for (open, close) in [("[", "]"), ("(", ")"), ("{", "}")] {
-                let tag = format!("{open}{tag}{close}");
-                out = out.replace(&format!(" {tag} "), plain).replace(&tag, plain);
-            }
-        }
+    fn violations(value: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        raw_violations(value, "", &mut out);
         out
     }
 
-    fn violations(value: &Value) -> Vec<String> {
-        let mut out = Vec::new();
-        raw_violations(value, "$", &mut out);
-        out
+    fn record(email: &str, description: &str) -> Value {
+        serde_json::json!({"sections": [{"instructors": [{"name": "X", "email": email}], "description": description}]})
+    }
+
+    #[test]
+    fn raw_check_accepts_allowed_text() {
+        assert!(violations(&record(
+            "A.b+c!d@Northeastern.EDU neu@neu.edu",
+            "Write info@northeastern.edu."
+        ))
+        .is_empty());
+        assert!(violations(&record(
+            "a@neu.edu",
+            "Meets at the library. Ask at the desk."
+        ))
+        .is_empty());
+        assert!(violations(&record(
+            "a@neu.edu",
+            "jo&#64;neu.edu and jo%40northeastern.edu."
+        ))
+        .is_empty());
     }
 
     #[test]
     fn raw_check_flags_mutations() {
-        assert!(
-            violations(&serde_json::json!({"email": "a@neu.edu b@northeastern.edu"})).is_empty()
-        );
         for bad in [
             "a@husky.neu.edu",
             "a@gmail.com",
             "a@northeastern.edu..",
             "a@neu.eduX",
             "a@neu.edu\u{e9}",
+            "a@neu.edu\u{200b}",
             "a [at] gmail [dot] com",
             "a(at)gmail(dot)com",
             "a{AT}yahoo{DOT}com",
             "a[at]husky[dot]neu[dot]edu",
         ] {
-            let in_email = serde_json::json!({"sections": [{"email": bad}]});
-            assert!(!violations(&in_email).is_empty(), "email field: {bad}");
-            let in_prose = serde_json::json!({"description": format!("Contact {bad} soon")});
-            assert!(!violations(&in_prose).is_empty(), "prose: {bad}");
+            assert!(
+                !violations(&record(bad, "")).is_empty(),
+                "email field: {bad}"
+            );
+            assert!(
+                !violations(&record("a@neu.edu", &format!("Contact {bad} soon"))).is_empty(),
+                "prose: {bad}"
+            );
         }
-        assert!(!violations(&serde_json::json!({"email": "plain text"})).is_empty());
-        assert!(!violations(&serde_json::json!({"email": "a@northeastern.edu."})).is_empty());
-        assert!(violations(&serde_json::json!({"note": "Contact a@northeastern.edu."})).is_empty());
+        assert!(!violations(&record("plain text", "")).is_empty());
+        assert!(!violations(&record("a@northeastern.edu.", "")).is_empty());
+    }
+
+    #[test]
+    fn raw_check_flags_obfuscated_and_encoded_prose() {
+        for bad in [
+            "mail jo at example dot org",
+            "mail jo at example.org",
+            "jo&#64;example.org",
+            "jo&#x40;example.org",
+            "jo%40example.org",
+            "jo\u{ff20}example.org",
+            "jo@example&period;org",
+            "mail person@northeastern.edu.evil.com today",
+            "mail x@neu.edu..",
+            "mail x@neu.edu!",
+        ] {
+            assert!(!violations(&record("a@neu.edu", bad)).is_empty(), "{bad}");
+        }
+        assert!(violations(&record("a@neu.edu", "mail x@neu.edu.")).is_empty());
+    }
+
+    #[test]
+    fn raw_check_rejects_whitespace_around_email_values() {
+        for bad in [
+            "x@neu.edu\n",
+            "x@neu.edu ",
+            " x@neu.edu",
+            "\nx@neu.edu",
+            "x@neu.edu\t",
+            "x@neu.edu  y@neu.edu",
+            "x@neu.edu\ny@neu.edu",
+        ] {
+            assert!(!violations(&record(bad, "")).is_empty(), "{bad:?}");
+        }
+        assert!(violations(&record("x@neu.edu y@neu.edu", "")).is_empty());
     }
 
     #[test]
@@ -539,9 +706,9 @@ mod tests {
             let sections = value["sections"].as_array().map_or(0, |rows| rows.len());
             assert!(courses > 2_500, "{code} courses {courses}");
             assert!(sections > 7_000, "{code} sections {sections}");
-            let literal: usize = {
+            let literal = {
                 let text = std::str::from_utf8(&json).expect("catalog text");
-                addresses_in(text).len()
+                oracle_candidates(text).len()
             };
             assert!(literal > 500, "{code}: expected institutional addresses");
             let found = violations(&value);

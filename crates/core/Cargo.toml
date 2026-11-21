@@ -17,3 +17,6 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
 [build-dependencies]
 cc = "1"
+
+[dev-dependencies]
+icu_normalizer = "2"
