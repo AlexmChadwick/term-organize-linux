@@ -1392,7 +1392,7 @@ fn section_list(
     let lines: Vec<SectionLine> = sections
         .iter()
         .map(|section| SectionLine {
-            seats: seat_wait_label(section.seats_remaining, section.waitlist_remaining),
+            seats: seat_wait_label(section),
             summary: format!(
                 "{} · {} · {}",
                 section.schedule_summary(),
@@ -1500,6 +1500,11 @@ fn section_list(
             }
             if let Some(label) = label_named(&row, "section-seats") {
                 label.set_text(&line.seats);
+                if line.section.is_waitlisted() {
+                    label.add_css_class("warning");
+                } else {
+                    label.remove_css_class("warning");
+                }
             }
             if let Some(label) = label_named(&row, "section-summary") {
                 label.set_text(&line.summary);

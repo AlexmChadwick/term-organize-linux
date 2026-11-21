@@ -292,10 +292,18 @@ pub fn minutes_from_hhmm(value: i32) -> i32 {
     (value / 100) * 60 + value % 100
 }
 
-/// `1 seat · waitlist 0`, `4 seats · waitlist 2`.
-pub fn seat_wait_label(seats: i32, waitlist: i32) -> String {
+/// `1 seat · waitlist 0` without a waitlist, `0 seats · Waitlist 7/10` with one.
+pub fn seat_wait_label(section: &CourseSection) -> String {
+    let seats = section.seats_remaining;
     let word = if seats == 1 { "seat" } else { "seats" };
-    format!("{seats} {word} · waitlist {waitlist}")
+    if section.waitlist_capacity > 0 {
+        format!(
+            "{seats} {word} · Waitlist {}/{}",
+            section.waitlist_count, section.waitlist_capacity
+        )
+    } else {
+        format!("{seats} {word} · waitlist {}", section.waitlist_remaining)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,8 +402,13 @@ impl CourseSection {
             number: self.number.clone(),
         }
     }
+    /// Freed seats go to the waitlist first, so a section with a queue is not open.
     pub fn is_open(&self) -> bool {
-        self.seats_remaining > 0
+        self.seats_remaining > 0 && self.waitlist_count <= 0
+    }
+    /// Seats exist but a queue holds them.
+    pub fn is_waitlisted(&self) -> bool {
+        self.seats_remaining > 0 && self.waitlist_count > 0
     }
     pub fn is_full(&self) -> bool {
         self.seats_remaining <= 0
@@ -473,10 +486,50 @@ impl CourseSection {
 mod tests {
     use super::*;
 
+    fn section(seats: i32, wait_capacity: i32, wait_count: i32) -> CourseSection {
+        serde_json::from_value(serde_json::json!({
+            "crn": "39766", "subject": "INAM", "number": "1925",
+            "seatCapacity": 15, "seatsRemaining": seats,
+            "waitlistCapacity": wait_capacity, "waitlistCount": wait_count,
+            "waitlistRemaining": wait_capacity - wait_count,
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn seat_wait_label_is_singular_for_one_seat() {
-        assert_eq!(seat_wait_label(1, 0), "1 seat · waitlist 0");
-        assert_eq!(seat_wait_label(0, 2), "0 seats · waitlist 2");
-        assert_eq!(seat_wait_label(4, 1), "4 seats · waitlist 1");
+    fn missing_wait_fields_decode_as_zero() {
+        let s: CourseSection =
+            serde_json::from_str(r#"{"crn":"1","subject":"CS","number":"1"}"#).unwrap();
+        assert_eq!((s.waitlist_capacity, s.waitlist_count), (0, 0));
+    }
+
+    #[test]
+    fn no_waitlist_keeps_the_existing_label() {
+        let s = section(1, 0, 0);
+        assert!(s.is_open() && !s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "1 seat · waitlist 0");
+        assert!(!section(0, 0, 0).is_open());
+    }
+
+    #[test]
+    fn full_section_with_waitlist_shows_count_over_capacity() {
+        let s = section(0, 10, 7);
+        assert!(!s.is_open() && s.is_full() && !s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "0 seats · Waitlist 7/10");
+    }
+
+    #[test]
+    fn seats_with_a_queue_are_not_open() {
+        let s = section(3, 10, 2);
+        assert!(!s.is_open() && s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "3 seats · Waitlist 2/10");
+        assert_eq!(crate::search::make_stats(&[s]).open_section_count, 0);
+    }
+
+    #[test]
+    fn empty_queue_with_seats_is_open() {
+        let s = section(3, 10, 0);
+        assert!(s.is_open() && !s.is_waitlisted());
+        assert_eq!(crate::search::make_stats(&[s]).open_section_count, 1);
     }
 }
