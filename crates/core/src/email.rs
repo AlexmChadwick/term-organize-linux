@@ -43,7 +43,18 @@ pub fn retain_northeastern_addresses(field: &str) -> Option<String> {
 }
 
 pub fn addresses_in(text: &str) -> Vec<&str> {
-    email_spans(text)
+    spans_to_addresses(text, email_spans(text, false))
+}
+
+/// Addresses in free text. One period right after an address is sentence
+/// punctuation, not part of the address, so it is left out of the candidate
+/// before strict validation. A second period stays and fails validation.
+pub fn prose_addresses_in(text: &str) -> Vec<&str> {
+    spans_to_addresses(text, email_spans(text, true))
+}
+
+fn spans_to_addresses(text: &str, spans: Vec<(usize, usize)>) -> Vec<&str> {
+    spans
         .into_iter()
         .filter_map(|(start, end)| text.get(start..end))
         .collect()
@@ -99,7 +110,7 @@ fn redact_email_node(value: &mut Value, scan: &mut AddressRedaction) {
 }
 
 fn redact_text(text: &str, scan: &mut AddressRedaction) -> String {
-    let spans = email_spans(text);
+    let spans = email_spans(text, true);
     if spans.is_empty() {
         return text.to_string();
     }
@@ -169,8 +180,9 @@ fn tidy_gap(text: &str) -> String {
 
 /// Candidates are the full run of local bytes before an `@` and the full run of
 /// non-delimiter bytes after it. The domain is never trimmed, so validation
-/// sees exactly what follows the `@`.
-fn email_spans(text: &str) -> Vec<(usize, usize)> {
+/// sees exactly what follows the `@`. With `prose`, a single trailing period
+/// is dropped from the candidate first.
+fn email_spans(text: &str, prose: bool) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut spans = Vec::new();
     let mut index = 0;
@@ -183,6 +195,9 @@ fn email_spans(text: &str) -> Vec<(usize, usize)> {
             let mut end = index + 1;
             while end < bytes.len() && !is_domain_delimiter(bytes[end]) {
                 end += 1;
+            }
+            if prose && end > index + 1 && bytes[end - 1] == b'.' {
+                end -= 1;
             }
             if start < index && end > index + 1 && text[index + 1..end].contains('.') {
                 spans.push((start, end));
@@ -304,6 +319,9 @@ mod tests {
             "x@northeastern.edu.evil.com",
         ] {
             assert!(retain_northeastern_addresses(bad).is_none(), "{bad}");
+            if bad == "x@northeastern.edu." {
+                continue;
+            }
             let mut value = serde_json::json!({ "email": bad, "note": format!("see {bad} now") });
             redact_json_emails(&mut value);
             assert!(value["email"].is_null(), "{bad}");
@@ -314,9 +332,38 @@ mod tests {
             ["x@northeastern.edu."]
         );
         assert_eq!(
+            prose_addresses_in("x@northeastern.edu. y"),
+            ["x@northeastern.edu"]
+        );
+        assert_eq!(
             addresses_in("a@neu.edu,b@neu.edu;c@neu.edu <d@neu.edu>"),
             ["a@neu.edu", "b@neu.edu", "c@neu.edu", "d@neu.edu"]
         );
+    }
+
+    #[test]
+    fn prose_treats_one_trailing_period_as_punctuation() {
+        let mut value = serde_json::json!({ "note": "Email x@northeastern.edu." });
+        redact_json_emails(&mut value);
+        assert_eq!(value["note"], "Email x@northeastern.edu.");
+        assert_eq!(
+            prose_addresses_in("Email x@northeastern.edu."),
+            ["x@northeastern.edu"]
+        );
+        assert!(is_northeastern_address("x@northeastern.edu"));
+        // Email fields stay strict.
+        assert!(retain_northeastern_addresses("x@northeastern.edu.").is_none());
+        assert!(!is_northeastern_address("x@northeastern.edu."));
+        for bad in ["x@northeastern.edu..", "x@northeastern.edu.evil"] {
+            let mut value = serde_json::json!({ "note": format!("see {bad} now") });
+            redact_json_emails(&mut value);
+            let note = value["note"].as_str().unwrap();
+            assert!(!note.contains('@'), "{bad}: {note}");
+            assert!(retain_northeastern_addresses(bad).is_none(), "{bad}");
+            for address in prose_addresses_in(bad) {
+                assert!(!is_northeastern_address(address), "{bad}");
+            }
+        }
     }
 
     #[test]
@@ -360,11 +407,11 @@ mod tests {
     fn archive_scrub_drops_disallowed_lookalike_domains() {
         let mut value = serde_json::json!({
             "faculty": [{"email": "a@northeastern.edu. b@neu.eduX c@neu.edu"}],
-            "text": "x@neu.edu. y@northeastern.edu\u{e9} ok@neu.edu"
+            "text": "x@neu.edu.. y@northeastern.edu\u{e9} ok@neu.edu"
         });
         redact_json_emails(&mut value);
         assert_eq!(value["faculty"][0]["email"], "c@neu.edu");
-        assert_eq!(value["text"], " ok@neu.edu");
+        assert_eq!(value["text"], ". ok@neu.edu");
     }
 
     /// Problems found in an unsanitized catalog value. Email fields must hold
@@ -395,13 +442,13 @@ mod tests {
                 }
             }
             Value::String(text) => {
-                for address in addresses_in(text) {
+                for address in prose_addresses_in(text) {
                     if !is_northeastern_address(address) {
                         out.push(format!("{path}: address {address:?}"));
                     }
                 }
                 let plain = deobfuscate(text);
-                for address in addresses_in(&plain) {
+                for address in prose_addresses_in(&plain) {
                     if !is_northeastern_address(address) {
                         out.push(format!("{path}: obfuscated address {address:?}"));
                     }
@@ -436,7 +483,7 @@ mod tests {
         for bad in [
             "a@husky.neu.edu",
             "a@gmail.com",
-            "a@northeastern.edu.",
+            "a@northeastern.edu..",
             "a@neu.eduX",
             "a@neu.edu\u{e9}",
             "a [at] gmail [dot] com",
@@ -450,6 +497,8 @@ mod tests {
             assert!(!violations(&in_prose).is_empty(), "prose: {bad}");
         }
         assert!(!violations(&serde_json::json!({"email": "plain text"})).is_empty());
+        assert!(!violations(&serde_json::json!({"email": "a@northeastern.edu."})).is_empty());
+        assert!(violations(&serde_json::json!({"note": "Contact a@northeastern.edu."})).is_empty());
     }
 
     #[test]
