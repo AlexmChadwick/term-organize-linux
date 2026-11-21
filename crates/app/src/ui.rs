@@ -1374,6 +1374,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
 struct SectionLine {
     section: CourseSection,
     seats: String,
+    waitlisted: bool,
     summary: String,
 }
 
@@ -1391,15 +1392,19 @@ fn section_list(
     }
     let lines: Vec<SectionLine> = sections
         .iter()
-        .map(|section| SectionLine {
-            seats: seat_wait_label(section),
-            summary: format!(
-                "{} · {} · {}",
-                section.schedule_summary(),
-                section.instructor_label(),
-                section.campus
-            ),
-            section: section.clone(),
+        .map(|section| {
+            let (seats, waitlisted) = seat_display(section);
+            SectionLine {
+                seats,
+                waitlisted,
+                summary: format!(
+                    "{} · {} · {}",
+                    section.schedule_summary(),
+                    section.instructor_label(),
+                    section.campus
+                ),
+                section: section.clone(),
+            }
         })
         .collect();
     let by_crn: Rc<HashMap<String, SectionLine>> = Rc::new(
@@ -1500,7 +1505,7 @@ fn section_list(
             }
             if let Some(label) = label_named(&row, "section-seats") {
                 label.set_text(&line.seats);
-                if line.section.is_waitlisted() {
+                if line.waitlisted {
                     label.add_css_class("warning");
                 } else {
                     label.remove_css_class("warning");
@@ -4275,7 +4280,7 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
             course_title: title.into(),
             section_label: section.section_number.clone(),
             added_at: now_secs(),
-            last_seats_remaining: section.seats_remaining,
+            last_seats_remaining: section.open_seats(),
             last_waitlist_remaining: section.waitlist_remaining,
             seat_capacity: section.seat_capacity,
             last_checked_at: None,

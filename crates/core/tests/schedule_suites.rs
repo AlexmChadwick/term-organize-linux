@@ -4506,3 +4506,45 @@ fn activePlanFollowsTheTermInSession() {
     );
     assert!(schedule::active_primary_plan(&data.plans, long_after).is_none());
 }
+
+fn queued_pair() -> ScheduleCourseInput {
+    let mut queued = section("QUEUE", "CS", "3000", &[1], 9.0, 10.0, Extra::default());
+    queued.waitlist_count = 3;
+    queued.waitlist_capacity = 10;
+    queued.waitlist_remaining = 7;
+    let open = section("OPEN", "CS", "3000", &[2], 9.0, 10.0, Extra::default());
+    req("CS", "3000", vec![queued, open])
+}
+
+fn picked_crns(result: &GenerationResult) -> BTreeSet<String> {
+    crn_sets(result).into_iter().flatten().collect()
+}
+
+#[test]
+fn queuedSectionsAreNotOfferedByHideFullMinSeatsOrOpenOnly() {
+    let course = queued_pair();
+    let only_open = BTreeSet::from(["OPEN".to_string()]);
+    let run = |filters: &ScheduleFilters, preferences: &SchedulePreferences| {
+        picked_crns(&generate_with(
+            &[course.clone()],
+            filters,
+            preferences,
+            ScheduleSort::Best,
+            &Limits::default(),
+        ))
+    };
+    let base = SchedulePreferences::default();
+    assert!(run(&ScheduleFilters::default(), &base).contains("QUEUE"));
+
+    let mut hide = ScheduleFilters::default();
+    hide.hide_full_sections = true;
+    assert_eq!(run(&hide, &base), only_open);
+
+    let mut min = ScheduleFilters::default();
+    min.min_seats = 1;
+    assert_eq!(run(&min, &base), only_open);
+
+    let mut open_only = SchedulePreferences::default();
+    open_only.seats = SeatPolicy::OpenOnly;
+    assert_eq!(run(&ScheduleFilters::default(), &open_only), only_open);
+}
