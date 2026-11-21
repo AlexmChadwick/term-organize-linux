@@ -1536,6 +1536,7 @@ pub struct LiveSeat {
     pub crn: String,
     pub seats_remaining: i32,
     pub waitlist_remaining: i32,
+    pub waitlist_count: i32,
     pub seat_capacity: i32,
 }
 
@@ -1571,6 +1572,7 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
             .get("waitAvailable")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32;
+        let waitlist_count = item.get("waitCount").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let seat_capacity = item
             .get("maximumEnrollment")
             .and_then(|v| v.as_i64())
@@ -1579,6 +1581,7 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
             crn,
             seats_remaining,
             waitlist_remaining,
+            waitlist_count,
             seat_capacity,
         });
     }
@@ -1607,6 +1610,7 @@ pub fn sections_with_live_seats(
             .unwrap_or_else(|| section_from_seat(crn, key, seat));
         section.seats_remaining = seat.seats_remaining;
         section.waitlist_remaining = seat.waitlist_remaining;
+        section.waitlist_count = seat.waitlist_count;
         section.seat_capacity = seat.seat_capacity;
         if seen.insert(section.crn.clone()) {
             out.push(section);
@@ -1627,7 +1631,7 @@ fn section_from_seat(crn: &str, key: &CourseKey, seat: &LiveSeat) -> CourseSecti
         seats_remaining: seat.seats_remaining,
         enrollment: 0,
         waitlist_capacity: 0,
-        waitlist_count: 0,
+        waitlist_count: seat.waitlist_count,
         waitlist_remaining: seat.waitlist_remaining,
         class_type: String::new(),
         honors: false,
@@ -2021,6 +2025,7 @@ mod tests {
             crn: "12726".into(),
             seats_remaining: 4,
             waitlist_remaining: 1,
+            waitlist_count: 0,
             seat_capacity: 42,
         }];
         let updated = super::sections_with_live_seats(&snapshot, &watched, &seats);

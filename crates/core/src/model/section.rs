@@ -292,10 +292,35 @@ pub fn minutes_from_hhmm(value: i32) -> i32 {
     (value / 100) * 60 + value % 100
 }
 
-/// `1 seat · waitlist 0`, `4 seats · waitlist 2`.
-pub fn seat_wait_label(seats: i32, waitlist: i32) -> String {
+/// Seat text for a section row. `1 seat · waitlist 0` without a queue,
+/// `Full · 0 seats · Waitlist 7/10` when full with a waitlist, and
+/// `0 seats · Waitlist 2/10` when seats are held by a queue (the fact is the
+/// only place the word appears). A queue on a waitlist without a capacity
+/// reads `Waitlist 2`.
+pub fn seat_wait_label(section: &CourseSection) -> String {
+    let seats = section.open_seats();
     let word = if seats == 1 { "seat" } else { "seats" };
-    format!("{seats} {word} · waitlist {waitlist}")
+    let wait = if section.waitlist_capacity > 0 {
+        format!(
+            "Waitlist {}/{}",
+            section.waitlist_count, section.waitlist_capacity
+        )
+    } else if section.waitlist_count > 0 {
+        format!("Waitlist {}", section.waitlist_count)
+    } else {
+        format!("waitlist {}", section.waitlist_remaining)
+    };
+    if section.seats_remaining <= 0 {
+        format!("Full · {seats} {word} · {wait}")
+    } else {
+        format!("{seats} {word} · {wait}")
+    }
+}
+
+/// What a section row shows: the text and whether it is drawn in the warning
+/// (orange) style instead of the normal one.
+pub fn seat_display(section: &CourseSection) -> (String, bool) {
+    (seat_wait_label(section), section.is_waitlisted())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,11 +419,24 @@ impl CourseSection {
             number: self.number.clone(),
         }
     }
+    /// Freed seats go to the waitlist first, so a section with a queue is not open.
     pub fn is_open(&self) -> bool {
-        self.seats_remaining > 0
+        self.open_seats() > 0
+    }
+    /// Seats a student could take now: none while anyone is queued.
+    pub fn open_seats(&self) -> i32 {
+        if self.waitlist_count > 0 {
+            0
+        } else {
+            self.seats_remaining.max(0)
+        }
+    }
+    /// Seats exist but a queue holds them.
+    pub fn is_waitlisted(&self) -> bool {
+        self.seats_remaining > 0 && self.waitlist_count > 0
     }
     pub fn is_full(&self) -> bool {
-        self.seats_remaining <= 0
+        !self.is_open()
     }
     pub fn is_online(&self) -> bool {
         self.campus.to_ascii_lowercase().contains("online")
@@ -453,11 +491,7 @@ impl CourseSection {
             .join(" · ")
     }
     pub fn seats_label(&self) -> String {
-        format!(
-            "{} of {} seats",
-            self.seats_remaining.max(0),
-            self.seat_capacity
-        )
+        format!("{} of {} seats", self.open_seats(), self.seat_capacity)
     }
     pub fn conflicts_with(&self, other: &CourseSection) -> bool {
         let mine: Vec<&Meeting> = self.weekly_meetings();
@@ -473,10 +507,78 @@ impl CourseSection {
 mod tests {
     use super::*;
 
+    fn section(seats: i32, wait_capacity: i32, wait_count: i32) -> CourseSection {
+        serde_json::from_value(serde_json::json!({
+            "crn": "39766", "subject": "INAM", "number": "1925",
+            "seatCapacity": 15, "seatsRemaining": seats,
+            "waitlistCapacity": wait_capacity, "waitlistCount": wait_count,
+            "waitlistRemaining": wait_capacity - wait_count,
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn seat_wait_label_is_singular_for_one_seat() {
-        assert_eq!(seat_wait_label(1, 0), "1 seat · waitlist 0");
-        assert_eq!(seat_wait_label(0, 2), "0 seats · waitlist 2");
-        assert_eq!(seat_wait_label(4, 1), "4 seats · waitlist 1");
+    fn missing_wait_fields_decode_as_zero() {
+        let s: CourseSection =
+            serde_json::from_str(r#"{"crn":"1","subject":"CS","number":"1"}"#).unwrap();
+        assert_eq!((s.waitlist_capacity, s.waitlist_count), (0, 0));
+    }
+
+    #[test]
+    fn no_waitlist_keeps_the_existing_label() {
+        let s = section(1, 0, 0);
+        assert!(s.is_open() && !s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "1 seat · waitlist 0");
+        assert!(!section(0, 0, 0).is_open());
+    }
+
+    #[test]
+    fn full_section_with_waitlist_shows_count_over_capacity() {
+        let s = section(0, 10, 7);
+        assert!(!s.is_open() && s.is_full() && !s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "Full · 0 seats · Waitlist 7/10");
+    }
+
+    #[test]
+    fn seats_with_a_queue_are_not_open() {
+        let s = section(3, 10, 2);
+        assert!(!s.is_open() && s.is_waitlisted());
+        assert_eq!(seat_wait_label(&s), "0 seats · Waitlist 2/10");
+        let stats = crate::search::make_stats(&[s]);
+        assert_eq!((stats.open_section_count, stats.seats_remaining), (0, 0));
+    }
+
+    #[test]
+    fn open_seats_is_zero_behind_a_queue_and_drives_full_and_text() {
+        let queued = section(3, 10, 2);
+        assert_eq!((queued.open_seats(), queued.is_full()), (0, true));
+        assert_eq!(queued.seats_label(), "0 of 15 seats");
+        assert_eq!(section(3, 10, 0).open_seats(), 3);
+        assert!(!section(3, 10, 0).is_full());
+    }
+
+    #[test]
+    fn row_text_names_waitlist_once_and_styles_only_queued_sections() {
+        assert_eq!(
+            seat_display(&section(0, 10, 7)),
+            ("Full · 0 seats · Waitlist 7/10".to_string(), false)
+        );
+        let (text, warn) = seat_display(&section(3, 10, 2));
+        assert_eq!(text, "0 seats · Waitlist 2/10");
+        assert!(warn && text.matches("Waitlist").count() == 1);
+        assert_eq!(
+            seat_display(&section(3, 0, 0)),
+            ("3 seats · waitlist 0".to_string(), false)
+        );
+        let (text, warn) = seat_display(&section(3, 0, 2));
+        assert_eq!(text, "0 seats · Waitlist 2");
+        assert!(warn);
+    }
+
+    #[test]
+    fn empty_queue_with_seats_is_open() {
+        let s = section(3, 10, 0);
+        assert!(s.is_open() && !s.is_waitlisted());
+        assert_eq!(crate::search::make_stats(&[s]).open_section_count, 1);
     }
 }

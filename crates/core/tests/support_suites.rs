@@ -227,7 +227,7 @@ fn shell_section(crn: &str, seats: i32, waitlist: i32, capacity: i32) -> CourseS
         seats_remaining: seats,
         enrollment: capacity - seats,
         waitlist_capacity: 10,
-        waitlist_count: 10 - waitlist,
+        waitlist_count: if seats > 0 { 0 } else { 10 - waitlist },
         waitlist_remaining: waitlist,
         class_type: "Lecture".into(),
         honors: false,

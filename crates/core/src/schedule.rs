@@ -218,7 +218,7 @@ impl GeneratedSchedule {
             if !preferences.is_default() {
                 points += section_score(section, &own, preferences);
             }
-            let seats = section.seats_remaining.max(0);
+            let seats = section.open_seats();
             min_seats = min_seats.min(seats);
             total_seats += seats;
             if seats == 0 {
@@ -928,7 +928,7 @@ pub fn measure_options(p: &SchedulePreferences) -> MeasureOptions {
 }
 
 pub fn preference_is_full(section: &CourseSection) -> bool {
-    section.seat_capacity > 0 && section.seats_remaining <= 0
+    section.seat_capacity > 0 && !section.is_open()
 }
 
 pub fn has_no_campus(section: &CourseSection) -> bool {
@@ -972,10 +972,10 @@ pub fn rejection_reasons(
     if !filters.include_online && section.is_online() {
         reasons |= FilterReason::Online.bit();
     }
-    if filters.hide_full_sections && section.seats_remaining <= 0 {
+    if filters.hide_full_sections && !section.is_open() {
         reasons |= FilterReason::Seats.bit();
     }
-    if filters.min_seats > 0 && section.seats_remaining < filters.min_seats {
+    if filters.min_seats > 0 && section.open_seats() < filters.min_seats {
         reasons |= FilterReason::Seats.bit();
     }
     if let Some(campus) = &filters.campus {
@@ -2462,7 +2462,7 @@ impl Search {
             }
             let g = self.slots[s].start + *pick as usize;
             own.extend_from_slice(&intervals[interval_start[g]..interval_start[g + 1]]);
-            let seats = self.sections[g].seats_remaining.max(0);
+            let seats = self.sections[g].open_seats();
             min_seats = min_seats.min(seats);
             total_seats += seats;
             if seats == 0 {
