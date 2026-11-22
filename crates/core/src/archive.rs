@@ -34,12 +34,27 @@ pub fn term_code_from_file_name(name: &str) -> Option<String> {
 }
 
 pub fn encode(catalog: &TermCatalog) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(catalog).map_err(|e| format!("catalog JSON: {e}"))
+    let mut catalog = catalog.clone();
+    scrub_instructor_emails(&mut catalog);
+    serde_json::to_vec(&catalog).map_err(|e| format!("catalog JSON: {e}"))
 }
 
 pub fn decode(data: &[u8]) -> Result<TermCatalog, String> {
     let json = json_bytes(data)?;
-    serde_json::from_slice(&json).map_err(|e| format!("catalog JSON: {e}"))
+    let mut catalog = serde_json::from_slice(&json).map_err(|e| format!("catalog JSON: {e}"))?;
+    scrub_instructor_emails(&mut catalog);
+    Ok(catalog)
+}
+
+fn scrub_instructor_emails(catalog: &mut TermCatalog) {
+    for section in &mut catalog.sections {
+        for instructor in section.instructors.iter_mut().flatten() {
+            instructor.email = instructor
+                .email
+                .as_deref()
+                .and_then(crate::email::retain_northeastern_addresses);
+        }
+    }
 }
 
 /// JSON payload of a `.catalog` file. Plain JSON is accepted; otherwise the
