@@ -292,35 +292,44 @@ pub fn minutes_from_hhmm(value: i32) -> i32 {
     (value / 100) * 60 + value % 100
 }
 
-/// Seat text for a section row. `1 seat · waitlist 0` without a queue,
-/// `Full · 0 seats · Waitlist 7/10` when full with a waitlist, and
-/// `0 seats · Waitlist 2/10` when seats are held by a queue (the fact is the
-/// only place the word appears). A queue on a waitlist without a capacity
-/// reads `Waitlist 2`.
+/// Seat text for a section row: `3 of 15 open` (`3 seats` when the capacity is
+/// unknown), prefixed `Full · ` at 0 seats and followed by `Waitlist 7/10` when
+/// the section has a waitlist capacity. A queue without a capacity reads
+/// `Waitlist 2`. Seats held by a queue read `0 of 15 open · Waitlist 3/10`, so
+/// the word appears once.
 pub fn seat_wait_label(section: &CourseSection) -> String {
     let seats = section.open_seats();
-    let word = if seats == 1 { "seat" } else { "seats" };
-    let wait = if section.waitlist_capacity > 0 {
-        format!(
+    let mut parts = Vec::new();
+    if section.seats_remaining <= 0 {
+        parts.push("Full".to_string());
+    }
+    parts.push(if section.seat_capacity > 0 {
+        format!("{seats} of {} open", section.seat_capacity)
+    } else if seats == 1 {
+        "1 seat".to_string()
+    } else {
+        format!("{seats} seats")
+    });
+    if section.waitlist_capacity > 0 {
+        parts.push(format!(
             "Waitlist {}/{}",
             section.waitlist_count, section.waitlist_capacity
-        )
+        ));
     } else if section.waitlist_count > 0 {
-        format!("Waitlist {}", section.waitlist_count)
-    } else {
-        format!("waitlist {}", section.waitlist_remaining)
-    };
-    if section.seats_remaining <= 0 {
-        format!("Full · {seats} {word} · {wait}")
-    } else {
-        format!("{seats} {word} · {wait}")
+        parts.push(format!("Waitlist {}", section.waitlist_count));
     }
+    parts.join(" · ")
 }
 
-/// What a section row shows: the text and whether it is drawn in the warning
-/// (orange) style instead of the normal one.
-pub fn seat_display(section: &CourseSection) -> (String, bool) {
-    (seat_wait_label(section), section.is_waitlisted())
+/// What a section shows for its seats: the text and the style class to draw it
+/// in (`warning` for a section whose seats a queue holds).
+pub fn seat_display(section: &CourseSection) -> (String, Option<&'static str>) {
+    (seat_wait_label(section), seat_style_class(section))
+}
+
+/// `warning` (orange) when seats exist but a waitlist holds them, else none.
+pub fn seat_style_class(section: &CourseSection) -> Option<&'static str> {
+    section.is_waitlisted().then_some("warning")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,7 +537,7 @@ mod tests {
     fn no_waitlist_keeps_the_existing_label() {
         let s = section(1, 0, 0);
         assert!(s.is_open() && !s.is_waitlisted());
-        assert_eq!(seat_wait_label(&s), "1 seat · waitlist 0");
+        assert_eq!(seat_wait_label(&s), "1 of 15 open");
         assert!(!section(0, 0, 0).is_open());
     }
 
@@ -536,14 +545,14 @@ mod tests {
     fn full_section_with_waitlist_shows_count_over_capacity() {
         let s = section(0, 10, 7);
         assert!(!s.is_open() && s.is_full() && !s.is_waitlisted());
-        assert_eq!(seat_wait_label(&s), "Full · 0 seats · Waitlist 7/10");
+        assert_eq!(seat_wait_label(&s), "Full · 0 of 15 open · Waitlist 7/10");
     }
 
     #[test]
     fn seats_with_a_queue_are_not_open() {
         let s = section(3, 10, 2);
         assert!(!s.is_open() && s.is_waitlisted());
-        assert_eq!(seat_wait_label(&s), "0 seats · Waitlist 2/10");
+        assert_eq!(seat_wait_label(&s), "0 of 15 open · Waitlist 2/10");
         let stats = crate::search::make_stats(&[s]);
         assert_eq!((stats.open_section_count, stats.seats_remaining), (0, 0));
     }
@@ -561,18 +570,39 @@ mod tests {
     fn row_text_names_waitlist_once_and_styles_only_queued_sections() {
         assert_eq!(
             seat_display(&section(0, 10, 7)),
-            ("Full · 0 seats · Waitlist 7/10".to_string(), false)
+            ("Full · 0 of 15 open · Waitlist 7/10".to_string(), None)
         );
-        let (text, warn) = seat_display(&section(3, 10, 2));
-        assert_eq!(text, "0 seats · Waitlist 2/10");
-        assert!(warn && text.matches("Waitlist").count() == 1);
+        let (text, class) = seat_display(&section(3, 10, 2));
+        assert_eq!(text, "0 of 15 open · Waitlist 2/10");
+        assert!(class == Some("warning") && text.matches("Waitlist").count() == 1);
         assert_eq!(
             seat_display(&section(3, 0, 0)),
-            ("3 seats · waitlist 0".to_string(), false)
+            ("3 of 15 open".to_string(), None)
         );
-        let (text, warn) = seat_display(&section(3, 0, 2));
-        assert_eq!(text, "0 seats · Waitlist 2");
-        assert!(warn);
+        let (text, class) = seat_display(&section(3, 0, 2));
+        assert_eq!(text, "0 of 15 open · Waitlist 2");
+        assert_eq!(class, Some("warning"));
+    }
+
+    #[test]
+    fn row_text_has_no_lowercase_waitlist_leftover() {
+        for s in [section(1, 0, 0), section(0, 0, 0), section(3, 10, 0)] {
+            assert!(!seat_wait_label(&s).contains("waitlist 0"));
+        }
+        assert_eq!(seat_wait_label(&section(0, 0, 0)), "Full · 0 of 15 open");
+        let mut unknown = section(1, 0, 0);
+        unknown.seat_capacity = 0;
+        assert_eq!(seat_wait_label(&unknown), "1 seat");
+        unknown.seats_remaining = 4;
+        assert_eq!(seat_wait_label(&unknown), "4 seats");
+    }
+
+    #[test]
+    fn style_class_is_warning_only_when_a_queue_holds_seats() {
+        assert_eq!(seat_style_class(&section(3, 10, 2)), Some("warning"));
+        assert_eq!(seat_style_class(&section(3, 0, 2)), Some("warning"));
+        assert_eq!(seat_style_class(&section(0, 10, 7)), None);
+        assert_eq!(seat_style_class(&section(3, 10, 0)), None);
     }
 
     #[test]

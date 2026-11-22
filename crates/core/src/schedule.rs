@@ -928,7 +928,7 @@ pub fn measure_options(p: &SchedulePreferences) -> MeasureOptions {
 }
 
 pub fn preference_is_full(section: &CourseSection) -> bool {
-    section.seat_capacity > 0 && !section.is_open()
+    section.is_waitlisted() || (section.seat_capacity > 0 && !section.is_open())
 }
 
 pub fn has_no_campus(section: &CourseSection) -> bool {

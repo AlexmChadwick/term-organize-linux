@@ -105,6 +105,8 @@ pub fn section_json(section: &CourseSection) -> Value {
         "instructors": instructors,
         "seats_remaining": section.open_seats(),
         "seat_capacity": section.seat_capacity,
+        "waitlist_count": section.waitlist_count,
+        "waitlist_capacity": section.waitlist_capacity,
         "cps_only": json_flag(section.cps_only()),
     })
 }
@@ -112,6 +114,25 @@ pub fn section_json(section: &CourseSection) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_json_reports_open_seats_and_the_waitlist() {
+        let section: CourseSection = serde_json::from_value(json!({
+            "crn": "39766", "subject": "INAM", "number": "1925",
+            "seatCapacity": 15, "seatsRemaining": 3,
+            "waitlistCapacity": 10, "waitlistCount": 7,
+        }))
+        .unwrap();
+        let out = section_json(&section);
+        assert_eq!(out["seats_remaining"], 0);
+        assert_eq!(out["waitlist_count"], 7);
+        assert_eq!(out["waitlist_capacity"], 10);
+        let open: CourseSection = serde_json::from_value(json!({
+            "crn": "1", "subject": "CS", "number": "1", "seatsRemaining": 3,
+        }))
+        .unwrap();
+        assert_eq!(section_json(&open)["seats_remaining"], 3);
+    }
 
     #[test]
     fn mixed_address_field_keeps_only_northeastern() {

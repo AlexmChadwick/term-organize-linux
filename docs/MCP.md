@@ -149,11 +149,13 @@ Each course includes `cps_only`: `true` when every section with loaded restricti
   "instructors": [{ "name": "Ada Lovelace", "email": "lovelace@northeastern.edu" }],
   "seats_remaining": 3,
   "seat_capacity": 30,
+  "waitlist_count": 0,
+  "waitlist_capacity": 0,
   "cps_only": null
 }
 ```
 
-`email` is omitted unless the domain is exactly `northeastern.edu` or `neu.edu`. Day letters are `U M T W R F S` (Tuesday is `T`, Thursday is `R`).
+`seats_remaining` is open seats: 0 while anyone is on the waitlist, even if Banner reports seats. `waitlist_count` and `waitlist_capacity` are the raw queue size and limit (0 when the section has no waitlist), so a client can tell Full (no queue) from Waitlist (a queue). `email` is omitted unless the domain is exactly `northeastern.edu` or `neu.edu`. Day letters are `U M T W R F S` (Tuesday is `T`, Thursday is `R`).
 
 ### check_schedule
 
