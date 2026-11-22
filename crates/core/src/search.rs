@@ -732,7 +732,7 @@ pub fn make_stats(sections: &[CourseSection]) -> CourseStats {
         if s.is_open() {
             stats.open_section_count += 1;
         }
-        stats.seats_remaining += s.seats_remaining.max(0);
+        stats.seats_remaining += s.open_seats();
         stats.seat_capacity += s.seat_capacity.max(0);
         if s.waitlist_remaining > 0 {
             stats.waitlist_open_count += 1;

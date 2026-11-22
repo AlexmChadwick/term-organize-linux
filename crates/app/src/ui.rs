@@ -1374,6 +1374,7 @@ fn course_page(shell: &Rc<RefCell<Shell>>, key: &CourseKey, preview: bool) -> gt
 struct SectionLine {
     section: CourseSection,
     seats: String,
+    style: Option<&'static str>,
     summary: String,
 }
 
@@ -1391,15 +1392,19 @@ fn section_list(
     }
     let lines: Vec<SectionLine> = sections
         .iter()
-        .map(|section| SectionLine {
-            seats: seat_wait_label(section.seats_remaining, section.waitlist_remaining),
-            summary: format!(
-                "{} · {} · {}",
-                section.schedule_summary(),
-                section.instructor_label(),
-                section.campus
-            ),
-            section: section.clone(),
+        .map(|section| {
+            let (seats, style) = seat_display(section);
+            SectionLine {
+                seats,
+                style,
+                summary: format!(
+                    "{} · {} · {}",
+                    section.schedule_summary(),
+                    section.instructor_label(),
+                    section.campus
+                ),
+                section: section.clone(),
+            }
         })
         .collect();
     let by_crn: Rc<HashMap<String, SectionLine>> = Rc::new(
@@ -1500,6 +1505,10 @@ fn section_list(
             }
             if let Some(label) = label_named(&row, "section-seats") {
                 label.set_text(&line.seats);
+                label.remove_css_class("warning");
+                if let Some(class) = line.style {
+                    label.add_css_class(class);
+                }
             }
             if let Some(label) = label_named(&row, "section-summary") {
                 label.set_text(&line.summary);
@@ -1576,17 +1585,17 @@ fn fill_section_details(
     title.set_margin_top(8);
     host.append(&title);
     let summary = dim_label(&format!("{} · {}", line.summary, line.seats));
+    if let Some(class) = line.style {
+        summary.add_css_class(class);
+    }
     summary.set_margin_start(12);
     summary.set_margin_end(12);
     summary.set_wrap(true);
     host.append(&summary);
     let section = &line.section;
     let enrollment = dim_label(&format!(
-        "Enrollment {} / {} · Waitlist {} / {}",
-        section.enrollment,
-        section.seat_capacity,
-        section.waitlist_count,
-        section.waitlist_capacity
+        "Enrollment {} / {}",
+        section.enrollment, section.seat_capacity
     ));
     enrollment.set_margin_start(12);
     host.append(&enrollment);
@@ -4265,17 +4274,9 @@ fn watch_section(shell: &Rc<RefCell<Shell>>, section: &CourseSection, title: &st
         let term = state.index.catalog.term.code.clone();
         state.data.watchlist.push(WatchItem {
             term_code: term,
-            crn: section.crn.clone(),
-            course_key: section.course_key(),
             course_title: title.into(),
-            section_label: section.section_number.clone(),
             added_at: now_secs(),
-            last_seats_remaining: section.seats_remaining,
-            last_waitlist_remaining: section.waitlist_remaining,
-            seat_capacity: section.seat_capacity,
-            last_checked_at: None,
-            notify_on_waitlist: false,
-            last_notified_at: None,
+            ..WatchItem::seed(section)
         });
         persist(&mut state);
     }

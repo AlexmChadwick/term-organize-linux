@@ -1,6 +1,6 @@
 use super::degree::{CourseEquivalence, DegreePlan, RequirementSubstitution};
 use super::preferences::SchedulePreferences;
-use super::section::{CourseKey, DaySet};
+use super::section::{CourseKey, CourseSection, DaySet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -186,6 +186,56 @@ pub struct WatchItem {
 impl WatchItem {
     pub fn id(&self) -> String {
         format!("{}|{}", self.term_code, self.crn)
+    }
+
+    /// A new watch for `section`, seeded from its open seats so a section held
+    /// by a queue starts as not open. The caller sets term, title and time.
+    pub fn seed(section: &CourseSection) -> Self {
+        Self {
+            term_code: String::new(),
+            crn: section.crn.clone(),
+            course_key: section.course_key(),
+            course_title: String::new(),
+            section_label: section.section_number.clone(),
+            added_at: 0.0,
+            last_seats_remaining: section.open_seats(),
+            last_waitlist_remaining: section.waitlist_remaining,
+            seat_capacity: section.seat_capacity,
+            last_checked_at: None,
+            notify_on_waitlist: false,
+            last_notified_at: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod watch_seed_tests {
+    use super::*;
+
+    fn section(seats: i32, wait_count: i32) -> CourseSection {
+        serde_json::from_value(serde_json::json!({
+            "crn": "39766", "subject": "INAM", "number": "1925",
+            "sectionNumber": "01", "seatCapacity": 15, "seatsRemaining": seats,
+            "waitlistCapacity": 10, "waitlistCount": wait_count,
+            "waitlistRemaining": 10 - wait_count,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn seed_uses_open_seats_not_raw_seats() {
+        assert_eq!(WatchItem::seed(&section(3, 2)).last_seats_remaining, 0);
+        let open = WatchItem::seed(&section(3, 0));
+        assert_eq!(open.last_seats_remaining, 3);
+        assert_eq!(
+            (
+                open.crn.as_str(),
+                open.section_label.as_str(),
+                open.seat_capacity
+            ),
+            ("39766", "01", 15)
+        );
+        assert_eq!(open.last_waitlist_remaining, 10);
     }
 }
 

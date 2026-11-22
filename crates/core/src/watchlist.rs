@@ -201,7 +201,7 @@ pub fn compare(
             next.push(kept);
             continue;
         };
-        let seats = section.seats_remaining;
+        let seats = section.open_seats();
         let wait = section.waitlist_remaining;
         let seat_alert = item.last_seats_remaining <= 0 && seats > 0;
         let wait_alert = item.notify_on_waitlist
@@ -282,5 +282,24 @@ mod tests {
             row_line(&item(4, 42, Some(1_000.0)), true, 90_000.0),
             "No longer listed · yesterday"
         );
+    }
+
+    #[test]
+    fn seats_behind_a_waitlist_do_not_alert() {
+        let section = |count: i32| -> CourseSection {
+            serde_json::from_value(serde_json::json!({
+                "crn": "12726", "subject": "CS", "number": "3000",
+                "seatCapacity": 42, "seatsRemaining": 2,
+                "waitlistCapacity": 10, "waitlistCount": count,
+            }))
+            .unwrap()
+        };
+        let run = |count: i32| {
+            let live = HashMap::from([("202710".to_string(), vec![section(count)])]);
+            compare(&[item(0, 42, Some(1.0))], &live, 2.0)
+        };
+        assert!(run(3).alerts.is_empty());
+        assert_eq!(run(3).items[0].last_seats_remaining, 0);
+        assert_eq!(run(0).alerts.len(), 1);
     }
 }

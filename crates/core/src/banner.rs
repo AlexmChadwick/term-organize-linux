@@ -1536,6 +1536,8 @@ pub struct LiveSeat {
     pub crn: String,
     pub seats_remaining: i32,
     pub waitlist_remaining: i32,
+    pub waitlist_count: i32,
+    pub waitlist_capacity: i32,
     pub seat_capacity: i32,
 }
 
@@ -1571,6 +1573,11 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
             .get("waitAvailable")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32;
+        let waitlist_count = item.get("waitCount").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let waitlist_capacity = item
+            .get("waitCapacity")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
         let seat_capacity = item
             .get("maximumEnrollment")
             .and_then(|v| v.as_i64())
@@ -1579,6 +1586,8 @@ pub fn parse_live_seats(json: &str, subject: &str, number: &str) -> Result<Vec<L
             crn,
             seats_remaining,
             waitlist_remaining,
+            waitlist_count,
+            waitlist_capacity,
             seat_capacity,
         });
     }
@@ -1607,6 +1616,8 @@ pub fn sections_with_live_seats(
             .unwrap_or_else(|| section_from_seat(crn, key, seat));
         section.seats_remaining = seat.seats_remaining;
         section.waitlist_remaining = seat.waitlist_remaining;
+        section.waitlist_count = seat.waitlist_count;
+        section.waitlist_capacity = seat.waitlist_capacity;
         section.seat_capacity = seat.seat_capacity;
         if seen.insert(section.crn.clone()) {
             out.push(section);
@@ -1627,7 +1638,7 @@ fn section_from_seat(crn: &str, key: &CourseKey, seat: &LiveSeat) -> CourseSecti
         seats_remaining: seat.seats_remaining,
         enrollment: 0,
         waitlist_capacity: 0,
-        waitlist_count: 0,
+        waitlist_count: seat.waitlist_count,
         waitlist_remaining: seat.waitlist_remaining,
         class_type: String::new(),
         honors: false,
@@ -1923,6 +1934,23 @@ mod tests {
     }
 
     #[test]
+    fn live_seat_json_reads_the_waitlist_fields() {
+        let json = r#"{"success":true,"data":[
+            {"courseReferenceNumber":"39766","subject":"INAM","courseNumber":"1925","seatsAvailable":0,"maximumEnrollment":15,"waitCapacity":10,"waitCount":7,"waitAvailable":3},
+            {"courseReferenceNumber":"40000","subject":"INAM","courseNumber":"1925","seatsAvailable":2,"maximumEnrollment":15}
+        ]}"#;
+        let seats = parse_live_seats(json, "INAM", "1925").unwrap();
+        assert_eq!(
+            (seats[0].waitlist_count, seats[0].waitlist_capacity),
+            (7, 10)
+        );
+        assert_eq!(
+            (seats[1].waitlist_count, seats[1].waitlist_capacity),
+            (0, 0)
+        );
+    }
+
+    #[test]
     #[ignore = "contacts nubanner.neu.edu"]
     fn live_cs3000_when_banner_is_up() {
         let seats = super::BannerClient::default()
@@ -2021,6 +2049,8 @@ mod tests {
             crn: "12726".into(),
             seats_remaining: 4,
             waitlist_remaining: 1,
+            waitlist_count: 3,
+            waitlist_capacity: 10,
             seat_capacity: 42,
         }];
         let updated = super::sections_with_live_seats(&snapshot, &watched, &seats);
@@ -2029,6 +2059,9 @@ mod tests {
         assert_eq!(updated[0].seats_remaining, 4);
         assert_eq!(updated[0].waitlist_remaining, 1);
         assert_eq!(updated[0].seat_capacity, 42);
+        assert_eq!(updated[0].waitlist_count, 3);
+        assert_eq!(updated[0].waitlist_capacity, 10);
+        assert!(!updated[0].is_open());
         assert_eq!(updated[0].subject, "CS");
     }
 

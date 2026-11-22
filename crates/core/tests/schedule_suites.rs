@@ -4506,3 +4506,144 @@ fn activePlanFollowsTheTermInSession() {
     );
     assert!(schedule::active_primary_plan(&data.plans, long_after).is_none());
 }
+
+fn queued_pair() -> ScheduleCourseInput {
+    let mut queued = section("QUEUE", "CS", "3000", &[1], 9.0, 10.0, Extra::default());
+    queued.waitlist_count = 3;
+    queued.waitlist_capacity = 10;
+    queued.waitlist_remaining = 7;
+    let open = section("OPEN", "CS", "3000", &[2], 9.0, 10.0, Extra::default());
+    req("CS", "3000", vec![queued, open])
+}
+
+fn picked_crns(result: &GenerationResult) -> BTreeSet<String> {
+    crn_sets(result).into_iter().flatten().collect()
+}
+
+#[test]
+fn queuedSectionsAreNotOfferedByHideFullMinSeatsOrOpenOnly() {
+    let course = queued_pair();
+    let only_open = BTreeSet::from(["OPEN".to_string()]);
+    let run = |filters: &ScheduleFilters, preferences: &SchedulePreferences| {
+        picked_crns(&generate_with(
+            &[course.clone()],
+            filters,
+            preferences,
+            ScheduleSort::Best,
+            &Limits::default(),
+        ))
+    };
+    let base = SchedulePreferences::default();
+    assert!(run(&ScheduleFilters::default(), &base).contains("QUEUE"));
+
+    let mut hide = ScheduleFilters::default();
+    hide.hide_full_sections = true;
+    assert_eq!(run(&hide, &base), only_open);
+
+    let mut min = ScheduleFilters::default();
+    min.min_seats = 1;
+    assert_eq!(run(&min, &base), only_open);
+
+    let mut open_only = SchedulePreferences::default();
+    open_only.seats = SeatPolicy::OpenOnly;
+    assert_eq!(run(&ScheduleFilters::default(), &open_only), only_open);
+}
+
+fn queued_with_seats(crn: &str, days: &[i32]) -> CourseSection {
+    let mut queued = section(
+        crn,
+        "CS",
+        "3000",
+        days,
+        9.0,
+        10.0,
+        Extra {
+            seats: 5,
+            waitlist: 10,
+            ..Extra::default()
+        },
+    );
+    queued.waitlist_count = 2;
+    queued.waitlist_remaining = 8;
+    queued
+}
+
+#[test]
+fn rankingTreatsQueuedSeatsAsNoneEvenWhenRawSeatsAreHigher() {
+    let queued = queued_with_seats("QUEUE", &[1]);
+    let open = section(
+        "OPEN",
+        "CS",
+        "3000",
+        &[2],
+        9.0,
+        10.0,
+        Extra {
+            seats: 1,
+            ..Extra::default()
+        },
+    );
+    let course = req("CS", "3000", vec![queued.clone(), open]);
+    for sort in [ScheduleSort::Best, ScheduleSort::MostSeats] {
+        let result = generate_with(
+            &[course.clone()],
+            &ScheduleFilters::default(),
+            &SchedulePreferences::default(),
+            sort,
+            &Limits::default(),
+        );
+        assert_eq!(result.schedules[0].crns, vec!["OPEN".to_string()]);
+        let behind = result
+            .schedules
+            .iter()
+            .find(|schedule| schedule.crns == ["QUEUE"])
+            .expect("queued schedule is still offered");
+        assert_eq!(
+            (behind.min_seats, behind.total_seats, behind.full_sections),
+            (0, 0, 1)
+        );
+    }
+    let built = GeneratedSchedule::from_sections(&[queued], &SchedulePreferences::default());
+    assert_eq!(
+        (built.min_seats, built.total_seats, built.full_sections),
+        (0, 0, 1)
+    );
+}
+
+#[test]
+fn preferenceFullnessCountsAQueueEvenWithoutAKnownCapacity() {
+    let mut queued = queued_with_seats("QUEUE", &[1]);
+    assert!(schedule::preference_is_full(&queued));
+    queued.seat_capacity = 0;
+    assert!(schedule::preference_is_full(&queued));
+    queued.waitlist_count = 0;
+    assert!(!schedule::preference_is_full(&queued));
+    queued.seats_remaining = 0;
+    assert!(!schedule::preference_is_full(&queued));
+    queued.seat_capacity = 40;
+    assert!(schedule::preference_is_full(&queued));
+}
+
+#[test]
+fn planWarnsAboutAQueuedSectionAsFull() {
+    let index = tiny_index(
+        vec![listed_course("CS", "3000", 4.0)],
+        vec![queued_with_seats("Q1", &[1])],
+    );
+    let resolved = schedule::ResolvedPlan::resolve(&plan_with(&["CS 3000"], &["Q1"]), Some(&index));
+    assert_eq!(resolved.full_sections.len(), 1);
+    assert!(resolved
+        .warnings()
+        .iter()
+        .any(|warning| warning.text == "1 full section"));
+}
+
+#[test]
+fn openSeatsFilterRejectsAQueuedSection() {
+    let mut filters = termorganize_core::search::SearchFilters::default();
+    filters.open_seats_only = true;
+    assert!(!filters.matches_section(&queued_with_seats("Q1", &[1])));
+    let mut open = queued_with_seats("O1", &[1]);
+    open.waitlist_count = 0;
+    assert!(filters.matches_section(&open));
+}
