@@ -490,8 +490,23 @@ mod tests {
         String::from_utf8(raw).unwrap_or_else(|_| text.to_string())
     }
 
-    /// Decode layers until stable (bounded), then NFKC, so entity, percent and
-    /// fullwidth forms are scanned as plain text.
+    /// HTML-unescape and percent-decode until the text stops changing.
+    /// NFKC is not applied: domain checks must see the original characters.
+    fn decode_layers(text: &str) -> String {
+        let mut current = text.to_string();
+        for _ in 0..4 {
+            let next = percent_decode(&unescape_html(&current));
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
+    /// Decoded and NFKC-folded text for obfuscation detection only.
+    /// Never use this for a domain allow check. Folding can turn a confusable
+    /// into `northeastern.edu` or `neu.edu`.
     fn canonical_text(text: &str) -> String {
         let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
         let mut current = text.to_string();
@@ -514,6 +529,101 @@ mod tests {
             .find_iter(text)
             .map(|m| m.as_str().to_string())
             .collect()
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TokenClass {
+        Atom,
+        At,
+        Delim,
+    }
+
+    /// Delimiters of the raw candidate regex: Unicode whitespace and the
+    /// ASCII punctuation that regex class excludes. `@` is a separator, not
+    /// a delimiter, so a second `@` ends the domain.
+    fn is_oracle_delim(ch: char) -> bool {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '<' | '>' | ',' | ';' | '"' | '\'' | '(' | ')' | '[' | ']'
+            )
+    }
+
+    /// Classify one original character. NFKC decides whether a confusable
+    /// acts as `@` or as a delimiter, but the caller keeps the original slice.
+    fn token_class(ch: char, nfkc: &icu_normalizer::ComposingNormalizerBorrowed<'_>) -> TokenClass {
+        if ch == '@' {
+            return TokenClass::At;
+        }
+        if is_oracle_delim(ch) {
+            return TokenClass::Delim;
+        }
+        if ch.is_ascii() {
+            return TokenClass::Atom;
+        }
+        let mut buf = [0u8; 4];
+        let folded = nfkc.normalize(ch.encode_utf8(&mut buf));
+        if folded.is_empty() {
+            return TokenClass::Atom;
+        }
+        let at_like = folded.chars().any(|c| c == '@')
+            && folded.chars().all(|c| c == '@' || is_oracle_delim(c));
+        if at_like {
+            return TokenClass::At;
+        }
+        if folded.chars().all(is_oracle_delim) {
+            return TokenClass::Delim;
+        }
+        TokenClass::Atom
+    }
+
+    /// Email-shaped slices of `text`. Confusable at-signs and delimiters are
+    /// recognized by their NFKC fold, and each slice is still the original
+    /// pre-NFKC substring.
+    fn fold_aware_candidates(text: &str) -> Vec<String> {
+        if text.is_ascii() && !text.contains('@') {
+            return Vec::new();
+        }
+        let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let classes: Vec<TokenClass> = chars
+            .iter()
+            .map(|(_, ch)| token_class(*ch, &nfkc))
+            .collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if classes[i] != TokenClass::At {
+                i += 1;
+                continue;
+            }
+            let at = i;
+            if at == 0 || classes[at - 1] != TokenClass::Atom {
+                i += 1;
+                continue;
+            }
+            let mut start = at - 1;
+            while start > 0 && classes[start - 1] == TokenClass::Atom {
+                start -= 1;
+            }
+            let mut end = at + 1;
+            while end < chars.len() && classes[end] == TokenClass::Atom {
+                end += 1;
+            }
+            if end == at + 1 {
+                i += 1;
+                continue;
+            }
+            let byte_start = chars[start].0;
+            let byte_end = if end < chars.len() {
+                chars[end].0
+            } else {
+                text.len()
+            };
+            out.push(text[byte_start..byte_end].to_string());
+            i = end;
+        }
+        out
     }
 
     fn looks_obfuscated(text: &str) -> bool {
@@ -560,17 +670,22 @@ mod tests {
                 }
             }
             Value::String(text) => {
-                let text = canonical_text(text);
-                // One sentence-ending period is punctuation; the rest must pass.
-                for part in oracle_candidates(&text) {
+                // Find candidates on the decoded pre-NFKC text. The fold-aware
+                // scan uses NFKC only to recognize confusable separators. The
+                // allow check reads the original domain characters, so a long
+                // s or a fullwidth stop cannot become an allowed domain.
+                let decoded = decode_layers(text);
+                for part in fold_aware_candidates(&decoded) {
                     let bare = part.strip_prefix("mailto:").unwrap_or(&part);
                     let bare = bare.strip_suffix('.').unwrap_or(bare);
                     if !oracle_allowed(bare) {
                         out.push(format!("{key}: {part}"));
                     }
                 }
-                if looks_obfuscated(&text) {
-                    out.push(format!("{key}: obfuscated {text:?}"));
+                // NFKC is for obfuscation detection only, never for a domain allow.
+                let folded = canonical_text(text);
+                if looks_obfuscated(&folded) {
+                    out.push(format!("{key}: obfuscated {folded:?}"));
                 }
             }
             _ => {}
@@ -646,10 +761,23 @@ mod tests {
             "mail person@northeastern.edu.evil.com today",
             "mail x@neu.edu..",
             "mail x@neu.edu!",
+            // Long s (U+017F) and fullwidth full stop (U+FF0E) fold to an
+            // allowed domain under NFKC. The original domain is not that domain.
+            "jo@northea\u{017f}tern.edu",
+            "jo@neu\u{ff0e}edu",
         ] {
             assert!(!violations(&record("a@neu.edu", bad)).is_empty(), "{bad}");
         }
         assert!(violations(&record("a@neu.edu", "mail x@neu.edu.")).is_empty());
+    }
+
+    #[test]
+    fn raw_check_accepts_plain_northeastern_and_neu_addresses() {
+        assert!(violations(&record(
+            "jo@northeastern.edu jo@NEU.EDU",
+            "Email jo@northeastern.edu or jo@NEU.EDU today."
+        ))
+        .is_empty());
     }
 
     #[test]
