@@ -761,10 +761,23 @@ mod tests {
             "mail person@northeastern.edu.evil.com today",
             "mail x@neu.edu..",
             "mail x@neu.edu!",
+            // Long s (U+017F) and fullwidth full stop (U+FF0E) fold to an
+            // allowed domain under NFKC. The original domain is not that domain.
+            "jo@northea\u{017f}tern.edu",
+            "jo@neu\u{ff0e}edu",
         ] {
             assert!(!violations(&record("a@neu.edu", bad)).is_empty(), "{bad}");
         }
         assert!(violations(&record("a@neu.edu", "mail x@neu.edu.")).is_empty());
+    }
+
+    #[test]
+    fn raw_check_accepts_plain_northeastern_and_neu_addresses() {
+        assert!(violations(&record(
+            "jo@northeastern.edu jo@NEU.EDU",
+            "Email jo@northeastern.edu or jo@NEU.EDU today."
+        ))
+        .is_empty());
     }
 
     #[test]
