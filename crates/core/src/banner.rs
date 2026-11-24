@@ -600,13 +600,6 @@ fn session_form_body(term: &str) -> String {
 
 /// Query URL for term-scoped lookup lists (subjects, campuses, attributes). Values are percent-encoded.
 fn term_list_url(ssb: &str, endpoint: &str, term: &str, max: usize) -> String {
-    let endpoint = endpoint.strip_prefix("classSearch/").unwrap_or(endpoint);
-    let endpoint = endpoint.strip_prefix('/').unwrap_or(endpoint);
-    let endpoint = if endpoint.starts_with("get_") {
-        endpoint.to_string()
-    } else {
-        format!("get_{endpoint}")
-    };
     format!(
         "{ssb}classSearch/{endpoint}?searchTerm=&term={}&offset=1&max={max}",
         percent_encode(term)
@@ -1892,6 +1885,114 @@ mod tests {
     }
 
     #[test]
+    fn open_session_and_term_list_call_sites_pin_endpoints_and_encoded_terms() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = BannerClient {
+            base: format!("http://{}", listener.local_addr().unwrap()),
+        };
+        let server = std::thread::spawn(move || {
+            let responses = [
+                ("Set-Cookie: JSESSIONID=fixture\r\n", "{}"),
+                (
+                    "Content-Type: application/json\r\n",
+                    r#"[{"code":"CS","description":"Computer Science"}]"#,
+                ),
+                (
+                    "Content-Type: application/json\r\n",
+                    r#"[{"code":"BOS","description":"Boston"}]"#,
+                ),
+                (
+                    "Content-Type: application/json\r\n",
+                    r#"[{"code":"NU","description":"NUpath"}]"#,
+                ),
+            ];
+            let mut recorded = Vec::new();
+            for (headers, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut request_headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    request_headers.push_str(&line);
+                }
+                let request_headers = request_headers.to_ascii_lowercase();
+                let mut body_str = String::new();
+                if let Some(size) = request_headers.lines().find_map(|line| {
+                    line.strip_prefix("content-length:")?
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                }) {
+                    let mut body_bytes = vec![0; size];
+                    reader.read_exact(&mut body_bytes).unwrap();
+                    body_str = String::from_utf8(body_bytes).unwrap();
+                }
+                recorded.push((request.trim().to_string(), body_str));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            recorded
+        });
+
+        let hostile_term = "2027&x=1";
+        let session = client.open_session(hostile_term).unwrap();
+        assert_eq!(session, "JSESSIONID=fixture");
+
+        let subjects = client.fetch_subjects(hostile_term).unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].code, "CS");
+        assert_eq!(subjects[0].name, "Computer Science");
+
+        let campuses = client.fetch_campuses(hostile_term).unwrap();
+        assert_eq!(campuses.len(), 1);
+        assert_eq!(campuses[0].code, "BOS");
+        assert_eq!(campuses[0].name, "Boston");
+
+        let attributes = client.fetch_attributes(hostile_term).unwrap();
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].code, "NU");
+        assert_eq!(attributes[0].name, "NUpath");
+
+        let recorded = server.join().unwrap();
+        assert_eq!(recorded.len(), 4);
+        assert_eq!(
+            recorded[0].0,
+            "POST /StudentRegistrationSsb/ssb/term/search?mode=search HTTP/1.1"
+        );
+        assert_eq!(
+            recorded[0].1,
+            "term=2027%26x%3D1&studyPath=&studyPathText=&startDatepicker=&endDatepicker="
+        );
+        assert_eq!(
+            recorded[1].0,
+            "GET /StudentRegistrationSsb/ssb/classSearch/get_subject?searchTerm=&term=2027%26x%3D1&offset=1&max=900 HTTP/1.1"
+        );
+        assert_eq!(recorded[1].1, "");
+        assert_eq!(
+            recorded[2].0,
+            "GET /StudentRegistrationSsb/ssb/classSearch/get_campus?searchTerm=&term=2027%26x%3D1&offset=1&max=200 HTTP/1.1"
+        );
+        assert_eq!(recorded[2].1, "");
+        assert_eq!(
+            recorded[3].0,
+            "GET /StudentRegistrationSsb/ssb/classSearch/get_attribute?searchTerm=&term=2027%26x%3D1&offset=1&max=500 HTTP/1.1"
+        );
+        assert_eq!(recorded[3].1, "");
+    }
+
+    #[test]
     fn live_course_search_keeps_only_exact_matches_and_full_counts() {
         let key = CourseKey::parse("CS 3000").unwrap();
         let page = serde_json::json!({
@@ -2093,15 +2194,6 @@ mod tests {
         assert_eq!(
             term_list_url(ssb, "get_attribute", "2027/fall", 500),
             "https://x.test/ssb/classSearch/get_attribute?searchTerm=&term=2027%2Ffall&offset=1&max=500"
-        );
-        // Strips prefix if passed with classSearch/ or bare name
-        assert_eq!(
-            term_list_url(ssb, "classSearch/get_subject", "202710", 900),
-            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
-        );
-        assert_eq!(
-            term_list_url(ssb, "subject", "202710", 900),
-            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
         );
     }
 
