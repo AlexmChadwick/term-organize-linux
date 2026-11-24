@@ -1248,29 +1248,29 @@ impl BannerClient {
 
     pub fn fetch_subjects(&self, term: &str) -> Result<Vec<Subject>, String> {
         self.code_list(&term_list_url(&self.ssb(), "get_subject", term, 900))
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(code, name)| Subject { code, name })
-                .collect()
-        })
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(code, name)| Subject { code, name })
+                    .collect()
+            })
     }
 
     pub fn fetch_campuses(&self, term: &str) -> Result<Vec<Campus>, String> {
         self.code_list(&term_list_url(&self.ssb(), "get_campus", term, 200))
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(code, name)| Campus { code, name })
-                .collect()
-        })
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(code, name)| Campus { code, name })
+                    .collect()
+            })
     }
 
     pub fn fetch_attributes(&self, term: &str) -> Result<Vec<AttributeInfo>, String> {
         self.code_list(&term_list_url(&self.ssb(), "get_attribute", term, 500))
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(code, name)| AttributeInfo { code, name })
-                .collect()
-        })
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(code, name)| AttributeInfo { code, name })
+                    .collect()
+            })
     }
 
     fn code_list(&self, url: &str) -> Result<Vec<(String, String)>, String> {
