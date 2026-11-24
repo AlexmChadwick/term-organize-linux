@@ -590,6 +590,21 @@ fn section_form_body(term: &str, crn: &str) -> String {
     )
 }
 
+/// Query URL for term-scoped lookup lists (subjects, campuses, attributes). Values are percent-encoded.
+fn term_list_url(ssb: &str, endpoint: &str, term: &str, max: usize) -> String {
+    let endpoint = endpoint.strip_prefix("classSearch/").unwrap_or(endpoint);
+    let endpoint = endpoint.strip_prefix('/').unwrap_or(endpoint);
+    let endpoint = if endpoint.starts_with("get_") {
+        endpoint.to_string()
+    } else {
+        format!("get_{endpoint}")
+    };
+    format!(
+        "{ssb}classSearch/{endpoint}?searchTerm=&term={}&offset=1&max={max}",
+        percent_encode(term)
+    )
+}
+
 /// Percent-encodes everything except RFC 3986 unreserved characters.
 pub fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -1227,10 +1242,7 @@ impl BannerClient {
     }
 
     pub fn fetch_subjects(&self, term: &str) -> Result<Vec<Subject>, String> {
-        self.code_list(&format!(
-            "{}classSearch/get_subject?searchTerm=&term={term}&offset=1&max=900",
-            self.ssb()
-        ))
+        self.code_list(&term_list_url(&self.ssb(), "get_subject", term, 900))
         .map(|rows| {
             rows.into_iter()
                 .map(|(code, name)| Subject { code, name })
@@ -1239,10 +1251,7 @@ impl BannerClient {
     }
 
     pub fn fetch_campuses(&self, term: &str) -> Result<Vec<Campus>, String> {
-        self.code_list(&format!(
-            "{}classSearch/get_campus?searchTerm=&term={term}&offset=1&max=200",
-            self.ssb()
-        ))
+        self.code_list(&term_list_url(&self.ssb(), "get_campus", term, 200))
         .map(|rows| {
             rows.into_iter()
                 .map(|(code, name)| Campus { code, name })
@@ -1251,10 +1260,7 @@ impl BannerClient {
     }
 
     pub fn fetch_attributes(&self, term: &str) -> Result<Vec<AttributeInfo>, String> {
-        self.code_list(&format!(
-            "{}classSearch/get_attribute?searchTerm=&term={term}&offset=1&max=500",
-            self.ssb()
-        ))
+        self.code_list(&term_list_url(&self.ssb(), "get_attribute", term, 500))
         .map(|rows| {
             rows.into_iter()
                 .map(|(code, name)| AttributeInfo { code, name })
@@ -1743,7 +1749,7 @@ pub fn meeting_from_banner(
 mod tests {
     use super::{
         course_sections, faculty_instructors, faculty_url, parse_live_seats, search_url,
-        section_form_body, BannerClient, LiveSeat,
+        section_form_body, term_list_url, BannerClient, LiveSeat,
     };
     use crate::{catalog, model::*};
     use std::collections::HashMap;
@@ -2061,6 +2067,37 @@ mod tests {
         assert_eq!(hostile.matches('&').count(), plain.matches('&').count());
         let none = search_url("https://x.test/ssb/", "202710", None, None, 0, 20);
         assert!(!none.contains("txt_subject") && !none.contains("txt_courseNumber"));
+    }
+
+    #[test]
+    fn term_list_url_percent_encodes_term() {
+        let ssb = "https://x.test/ssb/";
+        assert_eq!(
+            term_list_url(ssb, "get_subject", "202710", 900),
+            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
+        );
+        let hostile = term_list_url(ssb, "get_subject", "2027&x=1", 900);
+        assert_eq!(
+            hostile,
+            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=2027%26x%3D1&offset=1&max=900"
+        );
+        assert_eq!(
+            term_list_url(ssb, "get_campus", "2027 10", 200),
+            "https://x.test/ssb/classSearch/get_campus?searchTerm=&term=2027%2010&offset=1&max=200"
+        );
+        assert_eq!(
+            term_list_url(ssb, "get_attribute", "2027/fall", 500),
+            "https://x.test/ssb/classSearch/get_attribute?searchTerm=&term=2027%2Ffall&offset=1&max=500"
+        );
+        // Strips prefix if passed with classSearch/ or bare name
+        assert_eq!(
+            term_list_url(ssb, "classSearch/get_subject", "202710", 900),
+            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
+        );
+        assert_eq!(
+            term_list_url(ssb, "subject", "202710", 900),
+            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
+        );
     }
 
     #[test]
