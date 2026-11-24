@@ -600,13 +600,6 @@ fn session_form_body(term: &str) -> String {
 
 /// Query URL for term-scoped lookup lists (subjects, campuses, attributes). Values are percent-encoded.
 fn term_list_url(ssb: &str, endpoint: &str, term: &str, max: usize) -> String {
-    let endpoint = endpoint.strip_prefix("classSearch/").unwrap_or(endpoint);
-    let endpoint = endpoint.strip_prefix('/').unwrap_or(endpoint);
-    let endpoint = if endpoint.starts_with("get_") {
-        endpoint.to_string()
-    } else {
-        format!("get_{endpoint}")
-    };
     format!(
         "{ssb}classSearch/{endpoint}?searchTerm=&term={}&offset=1&max={max}",
         percent_encode(term)
@@ -2093,15 +2086,6 @@ mod tests {
         assert_eq!(
             term_list_url(ssb, "get_attribute", "2027/fall", 500),
             "https://x.test/ssb/classSearch/get_attribute?searchTerm=&term=2027%2Ffall&offset=1&max=500"
-        );
-        // Strips prefix if passed with classSearch/ or bare name
-        assert_eq!(
-            term_list_url(ssb, "classSearch/get_subject", "202710", 900),
-            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
-        );
-        assert_eq!(
-            term_list_url(ssb, "subject", "202710", 900),
-            "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
         );
     }
 
