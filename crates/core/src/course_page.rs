@@ -307,12 +307,14 @@ impl<J: Send + 'static> LookupQueue<J> {
                         state = shared.ready.wait(state).unwrap();
                     }
                 };
-                if wanted(&job) {
-                    // A panicking lookup must not take the worker with it: the job (and the
-                    // reply channel inside it) is dropped by the unwind, so its page sees a
-                    // disconnect and shows an error, and later lookups still run.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)));
-                }
+                // A panicking lookup or cancel check must not take the worker with it: the
+                // job (and the reply channel inside it) is dropped by the unwind, so its page
+                // sees a disconnect and shows an error, and later lookups still run.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if wanted(&job) {
+                        run(job);
+                    }
+                }));
             });
         }
         Self { shared }
@@ -555,6 +557,45 @@ mod tests {
         );
         // With one worker, the second job only runs if the worker survived.
         assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(2));
+    }
+
+    #[test]
+    fn a_panicking_wanted_check_drops_its_reply_and_the_worker_keeps_serving() {
+        let (reply_tx, reply_rx) = mpsc::channel::<u32>();
+        let (done_tx, done_rx) = mpsc::channel::<u32>();
+        let done_tx = Mutex::new(done_tx);
+        let queue = LookupQueue::spawn(
+            1,
+            |job: &(u32, Option<mpsc::Sender<u32>>)| {
+                if job.0 == 1 {
+                    panic!("simulated wanted panic");
+                }
+                true
+            },
+            move |job| {
+                done_tx.lock().unwrap().send(job.0).unwrap();
+            },
+        );
+        queue.push((1, Some(reply_tx)));
+        queue.push((2, None));
+        // The page waiting on the job whose wanted check panicked sees a disconnect.
+        assert_eq!(
+            reply_rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        // With one worker, the second job only runs if the worker survived the panic.
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(2));
+    }
+
+    #[test]
+    fn lookup_lost_message_is_pinned_and_formats_cleanly() {
+        assert_eq!(LOOKUP_LOST_MESSAGE, "The lookup stopped unexpectedly");
+        let (heading, body) = failed_copy(&key(), "Fall 2027", LOOKUP_LOST_MESSAGE);
+        assert_eq!(heading, "CS 3500 · Couldn't check Fall 2027");
+        assert_eq!(
+            body,
+            "Banner's course catalog didn't answer, so the course's details couldn't be checked. Check your connection and open the course again. (The lookup stopped unexpectedly)"
+        );
     }
 
     #[test]
