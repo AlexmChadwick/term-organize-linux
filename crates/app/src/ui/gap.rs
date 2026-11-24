@@ -699,7 +699,7 @@ fn start_banner_lookup(shell: &Rc<RefCell<Shell>>, key: &CourseKey) {
             Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
             // The queue dropped the job because nobody wanted it, or the worker died.
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err("Banner request disconnected".into())
+                Err(course_page::LOOKUP_LOST_MESSAGE.into())
             }
         };
         let key = ticket.key().clone();

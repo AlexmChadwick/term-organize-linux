@@ -550,6 +550,46 @@ pub fn session_pages(page_count: usize, parallelism: usize) -> Vec<Vec<usize>> {
     pages
 }
 
+/// Query URL for one section's faculty meeting times. Values are percent-encoded.
+fn faculty_url(ssb: &str, term: &str, crn: &str) -> String {
+    format!(
+        "{ssb}searchResults/getFacultyMeetingTimes?term={}&courseReferenceNumber={}",
+        percent_encode(term),
+        percent_encode(crn)
+    )
+}
+
+/// Query URL for one page of section search results. Values are percent-encoded.
+fn search_url(
+    ssb: &str,
+    term: &str,
+    subject: Option<&str>,
+    number: Option<&str>,
+    offset: i32,
+    page_size: i32,
+) -> String {
+    let mut url = format!(
+        "{ssb}searchResults/searchResults?txt_term={}&pageOffset={offset}&pageMaxSize={page_size}&sortColumn=subjectDescription&sortDirection=asc",
+        percent_encode(term)
+    );
+    if let Some(subject) = subject {
+        url.push_str(&format!("&txt_subject={}", percent_encode(subject)));
+    }
+    if let Some(number) = number {
+        url.push_str(&format!("&txt_courseNumber={}", percent_encode(number)));
+    }
+    url
+}
+
+/// Form body for the per-section POST endpoints. Values are percent-encoded.
+fn section_form_body(term: &str, crn: &str) -> String {
+    format!(
+        "term={}&courseReferenceNumber={}",
+        percent_encode(term),
+        percent_encode(crn)
+    )
+}
+
 /// Percent-encodes everything except RFC 3986 unreserved characters.
 pub fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -848,11 +888,7 @@ impl BannerClient {
             .filter(|section| &section.course_key() == key)
         {
             if section.instructors.is_none() {
-                let url = format!(
-                    "{}searchResults/getFacultyMeetingTimes?term={term}&courseReferenceNumber={}",
-                    self.ssb(),
-                    section.crn
-                );
+                let url = faculty_url(&self.ssb(), term, &section.crn);
                 if let Ok(instructors) = self.get(&url).and_then(|body| faculty_instructors(&body))
                 {
                     section.instructors = Some(instructors);
@@ -949,7 +985,10 @@ impl BannerClient {
 
     pub fn open_session(&self, term: &str) -> Result<String, String> {
         let url = format!("{}term/search?mode=search", self.ssb());
-        let body = format!("term={term}&studyPath=&studyPathText=&startDatepicker=&endDatepicker=");
+        let body = format!(
+            "term={}&studyPath=&studyPathText=&startDatepicker=&endDatepicker=",
+            percent_encode(term)
+        );
         let opened = perform(|| {
             classify(
                 ureq::post(&url)
@@ -985,16 +1024,7 @@ impl BannerClient {
         offset: i32,
         page_size: i32,
     ) -> Result<serde_json::Value, String> {
-        let mut url = format!(
-            "{}searchResults/searchResults?txt_term={term}&pageOffset={offset}&pageMaxSize={page_size}&sortColumn=subjectDescription&sortDirection=asc",
-            self.ssb()
-        );
-        if let Some(subject) = subject {
-            url.push_str(&format!("&txt_subject={subject}"));
-        }
-        if let Some(number) = number {
-            url.push_str(&format!("&txt_courseNumber={number}"));
-        }
+        let url = search_url(&self.ssb(), term, subject, number, offset, page_size);
         let cookie = cookie.to_string();
         let body = perform(|| {
             classify(
@@ -1295,7 +1325,7 @@ impl BannerClient {
 
     fn post_section_form(&self, endpoint: &str, term: &str, crn: &str) -> Result<String, String> {
         let url = format!("{}searchResults/{endpoint}", self.ssb());
-        let body = format!("term={term}&courseReferenceNumber={crn}");
+        let body = section_form_body(term, crn);
         perform(|| {
             classify(
                 ureq::post(&url)
@@ -1711,7 +1741,10 @@ pub fn meeting_from_banner(
 
 #[cfg(test)]
 mod tests {
-    use super::{course_sections, faculty_instructors, parse_live_seats, BannerClient, LiveSeat};
+    use super::{
+        course_sections, faculty_instructors, faculty_url, parse_live_seats, search_url,
+        section_form_body, BannerClient, LiveSeat,
+    };
     use crate::{catalog, model::*};
     use std::collections::HashMap;
 
@@ -1978,6 +2011,56 @@ mod tests {
         assert!(!super::should_retry_status(404));
         assert!(!super::should_retry_status(400));
         assert!(!super::should_retry_status(200));
+    }
+
+    #[test]
+    fn section_requests_percent_encode_term_and_crn() {
+        let ssb = "https://x.test/ssb/";
+        assert_eq!(
+            faculty_url(ssb, "202710", "12345"),
+            "https://x.test/ssb/searchResults/getFacultyMeetingTimes?term=202710&courseReferenceNumber=12345"
+        );
+        assert_eq!(
+            faculty_url(ssb, "2027&x=1", "1 2#3"),
+            "https://x.test/ssb/searchResults/getFacultyMeetingTimes?term=2027%26x%3D1&courseReferenceNumber=1%202%233"
+        );
+        assert_eq!(
+            section_form_body("202710", "12345"),
+            "term=202710&courseReferenceNumber=12345"
+        );
+        assert_eq!(
+            section_form_body("a&b=c", "9\u{e9}&term=1"),
+            "term=a%26b%3Dc&courseReferenceNumber=9%C3%A9%26term%3D1"
+        );
+    }
+
+    #[test]
+    fn search_url_percent_encodes_term_subject_and_number() {
+        let plain = search_url(
+            "https://x.test/ssb/",
+            "202710",
+            Some("CS"),
+            Some("3500"),
+            0,
+            20,
+        );
+        assert_eq!(
+            plain,
+            "https://x.test/ssb/searchResults/searchResults?txt_term=202710&pageOffset=0&pageMaxSize=20&sortColumn=subjectDescription&sortDirection=asc&txt_subject=CS&txt_courseNumber=3500"
+        );
+        let hostile = search_url(
+            "https://x.test/ssb/",
+            "2027 10",
+            Some("C&S"),
+            Some("35#0"),
+            0,
+            20,
+        );
+        assert!(hostile.contains("txt_term=2027%2010&"));
+        assert!(hostile.ends_with("&txt_subject=C%26S&txt_courseNumber=35%230"));
+        assert_eq!(hostile.matches('&').count(), plain.matches('&').count());
+        let none = search_url("https://x.test/ssb/", "202710", None, None, 0, 20);
+        assert!(!none.contains("txt_subject") && !none.contains("txt_courseNumber"));
     }
 
     #[test]

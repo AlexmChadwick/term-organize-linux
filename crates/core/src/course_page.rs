@@ -12,7 +12,7 @@ use crate::banner::CourseFee;
 use crate::course_info::CourseInfo;
 use crate::model::*;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Result of one independent part of the page. A failed part never hides the others.
@@ -107,8 +107,6 @@ pub fn fee_line(fee: &CourseFee) -> String {
 pub struct Ticket {
     term: String,
     key: CourseKey,
-    generation: u64,
-    live: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -121,11 +119,14 @@ impl Ticket {
         &self.key
     }
 
-    /// False once the course was left, or the book was reset (a term change).
+    /// False once the course was left, or the book was reset (a term change). Both set `cancel`.
     pub fn wanted(&self) -> bool {
-        !self.cancel.load(Ordering::SeqCst) && self.live.load(Ordering::SeqCst) == self.generation
+        !self.cancel.load(Ordering::SeqCst)
     }
 }
+
+/// Shown when a lookup ends without an answer: the worker panicked or dropped the job.
+pub const LOOKUP_LOST_MESSAGE: &str = "The lookup stopped unexpectedly";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Applied {
@@ -141,7 +142,6 @@ struct Entry {
 
 /// Per-(term, course) lookup results for the pages that need them.
 pub struct LookupBook {
-    generation: Arc<AtomicU64>,
     entries: HashMap<(String, CourseKey), Entry>,
 }
 
@@ -154,7 +154,6 @@ impl Default for LookupBook {
 impl LookupBook {
     pub fn new() -> Self {
         Self {
-            generation: Arc::new(AtomicU64::new(0)),
             entries: HashMap::new(),
         }
     }
@@ -182,8 +181,6 @@ impl LookupBook {
         Some(Ticket {
             term: term.to_string(),
             key: key.clone(),
-            generation: self.generation.load(Ordering::SeqCst),
-            live: self.generation.clone(),
             cancel,
         })
     }
@@ -222,7 +219,6 @@ impl LookupBook {
 
     /// Term change: every lookup in flight becomes stale and every answer is forgotten.
     pub fn reset(&mut self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
         for entry in self.entries.values() {
             entry.cancel.store(true, Ordering::SeqCst);
         }
@@ -312,7 +308,10 @@ impl<J: Send + 'static> LookupQueue<J> {
                     }
                 };
                 if wanted(&job) {
-                    run(job);
+                    // A panicking lookup must not take the worker with it: the job (and the
+                    // reply channel inside it) is dropped by the unwind, so its page sees a
+                    // disconnect and shows an error, and later lookups still run.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)));
                 }
             });
         }
@@ -529,6 +528,33 @@ mod tests {
         assert_eq!(finished, vec![1, 3, 4]);
         assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panicking_lookup_drops_its_reply_and_the_worker_keeps_serving() {
+        let (reply_tx, reply_rx) = mpsc::channel::<u32>();
+        let (done_tx, done_rx) = mpsc::channel::<u32>();
+        let done_tx = Mutex::new(done_tx);
+        let queue = LookupQueue::spawn(
+            1,
+            |_: &(u32, Option<mpsc::Sender<u32>>)| true,
+            move |job| {
+                if job.0 == 1 {
+                    let _reply = job.1;
+                    panic!("simulated lookup panic");
+                }
+                done_tx.lock().unwrap().send(job.0).unwrap();
+            },
+        );
+        queue.push((1, Some(reply_tx)));
+        queue.push((2, None));
+        // The page waiting on the first job sees a disconnect, not a hang.
+        assert_eq!(
+            reply_rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        // With one worker, the second job only runs if the worker survived.
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(2));
     }
 
     #[test]
