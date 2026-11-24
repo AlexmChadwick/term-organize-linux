@@ -590,6 +590,14 @@ fn section_form_body(term: &str, crn: &str) -> String {
     )
 }
 
+/// Form body for the session search start endpoint. Values are percent-encoded.
+fn session_form_body(term: &str) -> String {
+    format!(
+        "term={}&studyPath=&studyPathText=&startDatepicker=&endDatepicker=",
+        percent_encode(term)
+    )
+}
+
 /// Query URL for term-scoped lookup lists (subjects, campuses, attributes). Values are percent-encoded.
 fn term_list_url(ssb: &str, endpoint: &str, term: &str, max: usize) -> String {
     let endpoint = endpoint.strip_prefix("classSearch/").unwrap_or(endpoint);
@@ -1000,10 +1008,7 @@ impl BannerClient {
 
     pub fn open_session(&self, term: &str) -> Result<String, String> {
         let url = format!("{}term/search?mode=search", self.ssb());
-        let body = format!(
-            "term={}&studyPath=&studyPathText=&startDatepicker=&endDatepicker=",
-            percent_encode(term)
-        );
+        let body = session_form_body(term);
         let opened = perform(|| {
             classify(
                 ureq::post(&url)
@@ -1749,7 +1754,7 @@ pub fn meeting_from_banner(
 mod tests {
     use super::{
         course_sections, faculty_instructors, faculty_url, parse_live_seats, search_url,
-        section_form_body, term_list_url, BannerClient, LiveSeat,
+        section_form_body, session_form_body, term_list_url, BannerClient, LiveSeat,
     };
     use crate::{catalog, model::*};
     use std::collections::HashMap;
@@ -2097,6 +2102,25 @@ mod tests {
         assert_eq!(
             term_list_url(ssb, "subject", "202710", 900),
             "https://x.test/ssb/classSearch/get_subject?searchTerm=&term=202710&offset=1&max=900"
+        );
+    }
+
+    #[test]
+    fn session_form_body_percent_encodes_term() {
+        let plain = session_form_body("202710");
+        assert_eq!(
+            plain,
+            "term=202710&studyPath=&studyPathText=&startDatepicker=&endDatepicker="
+        );
+        let hostile = session_form_body("2027&x=1");
+        assert_eq!(
+            hostile,
+            "term=2027%26x%3D1&studyPath=&studyPathText=&startDatepicker=&endDatepicker="
+        );
+        assert_eq!(hostile.matches('&').count(), plain.matches('&').count());
+        assert_eq!(
+            session_form_body("2027 10"),
+            "term=2027%2010&studyPath=&studyPathText=&startDatepicker=&endDatepicker="
         );
     }
 
