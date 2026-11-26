@@ -1752,8 +1752,15 @@ mod tests {
     use crate::{catalog, model::*};
     use std::collections::HashMap;
 
-    #[test]
-    fn course_refresh_reads_banner_endpoints_and_preserves_cached_optional_details() {
+    struct FixtureRequest {
+        line: String,
+        headers: String,
+        body: String,
+    }
+
+    fn tcp_fixture(
+        responses: impl IntoIterator<Item = (&'static str, &'static str, &'static str)> + Send + 'static,
+    ) -> (BannerClient, std::thread::JoinHandle<Vec<FixtureRequest>>) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
 
@@ -1762,70 +1769,13 @@ mod tests {
             base: format!("http://{}", listener.local_addr().unwrap()),
         };
         let server = std::thread::spawn(move || {
-            let responses = [
-                (
-                    "POST",
-                    "/term/search",
-                    "200 OK",
-                    "Set-Cookie: JSESSIONID=fixture\r\n",
-                    "{}",
-                ),
-                (
-                    "GET",
-                    "/searchResults/searchResults",
-                    "200 OK",
-                    "",
-                    r#"{"success":true,"data":[{"courseReferenceNumber":"12345","subject":"CS","courseNumber":"3000","enrollment":23,"seatsAvailable":7}]}"#,
-                ),
-                (
-                    "GET",
-                    "/searchResults/getFacultyMeetingTimes",
-                    "200 OK",
-                    "",
-                    r#"{"fmt":[{"faculty":[{"displayName":"Example, Alex","emailAddress":"alex@neu.edu"}]}]}"#,
-                ),
-                (
-                    "POST",
-                    "/searchResults/getRestrictions",
-                    "404 Not Found",
-                    "",
-                    "",
-                ),
-                (
-                    "POST",
-                    "/term/search",
-                    "200 OK",
-                    "Set-Cookie: JSESSIONID=fixture\r\n",
-                    "{}",
-                ),
-                (
-                    "GET",
-                    "/searchResults/searchResults",
-                    "200 OK",
-                    "",
-                    r#"{"success":true,"data":null}"#,
-                ),
-                (
-                    "POST",
-                    "/term/search",
-                    "200 OK",
-                    "Set-Cookie: JSESSIONID=fixture\r\n",
-                    "{}",
-                ),
-                (
-                    "GET",
-                    "/searchResults/searchResults",
-                    "200 OK",
-                    "",
-                    r#"{"success":true,"data":[{"term":"202710","courseReferenceNumber":"99999","subject":"CS","courseNumber":"3000"}]}"#,
-                ),
-            ];
-            for (method, path, status, headers, body) in responses {
+            let mut recorded = Vec::new();
+            for (status, headers, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(&mut stream);
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
-                assert!(request.starts_with(&format!("{method} /StudentRegistrationSsb/ssb{path}")));
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+
                 let mut request_headers = String::new();
                 loop {
                     let mut line = String::new();
@@ -1835,25 +1785,92 @@ mod tests {
                     request_headers.push_str(&line);
                 }
                 let request_headers = request_headers.to_ascii_lowercase();
-                if let Some(size) = request_headers.lines().find_map(|line| {
-                    line.strip_prefix("content-length:")?
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                }) {
-                    reader.read_exact(&mut vec![0; size]).unwrap();
-                }
-                assert_eq!(
-                    request_headers.contains("cookie: jsessionid=fixture"),
-                    path.ends_with("/searchResults")
-                );
+                let size = request_headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |size| size.trim().parse::<usize>().unwrap());
+                let mut request_body = vec![0; size];
+                reader.read_exact(&mut request_body).unwrap();
+                recorded.push(FixtureRequest {
+                    line: request_line.trim_end().to_owned(),
+                    headers: request_headers,
+                    body: String::from_utf8(request_body).unwrap(),
+                });
+
                 write!(
                     stream,
                     "HTTP/1.1 {status}\r\n{headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
-                ).unwrap();
+                )
+                .unwrap();
             }
+            recorded
         });
+        (client, server)
+    }
+
+    #[test]
+    fn course_refresh_reads_banner_endpoints_and_preserves_cached_optional_details() {
+        let exchanges = [
+            (
+                "POST",
+                "/term/search",
+                "200 OK",
+                "Set-Cookie: JSESSIONID=fixture\r\n",
+                "{}",
+            ),
+            (
+                "GET",
+                "/searchResults/searchResults",
+                "200 OK",
+                "",
+                r#"{"success":true,"data":[{"courseReferenceNumber":"12345","subject":"CS","courseNumber":"3000","enrollment":23,"seatsAvailable":7}]}"#,
+            ),
+            (
+                "GET",
+                "/searchResults/getFacultyMeetingTimes",
+                "200 OK",
+                "",
+                r#"{"fmt":[{"faculty":[{"displayName":"Example, Alex","emailAddress":"alex@neu.edu"}]}]}"#,
+            ),
+            (
+                "POST",
+                "/searchResults/getRestrictions",
+                "404 Not Found",
+                "",
+                "",
+            ),
+            (
+                "POST",
+                "/term/search",
+                "200 OK",
+                "Set-Cookie: JSESSIONID=fixture\r\n",
+                "{}",
+            ),
+            (
+                "GET",
+                "/searchResults/searchResults",
+                "200 OK",
+                "",
+                r#"{"success":true,"data":null}"#,
+            ),
+            (
+                "POST",
+                "/term/search",
+                "200 OK",
+                "Set-Cookie: JSESSIONID=fixture\r\n",
+                "{}",
+            ),
+            (
+                "GET",
+                "/searchResults/searchResults",
+                "200 OK",
+                "",
+                r#"{"success":true,"data":[{"term":"202710","courseReferenceNumber":"99999","subject":"CS","courseNumber":"3000"}]}"#,
+            ),
+        ];
+        let (client, server) =
+            tcp_fixture(exchanges.map(|(_, _, status, headers, body)| (status, headers, body)));
         let mut catalog: TermCatalog = serde_json::from_value(serde_json::json!({
             "version": 1,
             "term": {"code": "202730", "bannerDescription": "Spring"},
@@ -1881,70 +1898,40 @@ mod tests {
         assert!(client.refresh_course(&mut catalog, &key, 3.0).is_err());
         assert_eq!(catalog.sections_updated_at, 1.0);
         assert_eq!(catalog.sections[0].enrollment, 23);
-        server.join().unwrap();
+        let recorded = server.join().unwrap();
+        assert_eq!(recorded.len(), exchanges.len());
+        for (request, (method, path, _, _, _)) in recorded.iter().zip(exchanges) {
+            assert!(request
+                .line
+                .starts_with(&format!("{method} /StudentRegistrationSsb/ssb{path}")));
+            assert_eq!(
+                request.headers.contains("cookie: jsessionid=fixture"),
+                path.ends_with("/searchResults")
+            );
+        }
     }
 
     #[test]
     fn open_session_and_term_list_call_sites_pin_endpoints_and_encoded_terms() {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = BannerClient {
-            base: format!("http://{}", listener.local_addr().unwrap()),
-        };
-        let server = std::thread::spawn(move || {
-            let responses = [
-                ("Set-Cookie: JSESSIONID=fixture\r\n", "{}"),
-                (
-                    "Content-Type: application/json\r\n",
-                    r#"[{"code":"CS","description":"Computer Science"}]"#,
-                ),
-                (
-                    "Content-Type: application/json\r\n",
-                    r#"[{"code":"BOS","description":"Boston"}]"#,
-                ),
-                (
-                    "Content-Type: application/json\r\n",
-                    r#"[{"code":"NU","description":"NUpath"}]"#,
-                ),
-            ];
-            let mut recorded = Vec::new();
-            for (headers, body) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&mut stream);
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
-                let mut request_headers = String::new();
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
-                        break;
-                    }
-                    request_headers.push_str(&line);
-                }
-                let request_headers = request_headers.to_ascii_lowercase();
-                let mut body_str = String::new();
-                if let Some(size) = request_headers.lines().find_map(|line| {
-                    line.strip_prefix("content-length:")?
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                }) {
-                    let mut body_bytes = vec![0; size];
-                    reader.read_exact(&mut body_bytes).unwrap();
-                    body_str = String::from_utf8(body_bytes).unwrap();
-                }
-                recorded.push((request.trim().to_string(), body_str));
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
-            }
-            recorded
-        });
+        let responses = [
+            ("200 OK", "Set-Cookie: JSESSIONID=fixture\r\n", "{}"),
+            (
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"[{"code":"CS","description":"Computer Science"}]"#,
+            ),
+            (
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"[{"code":"BOS","description":"Boston"}]"#,
+            ),
+            (
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"[{"code":"NU","description":"NUpath"}]"#,
+            ),
+        ];
+        let (client, server) = tcp_fixture(responses);
 
         let hostile_term = "2027&x=1";
         let session = client.open_session(hostile_term).unwrap();
@@ -1968,28 +1955,28 @@ mod tests {
         let recorded = server.join().unwrap();
         assert_eq!(recorded.len(), 4);
         assert_eq!(
-            recorded[0].0,
+            recorded[0].line,
             "POST /StudentRegistrationSsb/ssb/term/search?mode=search HTTP/1.1"
         );
         assert_eq!(
-            recorded[0].1,
+            recorded[0].body,
             "term=2027%26x%3D1&studyPath=&studyPathText=&startDatepicker=&endDatepicker="
         );
         assert_eq!(
-            recorded[1].0,
+            recorded[1].line,
             "GET /StudentRegistrationSsb/ssb/classSearch/get_subject?searchTerm=&term=2027%26x%3D1&offset=1&max=900 HTTP/1.1"
         );
-        assert_eq!(recorded[1].1, "");
+        assert_eq!(recorded[1].body, "");
         assert_eq!(
-            recorded[2].0,
+            recorded[2].line,
             "GET /StudentRegistrationSsb/ssb/classSearch/get_campus?searchTerm=&term=2027%26x%3D1&offset=1&max=200 HTTP/1.1"
         );
-        assert_eq!(recorded[2].1, "");
+        assert_eq!(recorded[2].body, "");
         assert_eq!(
-            recorded[3].0,
+            recorded[3].line,
             "GET /StudentRegistrationSsb/ssb/classSearch/get_attribute?searchTerm=&term=2027%26x%3D1&offset=1&max=500 HTTP/1.1"
         );
-        assert_eq!(recorded[3].1, "");
+        assert_eq!(recorded[3].body, "");
     }
 
     #[test]
